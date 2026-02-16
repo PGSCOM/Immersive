@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+out/
+*.obj
+*.o
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.sys
+*.cat
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+*.swp
+*~
+
+# Godot
+.godot/
+*.import
+export_presets.cfg
+*.translation
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Temporary
+tmp/
+*.tmp
+*.log
