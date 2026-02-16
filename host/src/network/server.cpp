@@ -296,17 +296,12 @@ private:
 
         while (running_) {
             protocol::ControlHeader header;
-            int received = recv(sock, reinterpret_cast<char*>(&header),
-                                sizeof(header), MSG_WAITALL);
-
-            if (received <= 0) break;
+            if (!recv_exact(sock, &header, sizeof(header))) break;
 
             // Read payload
             std::vector<uint8_t> payload(header.length);
             if (header.length > 0) {
-                received = recv(sock, reinterpret_cast<char*>(payload.data()),
-                                static_cast<int>(header.length), MSG_WAITALL);
-                if (received <= 0) break;
+                if (!recv_exact(sock, payload.data(), header.length)) break;
             }
 
             // Dispatch by message type
@@ -391,6 +386,20 @@ private:
 
         std::cout << "[Server] Client " << client_id << " disconnected\n";
         if (on_disconnected_) on_disconnected_(client_id);
+    }
+
+    /// Receive exactly `size` bytes from a TCP socket.
+    /// Returns true on success, false on error or disconnect.
+    static bool recv_exact(SocketType sock, void* buf, size_t size) {
+        char* ptr = reinterpret_cast<char*>(buf);
+        size_t remaining = size;
+        while (remaining > 0) {
+            int n = recv(sock, ptr, static_cast<int>(remaining), 0);
+            if (n <= 0) return false;
+            ptr += n;
+            remaining -= static_cast<size_t>(n);
+        }
+        return true;
     }
 
     static void send_tcp(SocketType sock, const void* data, size_t size) {

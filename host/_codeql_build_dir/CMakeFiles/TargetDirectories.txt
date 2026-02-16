@@ -1,0 +1,3 @@
+/home/runner/work/Immersive-2/Immersive-2/host/_codeql_build_dir/CMakeFiles/immersive2_host.dir
+/home/runner/work/Immersive-2/Immersive-2/host/_codeql_build_dir/CMakeFiles/edit_cache.dir
+/home/runner/work/Immersive-2/Immersive-2/host/_codeql_build_dir/CMakeFiles/rebuild_cache.dir
