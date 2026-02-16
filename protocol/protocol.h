@@ -6,6 +6,14 @@
 #include <cstdint>
 #include <cstring>
 
+#ifdef INPUT_MOUSE
+#undef INPUT_MOUSE
+#endif
+
+#ifdef INPUT_KEYBOARD
+#undef INPUT_KEYBOARD
+#endif
+
 namespace immersive {
 namespace protocol {
 
