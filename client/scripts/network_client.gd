@@ -148,13 +148,18 @@ func _send_control_message(msg_type: int, payload: PackedByteArray) -> void:
 
 func _read_tcp_messages() -> void:
 	while tcp_client.get_available_bytes() >= 5:
-		# Read header
+		# Read header (5 bytes: 1 type + 4 length)
 		var header_data := tcp_client.get_data(5)
 		if header_data[0] != OK:
 			return
 		var header: PackedByteArray = header_data[1]
 		var msg_type: int = header[0]
 		var msg_length: int = header.decode_u32(1)
+
+		# Sanity check: reject unreasonably large messages (> 1 MB)
+		if msg_length > 1048576:
+			print("[Network] Rejecting oversized message: %d bytes" % msg_length)
+			return
 
 		# Read payload
 		if msg_length > 0:
