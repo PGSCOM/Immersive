@@ -46,20 +46,22 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip
+          sudo apt-get install -y curl unzip
 
       - name: Install Godot headless and templates
         run: |
           set -euo pipefail
           GODOT_VERSION="4.3"
           GODOT_RELEASE="stable"
-          GODOT_ZIP="Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64.zip"
-          GODOT_TPZ="Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_export_templates.tpz"
-          GODOT_URL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/${GODOT_ZIP}"
-          TEMPLATE_URL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/${GODOT_TPZ}"
+          GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
+          GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
+          GODOT_TPZ="Godot_v${GODOT_TAG}_export_templates.tpz"
+          GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}"
 
-          wget -q "${GODOT_URL}"
-          wget -q "${TEMPLATE_URL}"
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o "${GODOT_ZIP}" "${GODOT_BASE_URL}/${GODOT_ZIP}"
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o "${GODOT_TPZ}" "${GODOT_BASE_URL}/${GODOT_TPZ}"
 
           unzip -q "${GODOT_ZIP}"
           sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
