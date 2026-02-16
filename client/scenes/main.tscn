@@ -1,0 +1,46 @@
+[gd_scene load_steps=5 format=3 uid="uid://main_scene"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/screen_panel.gd" id="2_screen"]
+[ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
+[ext_resource type="Shader" path="res://shaders/screen.gdshader" id="4_shader"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_screen"]
+shader = ExtResource("4_shader")
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_screen"]
+size = Vector2(1.6, 0.9)
+orientation = 2
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="XROrigin3D" type="XROrigin3D" parent="."]
+
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
+tracker = &"left_hand"
+
+[node name="RightController" type="XRController3D" parent="XROrigin3D"]
+tracker = &"right_hand"
+script = ExtResource("3_input")
+
+[node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightController"]
+
+[node name="RayCast3D" type="RayCast3D" parent="XROrigin3D/RightController/RaycastOrigin"]
+target_position = Vector3(0, 0, -10)
+
+[node name="LaserPointer" type="MeshInstance3D" parent="XROrigin3D/RightController/RaycastOrigin"]
+
+[node name="ScreenPanel" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, -2)
+mesh = SubResource("PlaneMesh_screen")
+material_override = SubResource("ShaderMaterial_screen")
+script = ExtResource("2_screen")
+
+[node name="Environment" type="WorldEnvironment" parent="."]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 5, 0)
