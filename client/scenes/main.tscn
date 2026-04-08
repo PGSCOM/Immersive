@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3 uid="uid://main_scene"]
+[gd_scene load_steps=8 format=3 uid="uid://main_scene"]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/screen_panel.gd" id="2_screen"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/ui_overlay.gd" id="4_overlay"]
 [ext_resource type="Shader" path="res://shaders/screen.gdshader" id="5_shader"]
 [ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
+[ext_resource type="Script" path="res://scripts/hand_input.gd" id="7_hand_input"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_screen"]
 shader = ExtResource("5_shader")
@@ -36,6 +37,9 @@ tracker = &"left_hand"
 [node name="RightController" type="XRController3D" parent="XROrigin3D"]
 tracker = &"right_hand"
 script = ExtResource("3_input")
+
+[node name="HandInput" type="Node" parent="."]
+script = ExtResource("7_hand_input")
 
 [node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightController"]
 

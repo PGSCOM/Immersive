@@ -11,9 +11,6 @@ extends XRController3D
 ## Reference to the main scene controller.
 @onready var main_scene: Node3D = get_node("/root/Main")
 
-## Reference to the screen panel.
-@onready var screen_panel: MeshInstance3D = get_node("/root/Main/ScreenPanel")
-
 ## Reference to the virtual keyboard (added in main.tscn).
 @onready var virtual_keyboard: Node3D = get_node_or_null("/root/Main/VirtualKeyboard")
 
@@ -32,6 +29,8 @@ var _thumbstick: Vector2 = Vector2.ZERO
 
 ## Last known UV position on the screen.
 var _last_uv: Vector2 = Vector2(-1, -1)
+## Last panel under pointer.
+var _active_panel: MeshInstance3D = null
 
 ## Scale-mode: grip is held while thumbstick Y is used to resize.
 var _scale_mode: bool = false
@@ -51,24 +50,23 @@ func _process(delta: float) -> void:
 
 ## Update the laser pointer and detect screen intersection.
 func _update_pointer() -> void:
-	if not screen_panel or not raycast:
+	if not raycast:
 		return
 
 	raycast.force_raycast_update()
 
 	if raycast.is_colliding():
-		var collision_point: Vector3 = raycast.get_collision_point()
+		if main_scene and main_scene.has_method("get_panel_hit_from_ray"):
+			var ray_origin: Vector3 = raycast.global_transform.origin
+			var ray_direction: Vector3 = (-raycast.global_transform.basis.z).normalized()
+			var hit: Dictionary = main_scene.get_panel_hit_from_ray(ray_origin, ray_direction)
+			if hit.get("valid", false):
+				_active_panel = hit.get("panel", null)
+				active_monitor_id = hit.get("monitor_id", 0)
+				_last_uv = hit.get("uv", Vector2(-1, -1))
 
-		# Convert to screen UV coordinates
-		if screen_panel.has_method("world_to_screen_uv"):
-			var uv: Vector2 = screen_panel.world_to_screen_uv(collision_point)
-
-			if uv.x >= 0 and uv.y >= 0:
-				_last_uv = uv
-
-				# Convert to pixel coordinates
-				if screen_panel.has_method("uv_to_pixel"):
-					var pixel: Vector2i = screen_panel.uv_to_pixel(uv)
+				if _active_panel and _active_panel.has_method("uv_to_pixel"):
+					var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 
 					# Send mouse move (no buttons pressed during hover)
 					var buttons: int = 0
@@ -96,8 +94,8 @@ func _update_scale(delta: float) -> void:
 	if abs(_thumbstick.y) > 0.15:
 		_scale_mode = true
 		var delta_scale: float = _thumbstick.y * delta * 0.8
-		if screen_panel and screen_panel.has_method("scale_panel"):
-			screen_panel.scale_panel(delta_scale)
+		if _active_panel and _active_panel.has_method("scale_panel"):
+			_active_panel.scale_panel(delta_scale)
 
 # ---------------------------------------------------------------------------
 # Controller button pressed
@@ -156,10 +154,10 @@ func _on_button_released(button_name: String) -> void:
 func _send_click(button_mask: int) -> void:
 	if _last_uv.x < 0:
 		return
-	if not screen_panel or not screen_panel.has_method("uv_to_pixel"):
+	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
 
-	var pixel: Vector2i = screen_panel.uv_to_pixel(_last_uv)
+	var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 	if main_scene.has_method("send_mouse_input"):
 		main_scene.send_mouse_input(
 			active_monitor_id,
@@ -170,10 +168,10 @@ func _send_click(button_mask: int) -> void:
 func _send_release(button_mask: int) -> void:
 	if _last_uv.x < 0:
 		return
-	if not screen_panel or not screen_panel.has_method("uv_to_pixel"):
+	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
 
-	var pixel: Vector2i = screen_panel.uv_to_pixel(_last_uv)
+	var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 	if main_scene.has_method("send_mouse_input"):
 		main_scene.send_mouse_input(
 			active_monitor_id,
@@ -196,8 +194,8 @@ func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 		# Otherwise map thumbstick Y to scroll
 		if abs(value.y) > 0.1 and _last_uv.x >= 0:
 			var scroll: int = int(value.y * 120)
-			if screen_panel.has_method("uv_to_pixel"):
-				var pixel: Vector2i = screen_panel.uv_to_pixel(_last_uv)
+			if _active_panel and _active_panel.has_method("uv_to_pixel"):
+				var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 				if main_scene.has_method("send_mouse_input"):
 					main_scene.send_mouse_input(
 						active_monitor_id,

@@ -195,6 +195,37 @@ func _apply_visual_settings_to_all_panels() -> void:
 		if is_instance_valid(panel):
 			_apply_panel_visual_settings(panel)
 
+## Resolve which streamed panel is hit by a world-space ray.
+## Returns { valid: bool, panel: MeshInstance3D, uv: Vector2, distance: float, monitor_id: int }.
+func get_panel_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	var best_panel: MeshInstance3D = null
+	var best_uv := Vector2(0.5, 0.5)
+	var best_distance := INF
+
+	for panel in screen_panels:
+		if not is_instance_valid(panel) or not panel.has_method("ray_to_screen_hit"):
+			continue
+		var hit: Dictionary = panel.ray_to_screen_hit(ray_origin, ray_direction)
+		if not hit.get("valid", false):
+			continue
+
+		var dist: float = hit.get("distance", INF)
+		if dist < best_distance:
+			best_distance = dist
+			best_panel = panel
+			best_uv = hit.get("uv", Vector2(0.5, 0.5))
+
+	if best_panel == null:
+		return {"valid": false}
+
+	return {
+		"valid": true,
+		"panel": best_panel,
+		"uv": best_uv,
+		"distance": best_distance,
+		"monitor_id": int(best_panel.get_meta("monitor_id", 0))
+	}
+
 # ---------------------------------------------------------------------------
 # UI Overlay
 # ---------------------------------------------------------------------------
@@ -393,22 +424,9 @@ func _update_foveation_focus() -> void:
 	var ray := _resolve_gaze_ray()
 	var ray_origin: Vector3 = ray["origin"]
 	var ray_direction: Vector3 = ray["direction"]
-
-	var best_panel: MeshInstance3D = null
-	var best_uv := Vector2(0.5, 0.5)
-	var best_distance := INF
-
-	for panel in screen_panels:
-		if not is_instance_valid(panel) or not panel.has_method("ray_to_screen_hit"):
-			continue
-		var hit: Dictionary = panel.ray_to_screen_hit(ray_origin, ray_direction)
-		if not hit.get("valid", false):
-			continue
-		var dist: float = hit.get("distance", INF)
-		if dist < best_distance:
-			best_distance = dist
-			best_panel = panel
-			best_uv = hit.get("uv", Vector2(0.5, 0.5))
+	var hit := get_panel_hit_from_ray(ray_origin, ray_direction)
+	var best_panel: MeshInstance3D = hit.get("panel", null)
+	var best_uv: Vector2 = hit.get("uv", Vector2(0.5, 0.5))
 
 	for panel in screen_panels:
 		if not is_instance_valid(panel) or not panel.has_method("set_foveation_focus_uv"):

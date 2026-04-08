@@ -163,6 +163,8 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 | Right grip + thumbstick Y | Scale screen panel up/down |
 | Right thumbstick | Scroll (when pointer is on screen) |
 | A / X button (left controller) | Toggle virtual QWERTY keyboard |
+| Right hand pinch (no controller) | Pointer click/drag via hand tracking |
+| Left hand pinch-hold (no controller) | Toggle UI overlay |
 
 ## MVP Roadmap
 
@@ -190,13 +192,13 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - [x] Screen resize/scale in VR (grip + thumbstick Y)
 - [x] Curved screen mode (toggle + strength control in VR overlay)
 - [x] Eye-tracking based foveated rendering (OpenXR eye gaze + head-gaze fallback)
+- [x] Hand tracking support (pinch pointer/click, no controllers required)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
 - [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
 - [x] IDD virtual display driver (Auto-creates self-signed certificates, no test-signing or WHQL required)
 
 ### Planned / Future
-- [ ] Hand tracking support (without controllers)
 - [ ] Workspace save/restore (remember screen positions)
 - [ ] macOS/Linux host support
 - [ ] Web client (WebXR)
