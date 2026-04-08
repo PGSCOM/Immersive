@@ -24,6 +24,8 @@ signal add_screen_panel(monitor_id: int, slot: int)
 signal screen_curvature_changed(enabled: bool, amount: float)
 ## Emitted when foveated rendering settings change.
 signal foveation_settings_changed(enabled: bool, strength: float)
+## Emitted when passthrough mode is toggled.
+signal passthrough_toggled(enabled: bool)
 ## Emitted when workspace save is requested.
 signal workspace_save_requested
 ## Emitted when workspace restore is requested.
@@ -54,6 +56,8 @@ var _curved_enabled: bool = false
 var _curvature_amount: float = 0.18
 var _foveation_enabled: bool = false
 var _foveation_strength: float = 0.55
+var _passthrough_enabled: bool = false
+var _passthrough_supported: bool = true
 
 # Config file path
 const CONFIG_PATH := "user://immersive2_config.cfg"
@@ -78,6 +82,7 @@ var _lbl_curvature_value: Label
 var _chk_foveation: CheckBox
 var _slider_foveation: HSlider
 var _lbl_foveation_value: Label
+var _chk_passthrough: CheckBox
 var _btn_workspace_save: Button
 var _btn_workspace_restore: Button
 
@@ -139,6 +144,11 @@ func set_foveation_settings(enabled: bool, strength: float) -> void:
 	_foveation_enabled = enabled
 	_foveation_strength = clamp(strength, 0.0, 1.0)
 	_update_foveation_ui()
+
+func set_passthrough_settings(enabled: bool, supported: bool = true) -> void:
+	_passthrough_enabled = enabled
+	_passthrough_supported = supported
+	_update_passthrough_ui()
 
 # ---------------------------------------------------------------------------
 # Internal — UI construction
@@ -266,6 +276,15 @@ func _build_ui() -> void:
 	_lbl_foveation_value.text = "%.2f" % _foveation_strength
 	foveation_strength_row.add_child(_lbl_foveation_value)
 	_update_foveation_ui()
+
+	var passthrough_row := HBoxContainer.new()
+	vbox.add_child(passthrough_row)
+	_chk_passthrough = CheckBox.new()
+	_chk_passthrough.text = "Passthrough background (mixed reality)"
+	_chk_passthrough.button_pressed = _passthrough_enabled
+	_chk_passthrough.toggled.connect(_on_passthrough_toggled)
+	passthrough_row.add_child(_chk_passthrough)
+	_update_passthrough_ui()
 
 	# Separator
 	vbox.add_child(HSeparator.new())
@@ -416,6 +435,12 @@ func _on_foveation_strength_changed(value: float) -> void:
 	_save_config()
 	foveation_settings_changed.emit(_foveation_enabled, _foveation_strength)
 
+func _on_passthrough_toggled(enabled: bool) -> void:
+	_passthrough_enabled = enabled
+	_update_passthrough_ui()
+	_save_config()
+	passthrough_toggled.emit(_passthrough_enabled)
+
 func _update_curvature_ui() -> void:
 	if _chk_curved:
 		_chk_curved.button_pressed = _curved_enabled
@@ -433,6 +458,15 @@ func _update_foveation_ui() -> void:
 		_slider_foveation.editable = _foveation_enabled
 	if _lbl_foveation_value:
 		_lbl_foveation_value.text = "%.2f" % _foveation_strength
+
+func _update_passthrough_ui() -> void:
+	if _chk_passthrough:
+		_chk_passthrough.button_pressed = _passthrough_enabled
+		_chk_passthrough.disabled = not _passthrough_supported
+		if _passthrough_supported:
+			_chk_passthrough.tooltip_text = ""
+		else:
+			_chk_passthrough.tooltip_text = "OpenXR runtime does not support passthrough"
 
 func _on_workspace_save_pressed() -> void:
 	workspace_save_requested.emit()
@@ -453,6 +487,7 @@ func _save_config() -> void:
 	cfg.set_value("display", "curved_amount", _curvature_amount)
 	cfg.set_value("display", "foveation_enabled", _foveation_enabled)
 	cfg.set_value("display", "foveation_strength", _foveation_strength)
+	cfg.set_value("display", "passthrough_enabled", _passthrough_enabled)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -465,3 +500,4 @@ func _load_config() -> void:
 		_curvature_amount = cfg.get_value("display", "curved_amount", 0.18)
 		_foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		_foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
+		_passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)

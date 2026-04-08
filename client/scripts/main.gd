@@ -38,6 +38,7 @@ var curved_screen_enabled: bool = false
 var curved_screen_amount: float = 0.18
 var foveation_enabled: bool = false
 var foveation_strength: float = 0.55
+var passthrough_enabled: bool = false
 
 var available_monitors: Array = []
 
@@ -97,6 +98,7 @@ func _init_xr() -> void:
 		print("[Immersive-2] OpenXR initialized")
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 		get_viewport().use_xr = true
+		_apply_passthrough_settings()
 	else:
 		print("[Immersive-2] OpenXR not available, running in desktop mode")
 
@@ -253,6 +255,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
 	if ui_overlay.has_signal("foveation_settings_changed"):
 		ui_overlay.foveation_settings_changed.connect(_on_overlay_foveation_settings_changed)
+	if ui_overlay.has_signal("passthrough_toggled"):
+		ui_overlay.passthrough_toggled.connect(_on_overlay_passthrough_toggled)
 	if ui_overlay.has_signal("workspace_save_requested"):
 		ui_overlay.workspace_save_requested.connect(_on_overlay_workspace_save_requested)
 	if ui_overlay.has_signal("workspace_restore_requested"):
@@ -262,6 +266,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
 	if ui_overlay.has_method("set_foveation_settings"):
 		ui_overlay.set_foveation_settings(foveation_enabled, foveation_strength)
+	if ui_overlay.has_method("set_passthrough_settings"):
+		ui_overlay.set_passthrough_settings(passthrough_enabled, _is_passthrough_supported())
 
 func _update_overlay_state() -> void:
 	if ui_overlay and ui_overlay.has_method("set_state"):
@@ -409,6 +415,11 @@ func _on_overlay_foveation_settings_changed(enabled: bool, strength: float) -> v
 	foveation_enabled = enabled
 	foveation_strength = clamp(strength, 0.0, 1.0)
 	_apply_visual_settings_to_all_panels()
+	_save_config()
+
+func _on_overlay_passthrough_toggled(enabled: bool) -> void:
+	passthrough_enabled = enabled
+	_apply_passthrough_settings()
 	_save_config()
 
 func _on_overlay_workspace_save_requested() -> void:
@@ -608,6 +619,38 @@ func _mark_workspace_restored_if_complete() -> void:
 	if restored_count >= min(_workspace_monitor_ids.size(), MAX_SCREENS):
 		_pending_workspace_restore = false
 
+func _is_passthrough_supported() -> bool:
+	if not xr_interface or not xr_interface.is_initialized():
+		return false
+	var supported_modes: Array = xr_interface.get_supported_environment_blend_modes()
+	return XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in supported_modes
+
+func _apply_passthrough_settings() -> void:
+	var viewport := get_viewport()
+	if not xr_interface or not xr_interface.is_initialized():
+		viewport.transparent_bg = false
+		return
+
+	var passthrough_supported := _is_passthrough_supported()
+	if passthrough_enabled and not passthrough_supported:
+		passthrough_enabled = false
+		print("[Immersive-2] Passthrough is not supported by this OpenXR runtime")
+
+	var target_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
+	if passthrough_enabled:
+		target_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND
+
+	if not xr_interface.set_environment_blend_mode(target_mode):
+		if passthrough_enabled:
+			passthrough_enabled = false
+			xr_interface.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_OPAQUE)
+			print("[Immersive-2] Failed to enable passthrough, falling back to opaque mode")
+
+	viewport.transparent_bg = passthrough_enabled
+
+	if ui_overlay and ui_overlay.has_method("set_passthrough_settings"):
+		ui_overlay.set_passthrough_settings(passthrough_enabled, passthrough_supported)
+
 # ---------------------------------------------------------------------------
 # Config persistence
 # ---------------------------------------------------------------------------
@@ -621,6 +664,7 @@ func _save_config() -> void:
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
 	cfg.set_value("display", "foveation_enabled", foveation_enabled)
 	cfg.set_value("display", "foveation_strength", foveation_strength)
+	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -633,3 +677,4 @@ func _load_config() -> void:
 		curved_screen_amount = cfg.get_value("display", "curved_amount", 0.18)
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
+		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)

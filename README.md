@@ -231,6 +231,7 @@ Then open:
 - [x] Workspace save/restore (panel transform + monitor assignments)
 - [x] macOS/Linux host support (portable mode + CI builds)
 - [x] Web client (WebXR + browser bridge)
+- [x] Passthrough background mode (mixed reality in supported headsets)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
 - [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
