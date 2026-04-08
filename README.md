@@ -11,12 +11,12 @@ screens as floating panels. VR controller input is sent back to the PC.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│        Host (Windows full / Linux+macOS portable mode)          │
+│        Host (Windows full / Linux+macOS portable mode)           │
 │                                                                  │
-│  ┌─────────────┐   ┌──────────────┐   ┌───────────────────────┐ │
-│  │ IDD Virtual  │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
-│  │ Display      │   │ Capture      │   │ MJPEG (sw) / NVENC /  │ │
-│  │ Driver       │   └──────────────┘   │ AMF / QSV (hw)        │ │
+│  ┌─────────────┐   ┌──────────────┐    ┌───────────────────────┐ │
+│  │ IDD Virtual │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
+│  │ Display     │   │ Capture      │    │ MJPEG (sw) / NVENC /  │ │
+│  │ Driver      │   └──────────────┘    │ AMF / QSV (hw)        │ │
 │  └─────────────┘                       └──────────┬────────────┘ │
 │                                                   │              │
 │                                                   ▼              │
@@ -41,11 +41,11 @@ screens as floating panels. VR controller input is sent back to the PC.
 │  │ (pointer + keyboard) │   │ (up to 3 floating panels)        │ │
 │  └──────────────────────┘   └──────────────────────────────────┘ │
 │                                                                  │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ UI Overlay (toggle with B/Y or O key)                        │ │
-│  │  • Connection status   • Host IP field   • Monitor list      │ │
-│  │  • Latency indicator   • Connect button                      │ │
-│  └──────────────────────────────────────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ UI Overlay (toggle with B/Y or O key)                        ││
+│  │  • Connection status   • Host IP field   • Monitor list      ││
+│  │  • Latency indicator   • Connect button                      ││
+│  └──────────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────┘
 ```
 
