@@ -76,12 +76,15 @@ Immersive-2/
 │   ├── scripts/
 │   │   ├── main.gd          # Scene controller, multi-monitor, auto-reconnect
 │   │   ├── network_client.gd# TCP/UDP client + latency probing
-│   │   ├── screen_panel.gd  # Virtual screen panel (drag + MJPEG decode)
+│   │   ├── screen_panel.gd  # Virtual screen panel (drag + resize + MJPEG decode)
 │   │   ├── ui_overlay.gd    # VR UI (status, IP, monitors, ping)
-│   │   ├── video_decoder.gd # Video frame decoder
-│   │   └── vr_input.gd      # VR controller input handler
+│   │   ├── video_decoder.gd # MJPEG / H.264 MediaCodec decoder
+│   │   ├── vr_input.gd      # VR controller input handler
+│   │   ├── virtual_keyboard.gd # VR QWERTY keyboard
+│   │   └── audio_receiver.gd   # UDP audio receiver + AudioStreamGenerator
 │   ├── scenes/
-│   │   └── main.tscn        # Main scene (3 screen slots + UI overlay)
+│   │   ├── main.tscn        # Main scene (3 screen slots + UI overlay + keyboard)
+│   │   └── virtual_keyboard.tscn # Virtual keyboard scene
 │   └── shaders/
 │       └── screen.gdshader  # Custom screen shader
 ├── protocol/
@@ -157,7 +160,9 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 | B / Y button | Toggle UI overlay |
 | Right trigger | Click / interact with UI |
 | Right grip (hold) | Grab and reposition screen panel |
+| Right grip + thumbstick Y | Scale screen panel up/down |
 | Right thumbstick | Scroll (when pointer is on screen) |
+| A / X button (left controller) | Toggle virtual QWERTY keyboard |
 
 ## MVP Roadmap
 
@@ -178,19 +183,25 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - [x] Auto-reconnect on disconnect
 - [x] Host IP config persistence
 - [x] CI/CD (GitHub Actions: Windows host + Godot export)
+- [x] Real DXGI frame capture (Desktop Duplication API)
+- [x] Input injection (mouse + keyboard via SendInput)
+- [x] Media Foundation hardware encoder (NVENC/AMF/QSV via MFT, Windows 8+)
+- [x] Virtual keyboard in VR (QWERTY + modifiers, A/X button toggle)
+- [x] Screen resize/scale in VR (grip + thumbstick Y)
+- [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
+- [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
 
 ### In Progress
-- [ ] Real DXGI frame capture (DDA API)
-- [ ] NVENC / AMF / QSV hardware encoder integration
-- [ ] Input injection (mouse + keyboard via SendInput)
+- [ ] H.264 hardware decode on Android (MediaCodec path wired in; requires GDExtension for full YUV→RGBA conversion)
+- [ ] IDD virtual display driver (detection implemented; create/destroy requires WDK + driver signing — see [docs/IDD_DRIVER.md](docs/IDD_DRIVER.md))
 
-### Planned
-- [ ] Virtual keyboard in VR
-- [ ] IDD virtual display driver (for custom resolutions)
-- [ ] H.264 decode via MediaCodec on Android
-- [ ] Screen resize/scale in VR
-- [ ] Audio streaming
-- [ ] Multi-client support
+### Planned / Future
+- [ ] Curved screen mode
+- [ ] Eye-tracking based foveated rendering
+- [ ] Hand tracking support (without controllers)
+- [ ] Workspace save/restore (remember screen positions)
+- [ ] macOS/Linux host support
+- [ ] Web client (WebXR)
 
 ## Protocol
 

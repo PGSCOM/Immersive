@@ -87,7 +87,9 @@ jobs:
       - name: Install Android SDK packages
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses
+          # Use printf instead of `yes` to avoid SIGPIPE broken pipe error
+          # when sdkmanager closes stdin after reading all license confirmations
+          printf 'y\n%.0s' {1..20} | sdkmanager --licenses || true
           sdkmanager "platforms;android-32" "build-tools;33.0.2" "ndk;25.2.9519653"
 
       - name: Export client builds
