@@ -161,7 +161,7 @@ func _build_keyboard() -> void:
 		# Calculate total row width
 		var total_width: float = 0.0
 		for key_def in row:
-			var mult: float = key_def.size() >= 3 ? float(key_def[2]) : 1.0
+			var mult: float = float(key_def[2]) if key_def.size() >= 3 else 1.0
 			total_width += KEY_WIDTH * mult + KEY_GAP
 		total_width -= KEY_GAP
 
@@ -171,7 +171,7 @@ func _build_keyboard() -> void:
 		for key_def in row:
 			var label: String = key_def[0]
 			var vk:    int    = key_def[1]
-			var mult:  float  = key_def.size() >= 3 ? float(key_def[2]) : 1.0
+			var mult:  float  = float(key_def[2]) if key_def.size() >= 3 else 1.0
 			var kw:    float  = KEY_WIDTH * mult
 			var cx:    float  = x + kw / 2.0
 

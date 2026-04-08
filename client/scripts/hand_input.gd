@@ -149,7 +149,7 @@ func _compute_pinch_strength(tracker: XRHandTracker) -> float:
 	var index_tip := _joint_world_position(tracker, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP)
 	var dist := thumb_tip.distance_to(index_tip)
 
-	var normalized := 1.0 - clamp(
+	var normalized: float = 1.0 - clampf(
 		(dist - MIN_PINCH_DISTANCE_M) / (MAX_PINCH_DISTANCE_M - MIN_PINCH_DISTANCE_M),
 		0.0,
 		1.0)

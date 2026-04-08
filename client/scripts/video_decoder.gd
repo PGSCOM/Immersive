@@ -132,8 +132,9 @@ func initialize(width: int, height: int, codec: int = 2) -> bool:
 		_mediacodec_available = _try_init_mediacodec(width, height, "video/hevc")
 
 	_initialized = true
-	var codec_name := ["H.264", "H.265", "MJPEG"].get(_codec) if _codec < 3 else "Unknown"
-	var hw_tag    := " [MediaCodec]" if _mediacodec_available else ""
+	var codec_names: Array[String] = ["H.264", "H.265", "MJPEG"]
+	var codec_name: String = codec_names[_codec] if _codec >= 0 and _codec < codec_names.size() else "Unknown"
+	var hw_tag: String = " [MediaCodec]" if _mediacodec_available else ""
 	print("[VideoDecoder] Initialized: %dx%d codec=%d (%s)%s" % [width, height, codec, codec_name, hw_tag])
 	return true
 
