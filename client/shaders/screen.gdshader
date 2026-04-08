@@ -25,6 +25,36 @@ uniform float curvature : hint_range(0.0, 0.5) = 0.0;
 // 1 for NV12 YUV format (from MediaCodec), 0 for RGBA/MJPEG
 uniform int is_yuv : hint_range(0, 1) = 0;
 
+// Eye-tracked foveated rendering controls.
+uniform int foveation_enabled : hint_range(0, 1) = 0;
+uniform vec2 gaze_uv = vec2(0.5, 0.5);
+uniform float foveation_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float foveation_inner_radius : hint_range(0.05, 0.5) = 0.18;
+uniform float foveation_outer_radius : hint_range(0.2, 1.0) = 0.72;
+
+vec4 sample_screen_color(vec2 sample_uv) {
+    if (is_yuv == 1) {
+        // NV12 decoding in L8 texture
+        // Y data is in the top 2/3 of the texture
+        float y = texture(screen_texture, vec2(sample_uv.x, sample_uv.y * (2.0 / 3.0))).r;
+
+        // UV data is interleaved in the bottom 1/3
+        vec2 uv_pixel = vec2(sample_uv.x, (2.0 / 3.0) + (sample_uv.y / 3.0));
+        float u = texture(screen_texture, uv_pixel).r - 0.5;
+        float v = texture(screen_texture, uv_pixel + vec2(0.001, 0.0)).r - 0.5;
+
+        y = 1.1643835 * (y - 0.0625);
+        return vec4(
+            y + 1.5960267 * v,
+            y - 0.3917622 * u - 0.8129680 * v,
+            y + 2.0172321 * u,
+            1.0
+        );
+    }
+
+    return texture(screen_texture, sample_uv);
+}
+
 void fragment() {
     vec2 uv = UV;
 
@@ -47,32 +77,23 @@ void fragment() {
     vec2 inner_uv = (uv - border_width) / (1.0 - 2.0 * border_width);
     inner_uv = clamp(inner_uv, 0.0, 1.0);
 
-    vec4 color;
-    if (is_yuv == 1) {
-        // NV12 decoding in L8 texture
-        // Y data is in the top 2/3 of the texture
-        float y = texture(screen_texture, vec2(inner_uv.x, inner_uv.y * (2.0 / 3.0))).r;
-        
-        // UV data is interleaved in the bottom 1/3
-        // Calculate U and V offsets
-        vec2 uv_pixel = vec2(inner_uv.x, (2.0 / 3.0) + (inner_uv.y / 3.0));
-        
-        // NV12 format has U and V alternating (U is even px, V is odd px)
-        // We can approximate by taking nearest or just standard UV sample 
-        // if the hardware filter is linear. Let's do simple conversion:
-        float u = texture(screen_texture, uv_pixel).r - 0.5;
-        // Since V is the next byte, we shift our X coordinate by 1 pixel assuming NV12.
-        // Actually, just approximating with linear filter works decently, but we offset X slightly.
-        float v = texture(screen_texture, uv_pixel + vec2(0.001, 0.0)).r - 0.5;
-        
-        y = 1.1643835 * (y - 0.0625);
-        color.r = y + 1.5960267 * v;
-        color.g = y - 0.3917622 * u - 0.8129680 * v;
-        color.b = y + 2.0172321 * u;
-        color.a = 1.0;
-    } else {
-        // Sample the normal screen texture
-        color = texture(screen_texture, inner_uv);
+    vec4 color = sample_screen_color(inner_uv);
+
+    if (foveation_enabled == 1 && foveation_strength > 0.001) {
+        float dist_to_gaze = distance(inner_uv, clamp(gaze_uv, vec2(0.0), vec2(1.0)));
+        float peripheral = smoothstep(foveation_inner_radius, foveation_outer_radius, dist_to_gaze);
+        float foveation_mix = clamp(peripheral * foveation_strength, 0.0, 1.0);
+
+        // Periphery uses increasingly coarse UV buckets to emulate lower detail.
+        vec2 tex_size = vec2(textureSize(screen_texture, 0));
+        float bucket_px = mix(1.0, 8.0, foveation_mix);
+        vec2 bucket_uv = (floor(inner_uv * tex_size / bucket_px) * bucket_px + (bucket_px * 0.5)) / tex_size;
+        bucket_uv = clamp(bucket_uv, vec2(0.0), vec2(1.0));
+
+        vec4 coarse_color = sample_screen_color(bucket_uv);
+        float coarse_luma = dot(coarse_color.rgb, vec3(0.299, 0.587, 0.114));
+        coarse_color.rgb = mix(coarse_color.rgb, vec3(coarse_luma), 0.15 * foveation_mix);
+        color = mix(color, coarse_color, foveation_mix);
     }
 
     // Apply brightness and contrast

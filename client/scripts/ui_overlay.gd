@@ -22,6 +22,8 @@ signal monitor_selected(monitor_id: int)
 signal add_screen_panel(monitor_id: int, slot: int)
 ## Emitted when curved display mode settings change.
 signal screen_curvature_changed(enabled: bool, amount: float)
+## Emitted when foveated rendering settings change.
+signal foveation_settings_changed(enabled: bool, strength: float)
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -46,6 +48,8 @@ var _udp_port: int = 19801
 var _visible_overlay: bool = false
 var _curved_enabled: bool = false
 var _curvature_amount: float = 0.18
+var _foveation_enabled: bool = false
+var _foveation_strength: float = 0.55
 
 # Config file path
 const CONFIG_PATH := "user://immersive2_config.cfg"
@@ -67,6 +71,9 @@ var _lbl_title: Label
 var _chk_curved: CheckBox
 var _slider_curvature: HSlider
 var _lbl_curvature_value: Label
+var _chk_foveation: CheckBox
+var _slider_foveation: HSlider
+var _lbl_foveation_value: Label
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -121,6 +128,11 @@ func set_screen_curvature(enabled: bool, amount: float) -> void:
 	_curved_enabled = enabled
 	_curvature_amount = clamp(amount, 0.0, 0.5)
 	_update_curvature_ui()
+
+func set_foveation_settings(enabled: bool, strength: float) -> void:
+	_foveation_enabled = enabled
+	_foveation_strength = clamp(strength, 0.0, 1.0)
+	_update_foveation_ui()
 
 # ---------------------------------------------------------------------------
 # Internal — UI construction
@@ -222,6 +234,32 @@ func _build_ui() -> void:
 	_lbl_curvature_value.text = "%.2f" % _curvature_amount
 	curvature_row.add_child(_lbl_curvature_value)
 	_update_curvature_ui()
+
+	var foveation_row := HBoxContainer.new()
+	vbox.add_child(foveation_row)
+	_chk_foveation = CheckBox.new()
+	_chk_foveation.text = "Eye-tracked foveated rendering"
+	_chk_foveation.button_pressed = _foveation_enabled
+	_chk_foveation.toggled.connect(_on_foveation_toggled)
+	foveation_row.add_child(_chk_foveation)
+
+	var foveation_strength_row := HBoxContainer.new()
+	vbox.add_child(foveation_strength_row)
+	var foveation_lbl := Label.new()
+	foveation_lbl.text = "Foveation strength"
+	foveation_strength_row.add_child(foveation_lbl)
+	_slider_foveation = HSlider.new()
+	_slider_foveation.min_value = 0.0
+	_slider_foveation.max_value = 1.0
+	_slider_foveation.step = 0.01
+	_slider_foveation.value = _foveation_strength
+	_slider_foveation.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_slider_foveation.value_changed.connect(_on_foveation_strength_changed)
+	foveation_strength_row.add_child(_slider_foveation)
+	_lbl_foveation_value = Label.new()
+	_lbl_foveation_value.text = "%.2f" % _foveation_strength
+	foveation_strength_row.add_child(_lbl_foveation_value)
+	_update_foveation_ui()
 
 	# Separator
 	vbox.add_child(HSeparator.new())
@@ -349,6 +387,18 @@ func _on_curvature_value_changed(value: float) -> void:
 	_save_config()
 	screen_curvature_changed.emit(_curved_enabled, _curvature_amount)
 
+func _on_foveation_toggled(enabled: bool) -> void:
+	_foveation_enabled = enabled
+	_update_foveation_ui()
+	_save_config()
+	foveation_settings_changed.emit(_foveation_enabled, _foveation_strength)
+
+func _on_foveation_strength_changed(value: float) -> void:
+	_foveation_strength = clamp(value, 0.0, 1.0)
+	_update_foveation_ui()
+	_save_config()
+	foveation_settings_changed.emit(_foveation_enabled, _foveation_strength)
+
 func _update_curvature_ui() -> void:
 	if _chk_curved:
 		_chk_curved.button_pressed = _curved_enabled
@@ -357,6 +407,15 @@ func _update_curvature_ui() -> void:
 		_slider_curvature.editable = _curved_enabled
 	if _lbl_curvature_value:
 		_lbl_curvature_value.text = "%.2f" % _curvature_amount
+
+func _update_foveation_ui() -> void:
+	if _chk_foveation:
+		_chk_foveation.button_pressed = _foveation_enabled
+	if _slider_foveation:
+		_slider_foveation.value = _foveation_strength
+		_slider_foveation.editable = _foveation_enabled
+	if _lbl_foveation_value:
+		_lbl_foveation_value.text = "%.2f" % _foveation_strength
 
 # ---------------------------------------------------------------------------
 # Config persistence
@@ -369,6 +428,8 @@ func _save_config() -> void:
 	cfg.set_value("network", "udp_port", _udp_port)
 	cfg.set_value("display", "curved_enabled", _curved_enabled)
 	cfg.set_value("display", "curved_amount", _curvature_amount)
+	cfg.set_value("display", "foveation_enabled", _foveation_enabled)
+	cfg.set_value("display", "foveation_strength", _foveation_strength)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -379,3 +440,5 @@ func _load_config() -> void:
 		_udp_port = cfg.get_value("network", "udp_port", 19801)
 		_curved_enabled = cfg.get_value("display", "curved_enabled", false)
 		_curvature_amount = cfg.get_value("display", "curved_amount", 0.18)
+		_foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
+		_foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)

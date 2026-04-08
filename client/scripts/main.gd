@@ -35,6 +35,8 @@ var host_tcp_port: int = 19800
 var host_udp_port: int = 19801
 var curved_screen_enabled: bool = false
 var curved_screen_amount: float = 0.18
+var foveation_enabled: bool = false
+var foveation_strength: float = 0.55
 
 var available_monitors: Array = []
 
@@ -49,6 +51,7 @@ var ui_overlay: Node = null
 
 ## XR interface.
 var xr_interface: XRInterface = null
+var eye_gaze_controller: XRController3D = null
 
 # Reconnect timer
 var _reconnect_timer: float = 0.0
@@ -67,6 +70,7 @@ var _latency_ms: float = 0.0
 func _ready() -> void:
 	_load_config()
 	_init_xr()
+	_init_eye_gaze_controller()
 	_init_network()
 	_init_ui_overlay()
 	print("[Immersive-2] VR Client started — press B/Y to open overlay")
@@ -74,6 +78,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_handle_reconnect(delta)
 	_handle_latency_probe(delta)
+	_update_foveation_focus()
 
 # ---------------------------------------------------------------------------
 # XR initialisation
@@ -87,6 +92,17 @@ func _init_xr() -> void:
 		get_viewport().use_xr = true
 	else:
 		print("[Immersive-2] OpenXR not available, running in desktop mode")
+
+func _init_eye_gaze_controller() -> void:
+	if not xr_origin:
+		return
+
+	eye_gaze_controller = XRController3D.new()
+	eye_gaze_controller.name = "EyeGazeController"
+	eye_gaze_controller.tracker = &"/user/eyes_ext"
+	eye_gaze_controller.set("pose", &"eye_pose")
+	eye_gaze_controller.visible = false
+	xr_origin.add_child(eye_gaze_controller)
 
 # ---------------------------------------------------------------------------
 # Network
@@ -171,6 +187,8 @@ func _ensure_panel(slot: int) -> MeshInstance3D:
 func _apply_panel_visual_settings(panel: MeshInstance3D) -> void:
 	if panel and panel.has_method("set_curvature"):
 		panel.set_curvature(curved_screen_enabled, curved_screen_amount)
+	if panel and panel.has_method("set_foveation"):
+		panel.set_foveation(foveation_enabled, foveation_strength)
 
 func _apply_visual_settings_to_all_panels() -> void:
 	for panel in screen_panels:
@@ -195,9 +213,13 @@ func _init_ui_overlay() -> void:
 		ui_overlay.monitor_selected.connect(_on_overlay_monitor_selected)
 	if ui_overlay.has_signal("screen_curvature_changed"):
 		ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
+	if ui_overlay.has_signal("foveation_settings_changed"):
+		ui_overlay.foveation_settings_changed.connect(_on_overlay_foveation_settings_changed)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
+	if ui_overlay.has_method("set_foveation_settings"):
+		ui_overlay.set_foveation_settings(foveation_enabled, foveation_strength)
 
 func _update_overlay_state() -> void:
 	if ui_overlay and ui_overlay.has_method("set_state"):
@@ -327,6 +349,12 @@ func _on_overlay_screen_curvature_changed(enabled: bool, amount: float) -> void:
 	_apply_visual_settings_to_all_panels()
 	_save_config()
 
+func _on_overlay_foveation_settings_changed(enabled: bool, strength: float) -> void:
+	foveation_enabled = enabled
+	foveation_strength = clamp(strength, 0.0, 1.0)
+	_apply_visual_settings_to_all_panels()
+	_save_config()
+
 # ---------------------------------------------------------------------------
 # Input handling
 # ---------------------------------------------------------------------------
@@ -358,6 +386,58 @@ func _input(event: InputEvent) -> void:
 			KEY_ESCAPE:
 				get_tree().quit()
 
+func _update_foveation_focus() -> void:
+	if not foveation_enabled:
+		return
+
+	var ray := _resolve_gaze_ray()
+	var ray_origin: Vector3 = ray["origin"]
+	var ray_direction: Vector3 = ray["direction"]
+
+	var best_panel: MeshInstance3D = null
+	var best_uv := Vector2(0.5, 0.5)
+	var best_distance := INF
+
+	for panel in screen_panels:
+		if not is_instance_valid(panel) or not panel.has_method("ray_to_screen_hit"):
+			continue
+		var hit: Dictionary = panel.ray_to_screen_hit(ray_origin, ray_direction)
+		if not hit.get("valid", false):
+			continue
+		var dist: float = hit.get("distance", INF)
+		if dist < best_distance:
+			best_distance = dist
+			best_panel = panel
+			best_uv = hit.get("uv", Vector2(0.5, 0.5))
+
+	for panel in screen_panels:
+		if not is_instance_valid(panel) or not panel.has_method("set_foveation_focus_uv"):
+			continue
+		if panel == best_panel:
+			panel.set_foveation_focus_uv(best_uv)
+		else:
+			panel.set_foveation_focus_uv(Vector2(0.5, 0.5))
+
+func _resolve_gaze_ray() -> Dictionary:
+	var origin := xr_camera.global_transform.origin
+	var direction := (-xr_camera.global_transform.basis.z).normalized()
+
+	if is_instance_valid(eye_gaze_controller):
+		var has_tracking := false
+		if eye_gaze_controller.has_method("get_has_tracking_data"):
+			has_tracking = eye_gaze_controller.get_has_tracking_data()
+		elif eye_gaze_controller.has_method("is_active"):
+			has_tracking = eye_gaze_controller.is_active()
+
+		if has_tracking:
+			origin = eye_gaze_controller.global_transform.origin
+			direction = (-eye_gaze_controller.global_transform.basis.z).normalized()
+
+	return {
+		"origin": origin,
+		"direction": direction
+	}
+
 # ---------------------------------------------------------------------------
 # Config persistence
 # ---------------------------------------------------------------------------
@@ -369,6 +449,8 @@ func _save_config() -> void:
 	cfg.set_value("network", "udp_port", host_udp_port)
 	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
+	cfg.set_value("display", "foveation_enabled", foveation_enabled)
+	cfg.set_value("display", "foveation_strength", foveation_strength)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -379,3 +461,5 @@ func _load_config() -> void:
 		host_udp_port = cfg.get_value("network", "udp_port", 19801)
 		curved_screen_enabled = cfg.get_value("display", "curved_enabled", false)
 		curved_screen_amount = cfg.get_value("display", "curved_amount", 0.18)
+		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
+		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)

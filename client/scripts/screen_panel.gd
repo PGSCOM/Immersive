@@ -15,6 +15,7 @@ extends MeshInstance3D
 
 const SCREEN_SHADER_PATH := "res://shaders/screen.gdshader"
 const DEFAULT_CURVATURE := 0.18
+const DEFAULT_FOVEATION_STRENGTH := 0.55
 
 ## Screen texture that receives decoded frames.
 var screen_texture: ImageTexture
@@ -38,6 +39,11 @@ var _latency_ms: float = 0.0
 ## Curved-screen mode state.
 var _curved_mode: bool = false
 var _curvature_amount: float = DEFAULT_CURVATURE
+
+## Eye-tracked foveated rendering state.
+var _foveation_enabled: bool = false
+var _foveation_strength: float = DEFAULT_FOVEATION_STRENGTH
+var _foveation_focus_uv: Vector2 = Vector2(0.5, 0.5)
 
 # Drag state
 var _is_dragging: bool         = false
@@ -93,6 +99,16 @@ func set_curvature(enabled: bool, amount: float) -> void:
 	_curved_mode = enabled
 	_curvature_amount = clamp(amount, 0.0, 0.5)
 	_apply_curvature_to_material()
+
+func set_foveation(enabled: bool, strength: float) -> void:
+	_foveation_enabled = enabled
+	_foveation_strength = clamp(strength, 0.0, 1.0)
+	_apply_foveation_to_material()
+
+func set_foveation_focus_uv(uv: Vector2) -> void:
+	_foveation_focus_uv = Vector2(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0))
+	if material_override is ShaderMaterial:
+		(material_override as ShaderMaterial).set_shader_parameter("gaze_uv", _foveation_focus_uv)
 
 ## Update the screen texture with new video frame data.
 ## frame_data may be:
@@ -173,6 +189,33 @@ func _follow_controller() -> void:
 ## Returns Vector2(-1, -1) if the point is not on the screen plane.
 func world_to_screen_uv(world_pos: Vector3) -> Vector2:
 	var local_pos: Vector3 = global_transform.affine_inverse() * world_pos
+	return _local_to_uv(local_pos)
+
+## Ray/screen intersection helper used by gaze-based foveation.
+## Returns { valid: bool, uv: Vector2, distance: float }.
+func ray_to_screen_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	var local_origin: Vector3 = global_transform.affine_inverse() * ray_origin
+	var local_dir: Vector3 = global_transform.basis.inverse() * ray_direction
+
+	if abs(local_dir.z) < 0.0001:
+		return {"valid": false}
+
+	var t: float = -local_origin.z / local_dir.z
+	if t < 0.0:
+		return {"valid": false}
+
+	var local_hit: Vector3 = local_origin + local_dir * t
+	var uv := _local_to_uv(local_hit)
+	if uv.x < 0.0:
+		return {"valid": false}
+
+	return {
+		"valid": true,
+		"uv": uv,
+		"distance": t
+	}
+
+func _local_to_uv(local_pos: Vector3) -> Vector2:
 
 	# The panel faces -Z (FACE_Z orientation); points on the panel have z ≈ 0
 	if abs(local_pos.z) > 0.02:
@@ -227,12 +270,20 @@ func _apply_texture() -> void:
 		material_override = new_mat
 
 	_apply_curvature_to_material()
+	_apply_foveation_to_material()
 
 func _apply_curvature_to_material() -> void:
 	if material_override is ShaderMaterial:
 		var mat := material_override as ShaderMaterial
 		var value := _curvature_amount if _curved_mode else 0.0
 		mat.set_shader_parameter("curvature", value)
+
+func _apply_foveation_to_material() -> void:
+	if material_override is ShaderMaterial:
+		var mat := material_override as ShaderMaterial
+		mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
+		mat.set_shader_parameter("foveation_strength", _foveation_strength)
+		mat.set_shader_parameter("gaze_uv", _foveation_focus_uv)
 
 func _create_latency_label() -> void:
 	_latency_label = Label3D.new()
