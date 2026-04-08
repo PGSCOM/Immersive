@@ -176,6 +176,10 @@ jobs:
           cp -R "${CLIENT_DIR}/scripts" "${CI_PROJECT_DIR}/scripts"
           cp -R "${CLIENT_DIR}/shaders" "${CI_PROJECT_DIR}/shaders"
 
+          # Godot 4.3 expects gradle_build/use_gradle_build for Android Gradle exports.
+          # Ensure CI uses the Gradle path required by OpenXR and SDK overrides.
+          sed -i 's/^gradle_build\/use_gradle_build=.*/gradle_build\/use_gradle_build=true/' "${CI_PROJECT_DIR}/export_presets.cfg"
+
           # XR init can crash on GitHub runners without a real runtime/device.
           sed -i 's/openxr\/enabled=true/openxr\/enabled=false/g' "${CI_PROJECT_DIR}/project.godot"
 
@@ -193,6 +197,7 @@ jobs:
 
           # Export Android (APK)
           xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" \
+            --install-android-build-template \
             --export-debug "Android" \
             "${CLIENT_DIR}/export/android/Immersive2.apk"
 
