@@ -93,8 +93,17 @@ Immersive-2/
 │   ├── ARCHITECTURE.md
 │   ├── BUILDING.md
 │   └── PROTOCOL.md
+├── web/
+│   ├── bridge/
+│   │   └── bridge.js       # Node bridge: host TCP/UDP -> HTTP/MJPEG
+│   ├── client/
+│   │   ├── index.html      # Browser control UI + stream preview
+│   │   ├── vr.html         # WebXR scene
+│   │   ├── app.js
+│   │   └── styles.css
+│   └── README.md
 └── .github/workflows/
-    └── build.yml            # CI: Windows host + Godot client builds
+  └── build.yml            # CI: Windows/Linux/macOS host + Godot client builds
 ```
 
 ## Requirements
@@ -109,7 +118,11 @@ Immersive-2/
 ### VR Client
 - Godot Engine 4.3+
 - Meta Quest 2/3/Pro or Pico 4 (developer mode enabled)
-- Wi-Fi connection to the Windows host
+- Wi-Fi connection to the host machine
+
+### Web Client (Optional)
+- Node.js 20+
+- Chromium-based browser with WebXR support (for `vr.html`)
 
 ## Quick Start
 
@@ -154,6 +167,17 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - Click **Connect**
 - Select a monitor from the list
 - The monitor streams as a floating panel in VR
+
+### 4. Run the Web Client (WebXR)
+
+```bash
+node web/bridge/bridge.js --connect --host 127.0.0.1 --tcp-port 19800 --udp-port 19801 --port 19810
+```
+
+Then open:
+
+- `http://localhost:19810/` (desktop controls + stream preview)
+- `http://localhost:19810/vr.html` (WebXR scene)
 
 ## Key Bindings (Desktop Mode)
 
@@ -206,13 +230,11 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - [x] Hand tracking support (pinch pointer/click, no controllers required)
 - [x] Workspace save/restore (panel transform + monitor assignments)
 - [x] macOS/Linux host support (portable mode + CI builds)
+- [x] Web client (WebXR + browser bridge)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
 - [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
 - [x] IDD virtual display driver (Auto-creates self-signed certificates, no test-signing or WHQL required)
-
-### Planned / Future
-- [ ] Web client (WebXR)
 
 ## Protocol
 

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Immersive-2 Web Client</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <div>
+        <h1 class="title">Immersive-2 WebXR Client</h1>
+        <p class="subtitle">Browser control surface + MJPEG stream preview with one-click WebXR scene.</p>
+      </div>
+      <div class="badge">Bridge over HTTP + MJPEG</div>
+    </header>
+
+    <section class="grid">
+      <aside class="panel controls">
+        <h2>Connection</h2>
+
+        <div class="field">
+          <label for="host">Host IP</label>
+          <input id="host" type="text" value="127.0.0.1" />
+        </div>
+
+        <div class="field">
+          <label for="tcpPort">TCP Port</label>
+          <input id="tcpPort" type="number" value="19800" />
+        </div>
+
+        <div class="field">
+          <label for="udpPort">UDP Port</label>
+          <input id="udpPort" type="number" value="19801" />
+        </div>
+
+        <div class="actions">
+          <button id="connectBtn" class="primary">Connect Host</button>
+          <button id="disconnectBtn" class="warn">Disconnect</button>
+        </div>
+
+        <div class="field">
+          <label for="monitorId">Monitor</label>
+          <select id="monitorId"></select>
+        </div>
+
+        <div class="actions">
+          <button id="selectBtn">Select Monitor</button>
+          <button id="refreshBtn" class="ghost">Refresh State</button>
+        </div>
+
+        <div class="status-box" id="statusBox"></div>
+      </aside>
+
+      <section class="panel viewer">
+        <div class="viewer-top">
+          <h2>Live Stream</h2>
+          <button id="vrBtn" class="primary">Open WebXR Scene</button>
+        </div>
+
+        <div class="viewer-frame">
+          <img id="streamImg" alt="Immersive stream" />
+        </div>
+
+        <p class="tip" id="streamMeta"></p>
+        <p class="tip">Tip: run the bridge with --connect to auto-connect on startup. WebXR support depends on browser/device.</p>
+      </section>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

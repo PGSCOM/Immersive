@@ -149,6 +149,22 @@ godot --headless \
 
 ---
 
+## Running the Web Client (WebXR)
+
+The web client uses a lightweight Node.js bridge that translates the native
+host protocol into browser-friendly HTTP/MJPEG endpoints.
+
+```bash
+node web/bridge/bridge.js --connect --host 127.0.0.1 --tcp-port 19800 --udp-port 19801 --port 19810
+```
+
+Open:
+
+- `http://localhost:19810/` for the desktop web control panel
+- `http://localhost:19810/vr.html` for the WebXR scene
+
+---
+
 ## Running the Full System
 
 ### Basic Setup
