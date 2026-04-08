@@ -95,7 +95,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip xvfb libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1-mesa-dri libgl1 libglx-mesa0 mesa-utils pulseaudio
+          sudo apt-get install -y curl unzip xvfb libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1-mesa-dri libgl1 libglx-mesa0 mesa-utils pulseaudio mesa-vulkan-drivers vulkan-tools libopenxr-loader1
 
       - name: Install Godot headless and templates
         run: |
@@ -161,25 +161,24 @@ jobs:
           mkdir -p "${WORKSPACE}/client/export/windows"
           mkdir -p "${WORKSPACE}/client/export/android"
 
-          # Run in CI-safe mode: no display, no real audio device, and recovery mode.
+          # Run in CI-safe mode: use virtual framebuffer for real display context
           GODOT_COMMON_ARGS=(
-            --headless
+            --verbose
             --audio-driver Dummy
-            --rendering-driver opengl3
             --path "${WORKSPACE}/client/project"
           )
 
           # Import project first (generates .godot/ cache)
-          godot "${GODOT_COMMON_ARGS[@]}" --import || true
+          xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" --import || true
           sleep 5
 
           # Export Windows Desktop
-          godot "${GODOT_COMMON_ARGS[@]}" \
+          xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Windows Desktop" \
             "${WORKSPACE}/client/export/windows/Immersive2.exe"
 
           # Export Android (APK)
-          godot "${GODOT_COMMON_ARGS[@]}" \
+          xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Android" \
             "${WORKSPACE}/client/export/android/Immersive2.apk"
 
