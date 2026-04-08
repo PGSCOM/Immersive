@@ -13,6 +13,9 @@ extends MeshInstance3D
 # State
 # ---------------------------------------------------------------------------
 
+const SCREEN_SHADER_PATH := "res://shaders/screen.gdshader"
+const DEFAULT_CURVATURE := 0.18
+
 ## Screen texture that receives decoded frames.
 var screen_texture: ImageTexture
 ## Current screen image.
@@ -31,6 +34,10 @@ var is_active: bool = false
 
 ## Current latency (ms) displayed in corner.
 var _latency_ms: float = 0.0
+
+## Curved-screen mode state.
+var _curved_mode: bool = false
+var _curvature_amount: float = DEFAULT_CURVATURE
 
 # Drag state
 var _is_dragging: bool         = false
@@ -62,8 +69,6 @@ func _process(_delta: float) -> void:
 func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	screen_width  = width
 	screen_height = height
-	if decoder:
-		decoder.initialize(width, height, codec)
 
 	# Update panel aspect ratio
 	var aspect: float = float(width) / float(height)
@@ -82,6 +87,12 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	is_active = true
 	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m" %
 		[width, height, panel_width, panel_height])
+
+## Enable/disable curved mode and set curvature amount.
+func set_curvature(enabled: bool, amount: float) -> void:
+	_curved_mode = enabled
+	_curvature_amount = clamp(amount, 0.0, 0.5)
+	_apply_curvature_to_material()
 
 ## Update the screen texture with new video frame data.
 ## frame_data may be:
@@ -205,14 +216,23 @@ func _apply_texture() -> void:
 	var mat := material_override
 	if mat is ShaderMaterial:
 		(mat as ShaderMaterial).set_shader_parameter("screen_texture", screen_texture)
-	elif mat is StandardMaterial3D:
-		(mat as StandardMaterial3D).albedo_texture = screen_texture
 	else:
-		# Create a default material if none exists
-		var new_mat := StandardMaterial3D.new()
-		new_mat.albedo_texture = screen_texture
-		new_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# Create shader-based material so curved mode can be toggled at runtime.
+		var shader := load(SCREEN_SHADER_PATH) as Shader
+		var new_mat := ShaderMaterial.new()
+		if shader:
+			new_mat.shader = shader
+		new_mat.set_shader_parameter("screen_texture", screen_texture)
+		new_mat.set_shader_parameter("is_yuv", 0)
 		material_override = new_mat
+
+	_apply_curvature_to_material()
+
+func _apply_curvature_to_material() -> void:
+	if material_override is ShaderMaterial:
+		var mat := material_override as ShaderMaterial
+		var value := _curvature_amount if _curved_mode else 0.0
+		mat.set_shader_parameter("curvature", value)
 
 func _create_latency_label() -> void:
 	_latency_label = Label3D.new()

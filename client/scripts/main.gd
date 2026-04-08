@@ -33,6 +33,8 @@ var current_state: State = State.DISCONNECTED
 var host_ip: String    = "192.168.1.100"
 var host_tcp_port: int = 19800
 var host_udp_port: int = 19801
+var curved_screen_enabled: bool = false
+var curved_screen_amount: float = 0.18
 
 var available_monitors: Array = []
 
@@ -162,8 +164,18 @@ func _ensure_panel(slot: int) -> MeshInstance3D:
 
 	if not is_instance_valid(screen_panels[slot]):
 		screen_panels[slot] = _create_screen_panel(slot)
+		_apply_panel_visual_settings(screen_panels[slot])
 
 	return screen_panels[slot]
+
+func _apply_panel_visual_settings(panel: MeshInstance3D) -> void:
+	if panel and panel.has_method("set_curvature"):
+		panel.set_curvature(curved_screen_enabled, curved_screen_amount)
+
+func _apply_visual_settings_to_all_panels() -> void:
+	for panel in screen_panels:
+		if is_instance_valid(panel):
+			_apply_panel_visual_settings(panel)
 
 # ---------------------------------------------------------------------------
 # UI Overlay
@@ -181,6 +193,11 @@ func _init_ui_overlay() -> void:
 		ui_overlay.connect_requested.connect(_on_overlay_connect_requested)
 	if ui_overlay.has_signal("monitor_selected"):
 		ui_overlay.monitor_selected.connect(_on_overlay_monitor_selected)
+	if ui_overlay.has_signal("screen_curvature_changed"):
+		ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
+
+	if ui_overlay.has_method("set_screen_curvature"):
+		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
 
 func _update_overlay_state() -> void:
 	if ui_overlay and ui_overlay.has_method("set_state"):
@@ -261,6 +278,7 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 	var panel := _ensure_panel(min(slot, MAX_SCREENS - 1))
 	if panel and panel.has_method("set_resolution"):
 		panel.set_resolution(width, height, codec)
+		_apply_panel_visual_settings(panel)
 		panel.set_meta("monitor_id", monitor_id)
 
 func _on_video_frame(frame_data: PackedByteArray, width: int, height: int) -> void:
@@ -303,6 +321,12 @@ func _on_overlay_connect_requested(ip: String, tcp_port: int, udp_port: int) -> 
 func _on_overlay_monitor_selected(monitor_id: int) -> void:
 	select_monitor(monitor_id, 0)
 
+func _on_overlay_screen_curvature_changed(enabled: bool, amount: float) -> void:
+	curved_screen_enabled = enabled
+	curved_screen_amount = clamp(amount, 0.0, 0.5)
+	_apply_visual_settings_to_all_panels()
+	_save_config()
+
 # ---------------------------------------------------------------------------
 # Input handling
 # ---------------------------------------------------------------------------
@@ -343,6 +367,8 @@ func _save_config() -> void:
 	cfg.set_value("network", "host_ip", host_ip)
 	cfg.set_value("network", "tcp_port", host_tcp_port)
 	cfg.set_value("network", "udp_port", host_udp_port)
+	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
+	cfg.set_value("display", "curved_amount", curved_screen_amount)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -351,3 +377,5 @@ func _load_config() -> void:
 		host_ip       = cfg.get_value("network", "host_ip", "192.168.1.100")
 		host_tcp_port = cfg.get_value("network", "tcp_port", 19800)
 		host_udp_port = cfg.get_value("network", "udp_port", 19801)
+		curved_screen_enabled = cfg.get_value("display", "curved_enabled", false)
+		curved_screen_amount = cfg.get_value("display", "curved_amount", 0.18)

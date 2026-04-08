@@ -20,6 +20,8 @@ signal connect_requested(ip: String, tcp_port: int, udp_port: int)
 signal monitor_selected(monitor_id: int)
 ## Emitted when the user requests to add a second or third screen panel.
 signal add_screen_panel(monitor_id: int, slot: int)
+## Emitted when curved display mode settings change.
+signal screen_curvature_changed(enabled: bool, amount: float)
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -42,6 +44,8 @@ var _host_ip: String = "192.168.1.100"
 var _tcp_port: int = 19800
 var _udp_port: int = 19801
 var _visible_overlay: bool = false
+var _curved_enabled: bool = false
+var _curvature_amount: float = 0.18
 
 # Config file path
 const CONFIG_PATH := "user://immersive2_config.cfg"
@@ -60,6 +64,9 @@ var _input_ip: LineEdit
 var _btn_connect: Button
 var _monitor_list: VBoxContainer
 var _lbl_title: Label
+var _chk_curved: CheckBox
+var _slider_curvature: HSlider
+var _lbl_curvature_value: Label
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -109,6 +116,11 @@ func set_monitor_list(monitors: Array) -> void:
 ## Update the displayed latency value (in milliseconds).
 func set_latency(ms: float) -> void:
 	_ping_ms = ms
+
+func set_screen_curvature(enabled: bool, amount: float) -> void:
+	_curved_enabled = enabled
+	_curvature_amount = clamp(amount, 0.0, 0.5)
+	_update_curvature_ui()
 
 # ---------------------------------------------------------------------------
 # Internal — UI construction
@@ -182,6 +194,34 @@ func _build_ui() -> void:
 	_btn_connect.text = "Connect"
 	_btn_connect.pressed.connect(_on_connect_pressed)
 	vbox.add_child(_btn_connect)
+
+	# Display controls
+	vbox.add_child(HSeparator.new())
+	var curved_row := HBoxContainer.new()
+	vbox.add_child(curved_row)
+	_chk_curved = CheckBox.new()
+	_chk_curved.text = "Curved screen mode"
+	_chk_curved.button_pressed = _curved_enabled
+	_chk_curved.toggled.connect(_on_curved_toggled)
+	curved_row.add_child(_chk_curved)
+
+	var curvature_row := HBoxContainer.new()
+	vbox.add_child(curvature_row)
+	var curvature_lbl := Label.new()
+	curvature_lbl.text = "Curve strength"
+	curvature_row.add_child(curvature_lbl)
+	_slider_curvature = HSlider.new()
+	_slider_curvature.min_value = 0.0
+	_slider_curvature.max_value = 0.5
+	_slider_curvature.step = 0.01
+	_slider_curvature.value = _curvature_amount
+	_slider_curvature.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_slider_curvature.value_changed.connect(_on_curvature_value_changed)
+	curvature_row.add_child(_slider_curvature)
+	_lbl_curvature_value = Label.new()
+	_lbl_curvature_value.text = "%.2f" % _curvature_amount
+	curvature_row.add_child(_lbl_curvature_value)
+	_update_curvature_ui()
 
 	# Separator
 	vbox.add_child(HSeparator.new())
@@ -297,6 +337,27 @@ func _on_monitor_selected(monitor_id: int) -> void:
 	hide()
 	_visible_overlay = false
 
+func _on_curved_toggled(enabled: bool) -> void:
+	_curved_enabled = enabled
+	_update_curvature_ui()
+	_save_config()
+	screen_curvature_changed.emit(_curved_enabled, _curvature_amount)
+
+func _on_curvature_value_changed(value: float) -> void:
+	_curvature_amount = clamp(value, 0.0, 0.5)
+	_update_curvature_ui()
+	_save_config()
+	screen_curvature_changed.emit(_curved_enabled, _curvature_amount)
+
+func _update_curvature_ui() -> void:
+	if _chk_curved:
+		_chk_curved.button_pressed = _curved_enabled
+	if _slider_curvature:
+		_slider_curvature.value = _curvature_amount
+		_slider_curvature.editable = _curved_enabled
+	if _lbl_curvature_value:
+		_lbl_curvature_value.text = "%.2f" % _curvature_amount
+
 # ---------------------------------------------------------------------------
 # Config persistence
 # ---------------------------------------------------------------------------
@@ -306,6 +367,8 @@ func _save_config() -> void:
 	cfg.set_value("network", "host_ip", _host_ip)
 	cfg.set_value("network", "tcp_port", _tcp_port)
 	cfg.set_value("network", "udp_port", _udp_port)
+	cfg.set_value("display", "curved_enabled", _curved_enabled)
+	cfg.set_value("display", "curved_amount", _curvature_amount)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -314,3 +377,5 @@ func _load_config() -> void:
 		_host_ip = cfg.get_value("network", "host_ip", "192.168.1.100")
 		_tcp_port = cfg.get_value("network", "tcp_port", 19800)
 		_udp_port = cfg.get_value("network", "udp_port", 19801)
+		_curved_enabled = cfg.get_value("display", "curved_enabled", false)
+		_curvature_amount = cfg.get_value("display", "curved_amount", 0.18)
