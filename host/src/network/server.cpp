@@ -5,6 +5,7 @@
 
 #include "network/server.h"
 
+#include <algorithm>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -356,6 +357,51 @@ private:
                     if (on_input_keyboard_) {
                         on_input_keyboard_(client_id, input);
                     }
+                }
+                break;
+            }
+            case protocol::MessageType::MULTI_MONITOR_SELECT: {
+                if (payload.size() >= sizeof(protocol::MultiMonitorSelect)) {
+                    protocol::MultiMonitorSelect sel;
+                    std::memcpy(&sel, payload.data(), sizeof(sel));
+                    std::cout << "[Server] Client " << client_id
+                              << " selected " << (int)sel.monitor_count
+                              << " monitor(s)\n";
+                    // Forward each selected monitor via existing callback
+                    for (uint8_t i = 0; i < sel.monitor_count && i < 3; ++i) {
+                        if (sel.monitor_ids[i] != 0xFF && on_monitor_select_) {
+                            on_monitor_select_(client_id, sel.monitor_ids[i]);
+                        }
+                    }
+                }
+                break;
+            }
+            case protocol::MessageType::FRAME_ACK: {
+                // Flow control: client acknowledged a frame — currently logged only
+                if (payload.size() >= sizeof(protocol::FrameAck)) {
+                    protocol::FrameAck ack;
+                    std::memcpy(&ack, payload.data(), sizeof(ack));
+                    // TODO: use for adaptive bitrate / pacing
+                }
+                break;
+            }
+            case protocol::MessageType::LATENCY_PROBE: {
+                if (payload.size() >= sizeof(protocol::LatencyProbe)) {
+                    protocol::LatencyProbe probe;
+                    std::memcpy(&probe, payload.data(), sizeof(probe));
+
+                    // Build LATENCY_RESPONSE
+                    protocol::LatencyResponse resp;
+                    resp.probe_id          = probe.probe_id;
+                    resp.client_timestamp  = probe.client_timestamp;
+                    // server_timestamp: approximate via probe receipt time
+                    resp.server_timestamp  = 0;  // TODO: fill with actual system time
+
+                    protocol::ControlHeader resp_header;
+                    resp_header.type   = static_cast<uint8_t>(protocol::MessageType::LATENCY_RESPONSE);
+                    resp_header.length = sizeof(resp);
+                    send_tcp(sock, &resp_header, sizeof(resp_header));
+                    send_tcp(sock, &resp, sizeof(resp));
                 }
                 break;
             }

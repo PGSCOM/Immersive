@@ -3,6 +3,7 @@
 /// Utility functions for packetizing and sending video frames over UDP.
 
 #include "network/server.h"
+#include <algorithm>
 #include <cstring>
 #include <vector>
 

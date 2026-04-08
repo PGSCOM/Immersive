@@ -4,6 +4,7 @@
 /// framework. Requires the Immersive-2 IDD driver to be installed on the system.
 
 #include "driver/idd_manager.h"
+#include <algorithm>
 #include <iostream>
 
 #ifdef _WIN32
