@@ -16,7 +16,9 @@
 #include <algorithm>
 
 #ifdef _WIN32
+// WIN32_LEAN_AND_MEAN is set globally; MF headers need objbase.h explicitly
 #include <windows.h>
+#include <objbase.h>   // CoInitializeEx, CoUninitialize
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mfidl.h>
@@ -108,9 +110,14 @@ public:
         initialized_ = false;
 
 #ifdef _WIN32
+        // Initialize COM on this thread (required before MFStartup)
+        HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        com_initialized_ = SUCCEEDED(com_hr) || (com_hr == RPC_E_CHANGED_MODE);
+
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
         if (FAILED(hr)) {
             std::cerr << "[MfEncoder] MFStartup failed (0x" << std::hex << hr << ")\n";
+            if (com_initialized_) { CoUninitialize(); com_initialized_ = false; }
             return false;
         }
         mf_started_ = true;
@@ -325,6 +332,7 @@ private:
     bool                  initialized_   = false;
     bool                  is_hardware_   = false;
     bool                  mf_started_    = false;
+    bool                  com_initialized_ = false;
     bool                  force_keyframe_ = false;
     uint32_t              frame_count_   = 0;
     std::vector<uint8_t>  nv12_buf_;
@@ -388,6 +396,10 @@ private:
             MFShutdown();
             mf_started_ = false;
         }
+        if (com_initialized_) {
+            CoUninitialize();
+            com_initialized_ = false;
+        }
 #endif
         initialized_ = false;
     }
@@ -404,8 +416,16 @@ std::unique_ptr<IVideoEncoder> create_mf_encoder() {
 bool mf_hardware_encoder_available() {
 #ifdef _WIN32
     // Quick check: can we enumerate at least one hardware H.264 MFT?
+    // COM must be initialized first
+    bool com_init = false;
+    HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    com_init = SUCCEEDED(com_hr) || (com_hr == RPC_E_CHANGED_MODE);
+
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        if (com_init) CoUninitialize();
+        return false;
+    }
 
     MFT_REGISTER_TYPE_INFO out_type = { MFMediaType_Video, MFVideoFormat_H264 };
 
@@ -423,6 +443,7 @@ bool mf_hardware_encoder_available() {
     if (activations) CoTaskMemFree(activations);
 
     MFShutdown();
+    if (com_init) CoUninitialize();
     return count > 0;
 #else
     return false;

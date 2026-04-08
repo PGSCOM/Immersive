@@ -14,6 +14,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <objbase.h>   // CoInitializeEx needed for WASAPI thread init
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <avrt.h>

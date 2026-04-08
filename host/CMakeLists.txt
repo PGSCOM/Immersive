@@ -70,6 +70,8 @@ if(WIN32)
         mfuuid
         mfplat
         strmiids
+        ole32
+        avrt
         setupapi
     )
     target_compile_definitions(immersive2_host PRIVATE
@@ -78,6 +80,8 @@ if(WIN32)
         UNICODE
         _UNICODE
         _CRT_SECURE_NO_WARNINGS   # Suppress fopen/sprintf deprecation (stb_image_write)
+        _WIN32_WINNT=0x0602       # Windows 8+ for MFTEnumEx, WASAPI loopback
+        WINVER=0x0602
     )
 endif()
 
