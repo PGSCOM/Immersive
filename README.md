@@ -2,11 +2,10 @@
 
 Open-source alternative to Immersed — use your PC monitors in VR.
 
-Immersive-2 creates virtual monitors on Windows (IDD driver), captures them via DXGI,
-encodes with hardware GPU acceleration (NVENC / AMF / QSV), and streams over Wi-Fi to
-a VR headset (Meta Quest, Pico 4) running a Godot 4 / OpenXR client that renders the
-screens as floating panels. VR controller input (pointer, virtual keyboard) is sent
-back to the PC.
+Immersive-2 captures PC displays via DXGI, encodes video (MJPEG software encoder
+or GPU hardware via NVENC/AMF/QSV when available), and streams over Wi-Fi to a
+VR headset (Meta Quest, Pico 4) running a Godot 4 / OpenXR client that renders the
+screens as floating panels. VR controller input is sent back to the PC.
 
 ## Architecture
 
@@ -15,10 +14,11 @@ back to the PC.
 │                        Windows Host                              │
 │                                                                  │
 │  ┌─────────────┐   ┌──────────────┐   ┌───────────────────────┐ │
-│  │ IDD Virtual  │──▶│ DXGI Desktop │──▶│ GPU Encoder           │ │
-│  │ Display      │   │ Capture      │   │ (NVENC / AMF / QSV)   │ │
-│  │ Driver       │   └──────────────┘   └──────────┬────────────┘ │
-│  └─────────────┘                                  │              │
+│  │ IDD Virtual  │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
+│  │ Display      │   │ Capture      │   │ MJPEG (sw) / NVENC /  │ │
+│  │ Driver       │   └──────────────┘   │ AMF / QSV (hw)        │ │
+│  └─────────────┘                       └──────────┬────────────┘ │
+│                                                   │              │
 │                                                   ▼              │
 │                                        ┌──────────────────────┐  │
 │  ┌─────────────┐                       │ Network Server       │  │
@@ -32,13 +32,20 @@ back to the PC.
 │                                                   ▼              │
 │  ┌──────────────────────┐   ┌──────────────────────────────────┐ │
 │  │ Network Client       │──▶│ Video Decoder                    │ │
-│  │ (TCP ctrl + UDP vid) │   │ (MediaCodec H.264/H.265)         │ │
-│  └──────────────────────┘   └──────────┬───────────────────────┘ │
+│  │ (TCP ctrl + UDP vid) │   │ (MJPEG via Image.load_jpg_from_  │ │
+│  └──────────────────────┘   │  buffer or MediaCodec H.264)     │ │
+│                             └──────────┬───────────────────────┘ │
 │                                        ▼                         │
 │  ┌──────────────────────┐   ┌──────────────────────────────────┐ │
 │  │ Input Manager        │──▶│ OpenXR Screen Renderer           │ │
-│  │ (pointer + keyboard) │   │ (floating panels in 3D space)    │ │
+│  │ (pointer + keyboard) │   │ (up to 3 floating panels)        │ │
 │  └──────────────────────┘   └──────────────────────────────────┘ │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │ UI Overlay (toggle with B/Y or O key)                        │ │
+│  │  • Connection status   • Host IP field   • Monitor list      │ │
+│  │  • Latency indicator   • Connect button                      │ │
+│  └──────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,74 +55,150 @@ back to the PC.
 Immersive-2/
 ├── host/                    # Windows host application (C++)
 │   ├── CMakeLists.txt
-│   ├── include/             # Public headers
+│   ├── include/
 │   │   ├── capture/         # DXGI screen capture
-│   │   ├── encoder/         # GPU video encoding
+│   │   ├── encoder/         # Video encoding (encoder.h + stb_image_write.h)
 │   │   ├── network/         # Streaming server
 │   │   ├── input/           # Input injection
 │   │   └── driver/          # IDD driver interface
-│   └── src/                 # Implementation
-│       ├── capture/
-│       ├── encoder/
-│       ├── network/
-│       ├── input/
-│       └── driver/
+│   └── src/
+│       ├── capture/         # dxgi_capture.cpp
+│       ├── encoder/         # encoder.cpp (MJPEG + hw stubs)
+│       ├── network/         # server.cpp, tcp_control.cpp, udp_stream.cpp
+│       ├── input/           # input_injector.cpp
+│       ├── driver/          # idd_manager.cpp
+│       └── main.cpp
 ├── client/                  # VR client (Godot 4 + OpenXR)
-│   ├── project/             # Godot project files
-│   ├── scripts/             # GDScript source
-│   ├── scenes/              # Scene files (.tscn)
-│   └── shaders/             # Custom shaders
-├── protocol/                # Shared protocol definitions
-├── docs/                    # Documentation
-└── scripts/                 # Build and utility scripts
+│   ├── project/
+│   │   ├── project.godot
+│   │   ├── export_presets.cfg   # Windows Desktop + Android presets
+│   │   └── openxr_action_map.tres
+│   ├── scripts/
+│   │   ├── main.gd          # Scene controller, multi-monitor, auto-reconnect
+│   │   ├── network_client.gd# TCP/UDP client + latency probing
+│   │   ├── screen_panel.gd  # Virtual screen panel (drag + MJPEG decode)
+│   │   ├── ui_overlay.gd    # VR UI (status, IP, monitors, ping)
+│   │   ├── video_decoder.gd # Video frame decoder
+│   │   └── vr_input.gd      # VR controller input handler
+│   ├── scenes/
+│   │   └── main.tscn        # Main scene (3 screen slots + UI overlay)
+│   └── shaders/
+│       └── screen.gdshader  # Custom screen shader
+├── protocol/
+│   └── protocol.h           # Wire protocol (shared C++ header)
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── BUILDING.md
+│   └── PROTOCOL.md
+└── .github/workflows/
+    └── build.yml            # CI: Windows host + Godot client builds
 ```
 
 ## Requirements
 
 ### Windows Host
-- Windows 10/11
+- Windows 10/11 (x64)
 - Visual Studio 2022 or MinGW-w64
 - CMake 3.20+
-- GPU with hardware encoding support (NVIDIA, AMD, or Intel)
+- **No GPU encoder required** — the built-in MJPEG software encoder works on any CPU
 
 ### VR Client
 - Godot Engine 4.3+
-- Meta Quest 2/3/Pro or Pico 4 headset
-- OpenXR runtime
+- Meta Quest 2/3/Pro or Pico 4 (developer mode enabled)
+- Wi-Fi connection to the Windows host
 
-## Building
+## Quick Start
 
-### Windows Host
+### 1. Build the Windows Host
 
-```bash
+```powershell
 cd host
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+  -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
 cmake --build build --config Release
+.\build\Release\immersive2_host.exe
 ```
 
-### VR Client
+The host listens on TCP :19800 (control) and UDP :19801 (video).
 
-1. Open the `client/project/` folder in Godot 4.3+
-2. Install the OpenXR plugin if not already present
-3. Configure export preset for Android (Quest/Pico)
-4. Build and deploy to headset
+### 2. Run the VR Client
+
+**Desktop testing:**
+1. Open `client/project/` in Godot 4.3+
+2. Press **F5** to run
+3. Press **O** to open the UI overlay
+4. Enter the host IP and click Connect
+
+**Quest / Pico:**
+1. Export via **Project → Export → Android**
+2. Deploy to headset via `adb install`
+3. Press **B/Y** in VR to open the UI overlay
+
+### 3. Connect
+
+- Enter the host PC's local IP in the overlay
+- Click **Connect**
+- Select a monitor from the list
+- The monitor streams as a floating panel in VR
+
+## Key Bindings (Desktop Mode)
+
+| Key | Action |
+|-----|--------|
+| `C` | Connect to host |
+| `D` | Disconnect |
+| `O` | Toggle UI overlay |
+| `Esc` | Quit |
+
+## VR Controls
+
+| Action | Function |
+|--------|----------|
+| B / Y button | Toggle UI overlay |
+| Right trigger | Click / interact with UI |
+| Right grip (hold) | Grab and reposition screen panel |
+| Right thumbstick | Scroll (when pointer is on screen) |
 
 ## MVP Roadmap
 
+### Implemented ✓
 - [x] Project structure and architecture
-- [ ] Single monitor DXGI capture
-- [ ] H.264 encoding via NVENC
-- [ ] UDP streaming with basic protocol
-- [ ] Godot VR client with single floating screen
-- [ ] Basic pointer input return
-- [ ] Multi-monitor support
-- [ ] Virtual keyboard
-- [ ] IDD virtual display driver
-- [ ] Screen positioning and resizing in VR
+- [x] DXGI screen capture (interface + stub)
+- [x] MJPEG software encoder (stb_image_write, no GPU required)
+- [x] TCP control channel (HELLO, monitor list, stream start/stop)
+- [x] UDP video streaming with chunk reassembly
+- [x] Godot 4 VR client with OpenXR
+- [x] Single floating screen panel
+- [x] Pointer/mouse input return
+- [x] Multi-monitor support (up to 3 simultaneous screens)
+- [x] VR UI overlay (status, IP, monitor list, latency)
+- [x] Screen repositioning with grip controller
+- [x] Latency measurement (LATENCY_PROBE / LATENCY_RESPONSE)
+- [x] Flow control (FRAME_ACK)
+- [x] Auto-reconnect on disconnect
+- [x] Host IP config persistence
+- [x] CI/CD (GitHub Actions: Windows host + Godot export)
+
+### In Progress
+- [ ] Real DXGI frame capture (DDA API)
+- [ ] NVENC / AMF / QSV hardware encoder integration
+- [ ] Input injection (mouse + keyboard via SendInput)
+
+### Planned
+- [ ] Virtual keyboard in VR
+- [ ] IDD virtual display driver (for custom resolutions)
+- [ ] H.264 decode via MediaCodec on Android
+- [ ] Screen resize/scale in VR
+- [ ] Audio streaming
+- [ ] Multi-client support
 
 ## Protocol
 
-See [protocol/README.md](protocol/README.md) for the wire protocol specification.
+See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full wire protocol specification.
+
+## Building
+
+See [docs/BUILDING.md](docs/BUILDING.md) for detailed build instructions.
 
 ## License
 
