@@ -19,6 +19,7 @@ set(CAPTURE_SOURCES
 
 set(ENCODER_SOURCES
     src/encoder/encoder.cpp
+    src/encoder/mf_encoder.cpp
 )
 
 set(NETWORK_SOURCES
@@ -35,6 +36,10 @@ set(DRIVER_SOURCES
     src/driver/idd_manager.cpp
 )
 
+set(AUDIO_SOURCES
+    src/audio/audio_capture.cpp
+)
+
 set(MAIN_SOURCE
     src/main.cpp
 )
@@ -47,6 +52,7 @@ add_executable(immersive2_host
     ${NETWORK_SOURCES}
     ${INPUT_SOURCES}
     ${DRIVER_SOURCES}
+    ${AUDIO_SOURCES}
 )
 
 target_include_directories(immersive2_host PRIVATE
@@ -60,6 +66,11 @@ if(WIN32)
         d3d11
         dxgi
         ws2_32
+        mf
+        mfuuid
+        mfplat
+        strmiids
+        setupapi
     )
     target_compile_definitions(immersive2_host PRIVATE
         WIN32_LEAN_AND_MEAN

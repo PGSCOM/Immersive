@@ -2,9 +2,10 @@
 ///
 /// Provides a factory for hardware-accelerated video encoders.
 /// The primary encoder is a software MJPEG encoder using stb_image_write.
-/// NVENC/AMF/QSV backends can be enabled via compile-time flags.
+/// NVENC/AMF/QSV backends are served via Media Foundation MFT (Windows 8+).
 
 #include "encoder/encoder.h"
+#include "encoder/mf_encoder.h"
 
 #include <algorithm>
 #include <iostream>
@@ -134,36 +135,38 @@ private:
 // ---------------------------------------------------------------------------
 
 EncoderBackend detect_best_encoder() {
-#ifdef IMMERSIVE_NVENC
-    std::cout << "[Encoder] NVENC support compiled in (runtime check TODO)\n";
+#ifdef _WIN32
+    // Try Media Foundation hardware encoder first
+    if (mf_hardware_encoder_available()) {
+        std::cout << "[Encoder] Media Foundation hardware encoder detected (NVENC/AMF/QSV)\n";
+        return EncoderBackend::NVENC;  // MF hardware — reported as NVENC for compatibility
+    }
+    std::cout << "[Encoder] No MF hardware encoder detected, falling back to MJPEG\n";
+#else
+    std::cout << "[Encoder] Non-Windows build, using MJPEG software encoder\n";
 #endif
-#ifdef IMMERSIVE_AMF
-    std::cout << "[Encoder] AMF support compiled in (runtime check TODO)\n";
-#endif
-#ifdef IMMERSIVE_QSV
-    std::cout << "[Encoder] QSV support compiled in (runtime check TODO)\n";
-#endif
-
-    std::cout << "[Encoder] Using MJPEG software encoder\n";
     return EncoderBackend::SOFTWARE;
 }
 
 std::unique_ptr<IVideoEncoder> create_encoder(EncoderBackend backend) {
     switch (backend) {
     case EncoderBackend::NVENC:
-        // TODO: return std::make_unique<NvencEncoder>();
-        std::cout << "[Encoder] NVENC encoder not yet implemented, using MJPEG\n";
-        return std::make_unique<MjpegEncoder>();
-
     case EncoderBackend::AMF:
-        // TODO: return std::make_unique<AmfEncoder>();
-        std::cout << "[Encoder] AMF encoder not yet implemented, using MJPEG\n";
+    case EncoderBackend::QSV: {
+#ifdef _WIN32
+        // All three hardware paths use the MF encoder on Windows
+        auto mf = create_mf_encoder();
+        if (mf) {
+            std::cout << "[Encoder] Using Media Foundation hardware H.264 encoder\n";
+            return mf;
+        }
+        // MF init failed at runtime — fall through to software
+        std::cerr << "[Encoder] MF encoder creation failed, falling back to MJPEG\n";
+#else
+        std::cout << "[Encoder] Hardware encoder requested but not available on this platform, using MJPEG\n";
+#endif
         return std::make_unique<MjpegEncoder>();
-
-    case EncoderBackend::QSV:
-        // TODO: return std::make_unique<QsvEncoder>();
-        std::cout << "[Encoder] QSV encoder not yet implemented, using MJPEG\n";
-        return std::make_unique<MjpegEncoder>();
+    }
 
     case EncoderBackend::SOFTWARE:
     default:
