@@ -21,8 +21,9 @@ namespace protocol {
 constexpr uint8_t PROTOCOL_VERSION = 1;
 
 /// Default ports
-constexpr uint16_t DEFAULT_TCP_PORT = 19800;
-constexpr uint16_t DEFAULT_UDP_PORT = 19801;
+constexpr uint16_t DEFAULT_TCP_PORT  = 19800;
+constexpr uint16_t DEFAULT_UDP_PORT  = 19801;
+constexpr uint16_t DEFAULT_AUDIO_PORT = 19802;  ///< Separate UDP port for audio
 
 /// Maximum UDP payload size (staying under typical MTU)
 constexpr uint16_t MAX_UDP_PAYLOAD = 1400;
@@ -42,6 +43,8 @@ enum class MessageType : uint8_t {
     MONITOR_SELECT       = 0x04,
     STREAM_START         = 0x05,
     STREAM_STOP          = 0x06,
+    AUDIO_START          = 0x07,  ///< Server → client: audio stream started
+    AUDIO_STOP           = 0x08,  ///< Server → client: audio stream stopped
     INPUT_MOUSE          = 0x10,
     INPUT_KEYBOARD       = 0x11,
     INPUT_POINTER        = 0x12,
@@ -136,6 +139,23 @@ struct LatencyResponse {
     uint64_t probe_id;          ///< Same as in LatencyProbe
     uint64_t client_timestamp;  ///< Echoed back from LatencyProbe
     uint64_t server_timestamp;  ///< Server microsecond timestamp (informational)
+};
+
+/// Audio packet header for audio channel (UDP).
+/// Carries raw PCM-16 stereo 48 kHz audio samples.
+struct AudioPacketHeader {
+    uint32_t seq;       ///< Monotonically increasing sequence number
+    uint16_t samples;   ///< Number of PCM samples in this packet (per channel)
+    uint8_t  channels;  ///< Number of channels (1 = mono, 2 = stereo)
+    uint8_t  reserved;  ///< Padding / future use
+    // Followed by samples*channels*2 bytes of interleaved PCM-16 LE
+};
+
+/// Audio-stream-started notification (TCP control channel).
+struct AudioStart {
+    uint16_t sample_rate;  ///< Always 48000
+    uint8_t  channels;     ///< 1 or 2
+    uint16_t audio_port;   ///< UDP port on which audio packets are sent
 };
 
 /// Video packet header for video channel (UDP)
