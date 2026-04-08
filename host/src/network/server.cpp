@@ -19,6 +19,15 @@
 #pragma comment(lib, "ws2_32.lib")
 using SocketType = SOCKET;
 constexpr SocketType INVALID_SOCK = INVALID_SOCKET;
+// Windows headers define INPUT_MOUSE and INPUT_KEYBOARD as macros which
+// collide with the protocol enum values. Undefine them after all Win32
+// includes so the qualified name protocol::MessageType::INPUT_MOUSE compiles.
+#ifdef INPUT_MOUSE
+#  undef INPUT_MOUSE
+#endif
+#ifdef INPUT_KEYBOARD
+#  undef INPUT_KEYBOARD
+#endif
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
