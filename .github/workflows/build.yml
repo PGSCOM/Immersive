@@ -132,6 +132,20 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Configure Android environment for Godot
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "${SDK_ROOT}" ]; then
+            echo "Android SDK root was not set by setup-android" >&2
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${SDK_ROOT}/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
+
       - name: Install Android SDK packages
         run: |
           set -euo pipefail
@@ -156,14 +170,14 @@ jobs:
           sleep 5
 
           # Export Windows Desktop
-          godot --headless \
+          godot \
             --path "${WORKSPACE}/client/project" \
             --export-debug "Windows Desktop" \
             "${WORKSPACE}/client/export/windows/Immersive2.exe" \
             2>&1 || true
 
           # Export Android (APK)
-          godot --headless \
+          godot \
             --path "${WORKSPACE}/client/project" \
             --export-debug "Android" \
             "${WORKSPACE}/client/export/android/Immersive2.apk" \
