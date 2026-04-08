@@ -95,7 +95,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip
+          sudo apt-get install -y curl unzip xvfb libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1-mesa-dri libgl1 libglx-mesa0 mesa-utils pulseaudio
 
       - name: Install Godot headless and templates
         run: |
@@ -165,9 +165,13 @@ jobs:
           GODOT_COMMON_ARGS=(
             --headless
             --audio-driver Dummy
-            --recovery-mode
+            --rendering-driver opengl3
             --path "${WORKSPACE}/client/project"
           )
+
+          # Import project first (generates .godot/ cache)
+          godot "${GODOT_COMMON_ARGS[@]}" --import || true
+          sleep 5
 
           # Export Windows Desktop
           godot "${GODOT_COMMON_ARGS[@]}" \
