@@ -95,7 +95,8 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip xvfb libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1-mesa-dri libgl1 libglx-mesa0 mesa-utils pulseaudio mesa-vulkan-drivers vulkan-tools libopenxr-loader1
+          sudo apt-get install -y curl unzip xvfb libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1-mesa-dri libgl1 libglx-mesa0 mesa-utils pulseaudio mesa-vulkan-drivers vulkan-tools
+          sudo apt-get install -y libopenxr-loader1 || true
 
       - name: Install Godot headless and templates
         run: |
@@ -158,36 +159,49 @@ jobs:
         run: |
           set -euo pipefail
           WORKSPACE="$(pwd)"
-          mkdir -p "${WORKSPACE}/client/export/windows"
-          mkdir -p "${WORKSPACE}/client/export/android"
+          CLIENT_DIR="${WORKSPACE}/client"
+          CI_PROJECT_DIR="${CLIENT_DIR}/.ci_project"
 
-          # Run in CI-safe mode: use virtual framebuffer for real display context
+          mkdir -p "${CLIENT_DIR}/export/windows"
+          mkdir -p "${CLIENT_DIR}/export/android"
+
+          # Build from a temporary project root that matches resource paths.
+          rm -rf "${CI_PROJECT_DIR}"
+          mkdir -p "${CI_PROJECT_DIR}"
+
+          cp "${CLIENT_DIR}/project/project.godot" "${CI_PROJECT_DIR}/project.godot"
+          cp "${CLIENT_DIR}/project/export_presets.cfg" "${CI_PROJECT_DIR}/export_presets.cfg"
+          cp "${CLIENT_DIR}/project/openxr_action_map.tres" "${CI_PROJECT_DIR}/openxr_action_map.tres"
+          cp -R "${CLIENT_DIR}/scenes" "${CI_PROJECT_DIR}/scenes"
+          cp -R "${CLIENT_DIR}/scripts" "${CI_PROJECT_DIR}/scripts"
+          cp -R "${CLIENT_DIR}/shaders" "${CI_PROJECT_DIR}/shaders"
+
+          # XR init can crash on GitHub runners without a real runtime/device.
+          sed -i 's/openxr\/enabled=true/openxr\/enabled=false/g' "${CI_PROJECT_DIR}/project.godot"
+
           GODOT_COMMON_ARGS=(
             --verbose
             --audio-driver Dummy
-            --path "${WORKSPACE}/client/project"
+            --xr-mode off
+            --path "${CI_PROJECT_DIR}"
           )
-
-          # Import project first (generates .godot/ cache)
-          xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" --import || true
-          sleep 5
 
           # Export Windows Desktop
           xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Windows Desktop" \
-            "${WORKSPACE}/client/export/windows/Immersive2.exe"
+            "${CLIENT_DIR}/export/windows/Immersive2.exe"
 
           # Export Android (APK)
           xvfb-run -a godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Android" \
-            "${WORKSPACE}/client/export/android/Immersive2.apk"
+            "${CLIENT_DIR}/export/android/Immersive2.apk"
 
           echo "Export outputs:"
-          ls -lah "${WORKSPACE}/client/export/windows"
-          ls -lah "${WORKSPACE}/client/export/android"
+          ls -lah "${CLIENT_DIR}/export/windows"
+          ls -lah "${CLIENT_DIR}/export/android"
 
-          test -f "${WORKSPACE}/client/export/windows/Immersive2.exe"
-          test -f "${WORKSPACE}/client/export/android/Immersive2.apk"
+          test -f "${CLIENT_DIR}/export/windows/Immersive2.exe"
+          test -f "${CLIENT_DIR}/export/android/Immersive2.apk"
 
       - name: Upload Client Windows Artifact
         uses: actions/upload-artifact@v5
