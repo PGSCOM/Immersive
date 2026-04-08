@@ -15,19 +15,25 @@ signal monitor_list_received(monitors: Array)
 signal stream_started(monitor_id: int, width: int, height: int)
 ## Emitted when a complete video frame is received.
 signal video_frame_received(frame_data: PackedByteArray, width: int, height: int)
+## Emitted when a latency response is received from the host.
+signal latency_response_received(probe_id: int, client_timestamp: int)
 
 # --- Constants (matching protocol.h) ---
 
-const MSG_HELLO: int          = 0x01
-const MSG_HELLO_ACK: int      = 0x02
-const MSG_MONITOR_LIST: int   = 0x03
-const MSG_MONITOR_SELECT: int = 0x04
-const MSG_STREAM_START: int   = 0x05
-const MSG_STREAM_STOP: int    = 0x06
-const MSG_INPUT_MOUSE: int    = 0x10
-const MSG_INPUT_KEYBOARD: int = 0x11
-const MSG_INPUT_POINTER: int  = 0x12
-const MSG_PING: int           = 0xFF
+const MSG_HELLO: int                 = 0x01
+const MSG_HELLO_ACK: int             = 0x02
+const MSG_MONITOR_LIST: int          = 0x03
+const MSG_MONITOR_SELECT: int        = 0x04
+const MSG_STREAM_START: int          = 0x05
+const MSG_STREAM_STOP: int           = 0x06
+const MSG_INPUT_MOUSE: int           = 0x10
+const MSG_INPUT_KEYBOARD: int        = 0x11
+const MSG_INPUT_POINTER: int         = 0x12
+const MSG_MULTI_MONITOR_SELECT: int  = 0x20
+const MSG_FRAME_ACK: int             = 0x30
+const MSG_LATENCY_PROBE: int         = 0x40
+const MSG_LATENCY_RESPONSE: int      = 0x41
+const MSG_PING: int                  = 0xFF
 
 const PROTOCOL_VERSION: int   = 1
 const MAX_UDP_PAYLOAD: int    = 1400
@@ -214,6 +220,13 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 		MSG_STREAM_STOP:
 			print("[Network] STREAM_STOP")
 
+		MSG_LATENCY_RESPONSE:
+			# payload: probe_id (8B) + client_timestamp (8B) + server_timestamp (8B)
+			if payload.size() >= 16:
+				var probe_id: int      = payload.decode_u64(0)
+				var client_ts: int     = payload.decode_u64(8)
+				latency_response_received.emit(probe_id, client_ts)
+
 		MSG_PING:
 			# Echo back
 			_send_control_message(MSG_PING, PackedByteArray())
@@ -272,6 +285,35 @@ func _cleanup_old_frames(current_frame: int) -> void:
 			keys_to_remove.append(key)
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)
+
+## Send a multi-monitor select (up to 3 monitors simultaneously).
+func select_monitors(monitor_ids: Array) -> void:
+	var payload := PackedByteArray()
+	payload.resize(5)  # 1 count + 3 ids + 1 reserved
+	payload[0] = min(monitor_ids.size(), 3)
+	for i in range(min(monitor_ids.size(), 3)):
+		payload[1 + i] = monitor_ids[i]
+	# Fill unused slots with 0xFF
+	for i in range(monitor_ids.size(), 3):
+		payload[1 + i] = 0xFF
+	payload[4] = 0  # reserved
+	_send_control_message(MSG_MULTI_MONITOR_SELECT, payload)
+
+## Send a frame acknowledgement.
+func send_frame_ack(monitor_id: int, frame_number: int) -> void:
+	var payload := PackedByteArray()
+	payload.resize(5)
+	payload[0] = monitor_id
+	payload.encode_u32(1, frame_number)
+	_send_control_message(MSG_FRAME_ACK, payload)
+
+## Send a latency probe (probe_id + client_timestamp, each 8 bytes LE).
+func send_latency_probe(probe_id: int, client_timestamp_us: int) -> void:
+	var payload := PackedByteArray()
+	payload.resize(16)
+	payload.encode_u64(0, probe_id)
+	payload.encode_u64(8, client_timestamp_us)
+	_send_control_message(MSG_LATENCY_PROBE, payload)
 
 func disconnect_from_server() -> void:
 	tcp_client.disconnect_from_host()

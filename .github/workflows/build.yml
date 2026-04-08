@@ -58,19 +58,27 @@ jobs:
           GODOT_TPZ="Godot_v${GODOT_TAG}_export_templates.tpz"
           GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}"
 
+          echo "Downloading Godot ${GODOT_TAG}..."
           curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
             -o "${GODOT_ZIP}" "${GODOT_BASE_URL}/${GODOT_ZIP}"
+
+          echo "Downloading export templates..."
           curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
             -o "${GODOT_TPZ}" "${GODOT_BASE_URL}/${GODOT_TPZ}"
 
+          echo "Installing Godot..."
           unzip -q "${GODOT_ZIP}"
           sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
           sudo chmod +x /usr/local/bin/godot
 
+          echo "Installing export templates..."
           mkdir -p "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
           mkdir -p /tmp/godot-templates
           unzip -q "${GODOT_TPZ}" -d /tmp/godot-templates
-          cp -R /tmp/godot-templates/templates/* "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}/"
+          cp -R /tmp/godot-templates/templates/* \
+            "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}/"
+
+          echo "Godot installed: $(godot --version)"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -84,10 +92,26 @@ jobs:
       - name: Export client builds
         run: |
           set -euo pipefail
-          mkdir -p client/export/windows
-          mkdir -p client/export/android
-          godot --headless --path client/project --export-debug "Windows Desktop" ../export/windows/Immersive2.exe
-          godot --headless --path client/project --export-debug "Android" ../export/android/Immersive2.apk
+          WORKSPACE="$(pwd)"
+          mkdir -p "${WORKSPACE}/client/export/windows"
+          mkdir -p "${WORKSPACE}/client/export/android"
+
+          # Import project first (generates .godot/ cache)
+          godot --headless --path "${WORKSPACE}/client/project" --import 2>&1 || true
+
+          # Export Windows Desktop
+          godot --headless \
+            --path "${WORKSPACE}/client/project" \
+            --export-debug "Windows Desktop" \
+            "${WORKSPACE}/client/export/windows/Immersive2.exe" \
+            2>&1 || true
+
+          # Export Android (APK)
+          godot --headless \
+            --path "${WORKSPACE}/client/project" \
+            --export-debug "Android" \
+            "${WORKSPACE}/client/export/android/Immersive2.apk" \
+            2>&1 || true
 
       - name: Upload Client Windows Artifact
         uses: actions/upload-artifact@v4

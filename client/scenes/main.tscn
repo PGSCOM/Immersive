@@ -1,14 +1,23 @@
-[gd_scene load_steps=5 format=3 uid="uid://main_scene"]
+[gd_scene load_steps=6 format=3 uid="uid://main_scene"]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/screen_panel.gd" id="2_screen"]
 [ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
-[ext_resource type="Shader" path="res://shaders/screen.gdshader" id="4_shader"]
+[ext_resource type="Script" path="res://scripts/ui_overlay.gd" id="4_overlay"]
+[ext_resource type="Shader" path="res://shaders/screen.gdshader" id="5_shader"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_screen"]
-shader = ExtResource("4_shader")
+shader = ExtResource("5_shader")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_screen"]
+size = Vector2(1.6, 0.9)
+orientation = 2
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_screen2"]
+size = Vector2(1.6, 0.9)
+orientation = 2
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_screen3"]
 size = Vector2(1.6, 0.9)
 orientation = 2
 
@@ -39,6 +48,22 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, -2)
 mesh = SubResource("PlaneMesh_screen")
 material_override = SubResource("ShaderMaterial_screen")
 script = ExtResource("2_screen")
+
+[node name="ScreenPanel2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.8, 1.6, -2)
+mesh = SubResource("PlaneMesh_screen2")
+script = ExtResource("2_screen")
+visible = false
+
+[node name="ScreenPanel3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.8, 1.6, -2)
+mesh = SubResource("PlaneMesh_screen3")
+script = ExtResource("2_screen")
+visible = false
+
+[node name="UIOverlay" type="Node3D" parent="."]
+script = ExtResource("4_overlay")
+visible = false
 
 [node name="Environment" type="WorldEnvironment" parent="."]
 

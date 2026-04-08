@@ -26,7 +26,7 @@ _codeql_detected_source_root
 # Godot
 .godot/
 *.import
-export_presets.cfg
+# export_presets.cfg is tracked (needed for CI builds)
 *.translation
 
 # OS

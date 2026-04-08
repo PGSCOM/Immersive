@@ -1,0 +1,128 @@
+[gd_resource type="OpenXRActionMap" load_steps=17 format=3 uid="uid://openxr_action_map"]
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_trigger"]
+name="trigger"
+localized_name="Trigger"
+action_type=2
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_grip"]
+name="grip"
+localized_name="Grip"
+action_type=2
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_primary_click"]
+name="primary_click"
+localized_name="Primary Click"
+action_type=0
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_ax_button"]
+name="ax_button"
+localized_name="A/X Button"
+action_type=0
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_by_button"]
+name="by_button"
+localized_name="B/Y Button"
+action_type=0
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_aim_pose"]
+name="aim_pose"
+localized_name="Aim Pose"
+action_type=3
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_grip_pose"]
+name="grip_pose"
+localized_name="Grip Pose"
+action_type=3
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_thumbstick"]
+name="thumbstick"
+localized_name="Thumbstick"
+action_type=1
+
+[sub_resource type="OpenXRAction" id="OpenXRAction_haptic"]
+name="haptic"
+localized_name="Haptic"
+action_type=4
+
+[sub_resource type="OpenXRActionSet" id="OpenXRActionSet_main"]
+name="main"
+localized_name="Main Controls"
+priority=0
+actions=[SubResource("OpenXRAction_trigger"), SubResource("OpenXRAction_grip"), SubResource("OpenXRAction_primary_click"), SubResource("OpenXRAction_ax_button"), SubResource("OpenXRAction_by_button"), SubResource("OpenXRAction_aim_pose"), SubResource("OpenXRAction_grip_pose"), SubResource("OpenXRAction_thumbstick"), SubResource("OpenXRAction_haptic")]
+
+[sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_touch"]
+interaction_profile_path="/interaction_profiles/oculus/touch_controller"
+bindings=[{
+"action": SubResource("OpenXRAction_trigger"),
+"paths": ["/user/hand/left/input/trigger/value", "/user/hand/right/input/trigger/value"]
+}, {
+"action": SubResource("OpenXRAction_grip"),
+"paths": ["/user/hand/left/input/squeeze/value", "/user/hand/right/input/squeeze/value"]
+}, {
+"action": SubResource("OpenXRAction_primary_click"),
+"paths": ["/user/hand/left/input/thumbstick/click", "/user/hand/right/input/thumbstick/click"]
+}, {
+"action": SubResource("OpenXRAction_ax_button"),
+"paths": ["/user/hand/left/input/x/click", "/user/hand/right/input/a/click"]
+}, {
+"action": SubResource("OpenXRAction_by_button"),
+"paths": ["/user/hand/left/input/y/click", "/user/hand/right/input/b/click"]
+}, {
+"action": SubResource("OpenXRAction_aim_pose"),
+"paths": ["/user/hand/left/input/aim/pose", "/user/hand/right/input/aim/pose"]
+}, {
+"action": SubResource("OpenXRAction_grip_pose"),
+"paths": ["/user/hand/left/input/grip/pose", "/user/hand/right/input/grip/pose"]
+}, {
+"action": SubResource("OpenXRAction_thumbstick"),
+"paths": ["/user/hand/left/input/thumbstick", "/user/hand/right/input/thumbstick"]
+}, {
+"action": SubResource("OpenXRAction_haptic"),
+"paths": ["/user/hand/left/output/haptic", "/user/hand/right/output/haptic"]
+}]
+
+[sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_pico"]
+interaction_profile_path="/interaction_profiles/bytedance/pico4_controller"
+bindings=[{
+"action": SubResource("OpenXRAction_trigger"),
+"paths": ["/user/hand/left/input/trigger/value", "/user/hand/right/input/trigger/value"]
+}, {
+"action": SubResource("OpenXRAction_grip"),
+"paths": ["/user/hand/left/input/squeeze/value", "/user/hand/right/input/squeeze/value"]
+}, {
+"action": SubResource("OpenXRAction_ax_button"),
+"paths": ["/user/hand/left/input/x/click", "/user/hand/right/input/a/click"]
+}, {
+"action": SubResource("OpenXRAction_by_button"),
+"paths": ["/user/hand/left/input/y/click", "/user/hand/right/input/b/click"]
+}, {
+"action": SubResource("OpenXRAction_aim_pose"),
+"paths": ["/user/hand/left/input/aim/pose", "/user/hand/right/input/aim/pose"]
+}, {
+"action": SubResource("OpenXRAction_grip_pose"),
+"paths": ["/user/hand/left/input/grip/pose", "/user/hand/right/input/grip/pose"]
+}, {
+"action": SubResource("OpenXRAction_thumbstick"),
+"paths": ["/user/hand/left/input/thumbstick", "/user/hand/right/input/thumbstick"]
+}, {
+"action": SubResource("OpenXRAction_haptic"),
+"paths": ["/user/hand/left/output/haptic", "/user/hand/right/output/haptic"]
+}]
+
+[sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_simple"]
+interaction_profile_path="/interaction_profiles/khr/simple_controller"
+bindings=[{
+"action": SubResource("OpenXRAction_primary_click"),
+"paths": ["/user/hand/left/input/select/click", "/user/hand/right/input/select/click"]
+}, {
+"action": SubResource("OpenXRAction_aim_pose"),
+"paths": ["/user/hand/left/input/aim/pose", "/user/hand/right/input/aim/pose"]
+}, {
+"action": SubResource("OpenXRAction_grip_pose"),
+"paths": ["/user/hand/left/input/grip/pose", "/user/hand/right/input/grip/pose"]
+}]
+
+[resource]
+action_sets=[SubResource("OpenXRActionSet_main")]
+interaction_profiles=[SubResource("OpenXRInteractionProfile_touch"), SubResource("OpenXRInteractionProfile_pico"), SubResource("OpenXRInteractionProfile_simple")]
