@@ -95,7 +95,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip xvfb libgl1-mesa-dri libglu1-mesa mesa-utils
+          sudo apt-get install -y curl unzip
 
       - name: Install Godot headless and templates
         run: |
@@ -161,19 +161,13 @@ jobs:
           mkdir -p "${WORKSPACE}/client/export/windows"
           mkdir -p "${WORKSPACE}/client/export/android"
 
-          # Run Godot with X11 + OpenGL3 to avoid Vulkan dependency in CI runners.
-          Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
-          export DISPLAY=:99
-          sleep 2
-
+          # Run in CI-safe mode: no display, no real audio device, and recovery mode.
           GODOT_COMMON_ARGS=(
-            --rendering-driver opengl3
-            --display-driver x11
+            --headless
+            --audio-driver Dummy
+            --recovery-mode
             --path "${WORKSPACE}/client/project"
           )
-
-          # Import project first (generates .godot/ cache)
-          godot "${GODOT_COMMON_ARGS[@]}" --import
 
           # Export Windows Desktop
           godot "${GODOT_COMMON_ARGS[@]}" \
