@@ -95,7 +95,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip xvfb
+          sudo apt-get install -y curl unzip xvfb libgl1-mesa-dri libglu1-mesa mesa-utils
 
       - name: Install Godot headless and templates
         run: |
@@ -130,7 +130,7 @@ jobs:
           echo "Godot installed: $(godot --version)"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Configure Android environment for Godot
         run: |
@@ -161,27 +161,36 @@ jobs:
           mkdir -p "${WORKSPACE}/client/export/windows"
           mkdir -p "${WORKSPACE}/client/export/android"
 
-          # Start virtual framebuffer (Godot needs a display even in headless mode on some versions)
-          Xvfb :99 -screen 0 1280x720x24 &
+          # Run Godot with X11 + OpenGL3 to avoid Vulkan dependency in CI runners.
+          Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
           export DISPLAY=:99
+          sleep 2
+
+          GODOT_COMMON_ARGS=(
+            --rendering-driver opengl3
+            --display-driver x11
+            --path "${WORKSPACE}/client/project"
+          )
 
           # Import project first (generates .godot/ cache)
-          godot --headless --path "${WORKSPACE}/client/project" --import 2>&1 || true
-          sleep 5
+          godot "${GODOT_COMMON_ARGS[@]}" --import
 
           # Export Windows Desktop
-          godot \
-            --path "${WORKSPACE}/client/project" \
+          godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Windows Desktop" \
-            "${WORKSPACE}/client/export/windows/Immersive2.exe" \
-            2>&1 || true
+            "${WORKSPACE}/client/export/windows/Immersive2.exe"
 
           # Export Android (APK)
-          godot \
-            --path "${WORKSPACE}/client/project" \
+          godot "${GODOT_COMMON_ARGS[@]}" \
             --export-debug "Android" \
-            "${WORKSPACE}/client/export/android/Immersive2.apk" \
-            2>&1 || true
+            "${WORKSPACE}/client/export/android/Immersive2.apk"
+
+          echo "Export outputs:"
+          ls -lah "${WORKSPACE}/client/export/windows"
+          ls -lah "${WORKSPACE}/client/export/android"
+
+          test -f "${WORKSPACE}/client/export/windows/Immersive2.exe"
+          test -f "${WORKSPACE}/client/export/android/Immersive2.apk"
 
       - name: Upload Client Windows Artifact
         uses: actions/upload-artifact@v5
