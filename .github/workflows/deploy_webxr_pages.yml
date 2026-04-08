@@ -1,0 +1,55 @@
+name: Build & Deploy WebXR to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build_and_deploy:
+    name: Build and deploy WebXR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Build web client (if applicable) and determine publish dir
+        id: build
+        run: |
+          set -e
+          # Default to publishing the static web/client folder
+          PUBLISH_DIR="web/client"
+          if [ -f web/client/package.json ]; then
+            echo "package.json detected — running npm ci && npm run build (best-effort)"
+            cd web/client
+            npm ci --prefer-offline --no-audit --progress=false || true
+            npm run build || true
+            cd - >/dev/null
+
+            # Prefer common build output dirs
+            if [ -d web/client/build ]; then
+              PUBLISH_DIR="web/client/build"
+            elif [ -d web/client/dist ]; then
+              PUBLISH_DIR="web/client/dist"
+            elif [ -d web/client/public ]; then
+              PUBLISH_DIR="web/client/public"
+            else
+              PUBLISH_DIR="web/client"
+            fi
+          fi
+          echo "publish_dir=$PUBLISH_DIR" >> $GITHUB_ENV
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v1
+        with:
+          path: ${{ env.publish_dir }}
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v1
