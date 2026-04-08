@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-windows:
+    name: Build Host (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -S host -B host/build -G "Visual Studio 17 2022" -A x64 -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+
+      - name: Build
+        run: |
+          cmake --build host/build --config Release
+
+      - name: Upload Host Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive2_host_windows
+          path: host/build/Release/*
+
+  client-build:
+    name: Build Client (Godot)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip
+
+      - name: Install Godot headless and templates
+        run: |
+          set -euo pipefail
+          GODOT_VERSION="4.3"
+          GODOT_RELEASE="stable"
+          GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
+          GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
+          GODOT_TPZ="Godot_v${GODOT_TAG}_export_templates.tpz"
+          GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}"
+
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o "${GODOT_ZIP}" "${GODOT_BASE_URL}/${GODOT_ZIP}"
+          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+            -o "${GODOT_TPZ}" "${GODOT_BASE_URL}/${GODOT_TPZ}"
+
+          unzip -q "${GODOT_ZIP}"
+          sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+
+          mkdir -p "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
+          mkdir -p /tmp/godot-templates
+          unzip -q "${GODOT_TPZ}" -d /tmp/godot-templates
+          cp -R /tmp/godot-templates/templates/* "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}/"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-32" "build-tools;33.0.2" "ndk;25.2.9519653"
+
+      - name: Export client builds
+        run: |
+          set -euo pipefail
+          mkdir -p client/export/windows
+          mkdir -p client/export/android
+          godot --headless --path client/project --export-debug "Windows Desktop" ../export/windows/Immersive2.exe
+          godot --headless --path client/project --export-debug "Android" ../export/android/Immersive2.apk
+
+      - name: Upload Client Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive2_client_windows
+          path: client/export/windows/*
+
+      - name: Upload Client Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive2_client_android
+          path: client/export/android/*
