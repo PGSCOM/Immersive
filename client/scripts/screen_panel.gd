@@ -59,9 +59,11 @@ func _process(_delta: float) -> void:
 # ---------------------------------------------------------------------------
 
 ## Set the resolution and update the panel aspect ratio.
-func set_resolution(width: int, height: int) -> void:
+func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	screen_width  = width
 	screen_height = height
+	if decoder:
+		decoder.initialize(width, height, codec)
 
 	# Update panel aspect ratio
 	var aspect: float = float(width) / float(height)

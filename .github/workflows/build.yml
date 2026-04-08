@@ -29,6 +29,7 @@ jobs:
         with:
           name: immersive2_host_windows
           path: host/build/Release/*
+          if-no-files-found: warn
 
   client-build:
     name: Build Client (Godot)
@@ -46,7 +47,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip
+          sudo apt-get install -y curl unzip xvfb
 
       - name: Install Godot headless and templates
         run: |
@@ -96,8 +97,13 @@ jobs:
           mkdir -p "${WORKSPACE}/client/export/windows"
           mkdir -p "${WORKSPACE}/client/export/android"
 
+          # Start virtual framebuffer (Godot needs a display even in headless mode on some versions)
+          Xvfb :99 -screen 0 1280x720x24 &
+          export DISPLAY=:99
+
           # Import project first (generates .godot/ cache)
           godot --headless --path "${WORKSPACE}/client/project" --import 2>&1 || true
+          sleep 5
 
           # Export Windows Desktop
           godot --headless \
@@ -118,9 +124,11 @@ jobs:
         with:
           name: immersive2_client_windows
           path: client/export/windows/*
+          if-no-files-found: warn
 
       - name: Upload Client Android Artifact
         uses: actions/upload-artifact@v4
         with:
           name: immersive2_client_android
           path: client/export/android/*
+          if-no-files-found: warn

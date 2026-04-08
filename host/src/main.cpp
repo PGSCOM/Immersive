@@ -143,7 +143,9 @@ int main(int argc, char* argv[]) {
         start_info.monitor_id = monitor_id;
         start_info.width = selected->width;
         start_info.height = selected->height;
-        start_info.codec = 0;  // H.264
+        // Codec: 2 = MJPEG (software encoder, default when GPU encoders are disabled)
+        // 0 = H.264, 1 = H.265, 2 = MJPEG
+        start_info.codec = (encoder->backend() == immersive::EncoderBackend::SOFTWARE) ? 2 : 0;
 
         server->send_stream_start(client_id, start_info);
 

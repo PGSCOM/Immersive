@@ -6,6 +6,7 @@
 
 #include "encoder/encoder.h"
 
+#include <algorithm>
 #include <iostream>
 #include <cstring>
 #include <vector>

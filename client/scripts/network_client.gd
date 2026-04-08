@@ -12,7 +12,7 @@ signal disconnected_from_host
 ## Emitted when monitor list is received.
 signal monitor_list_received(monitors: Array)
 ## Emitted when streaming starts.
-signal stream_started(monitor_id: int, width: int, height: int)
+signal stream_started(monitor_id: int, width: int, height: int, codec: int)
 ## Emitted when a complete video frame is received.
 signal video_frame_received(frame_data: PackedByteArray, width: int, height: int)
 ## Emitted when a latency response is received from the host.
@@ -215,7 +215,7 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var codec: int = payload[5]
 				print("[Network] STREAM_START: monitor=%d %dx%d codec=%d" %
 					[monitor_id, _stream_width, _stream_height, codec])
-				stream_started.emit(monitor_id, _stream_width, _stream_height)
+				stream_started.emit(monitor_id, _stream_width, _stream_height, codec)
 
 		MSG_STREAM_STOP:
 			print("[Network] STREAM_STOP")

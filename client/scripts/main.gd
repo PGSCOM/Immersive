@@ -245,10 +245,10 @@ func _on_monitor_list(monitors: Array) -> void:
 	if monitors.size() > 0:
 		select_monitor(monitors[0].id, 0)
 
-func _on_stream_started(monitor_id: int, width: int, height: int) -> void:
+func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2) -> void:
 	current_state = State.STREAMING
 	_update_overlay_state()
-	print("[Immersive-2] Streaming monitor %d (%dx%d)" % [monitor_id, width, height])
+	print("[Immersive-2] Streaming monitor %d (%dx%d) codec=%d" % [monitor_id, width, height, codec])
 
 	# Assign to slot 0 by default; subsequent calls go to slot 1, 2
 	var slot := 0
@@ -260,7 +260,7 @@ func _on_stream_started(monitor_id: int, width: int, height: int) -> void:
 
 	var panel := _ensure_panel(min(slot, MAX_SCREENS - 1))
 	if panel and panel.has_method("set_resolution"):
-		panel.set_resolution(width, height)
+		panel.set_resolution(width, height, codec)
 		panel.set_meta("monitor_id", monitor_id)
 
 func _on_video_frame(frame_data: PackedByteArray, width: int, height: int) -> void:

@@ -66,6 +66,7 @@ if(WIN32)
         NOMINMAX
         UNICODE
         _UNICODE
+        _CRT_SECURE_NO_WARNINGS   # Suppress fopen/sprintf deprecation (stb_image_write)
     )
 endif()
 
@@ -78,4 +79,14 @@ if(ENABLE_AMF)
 endif()
 if(ENABLE_QSV)
     target_compile_definitions(immersive2_host PRIVATE IMMERSIVE_QSV=1)
+endif()
+
+# Suppress MSVC warnings from third-party headers (stb_image_write)
+if(MSVC)
+    target_compile_options(immersive2_host PRIVATE
+        /wd4996   # 'function': was declared deprecated
+        /wd4244   # conversion, possible loss of data (stb casts)
+        /wd4267   # conversion from 'size_t' to 'int'
+        /wd4100   # unreferenced formal parameter
+    )
 endif()
