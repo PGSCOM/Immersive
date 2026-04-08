@@ -24,6 +24,10 @@ signal add_screen_panel(monitor_id: int, slot: int)
 signal screen_curvature_changed(enabled: bool, amount: float)
 ## Emitted when foveated rendering settings change.
 signal foveation_settings_changed(enabled: bool, strength: float)
+## Emitted when workspace save is requested.
+signal workspace_save_requested
+## Emitted when workspace restore is requested.
+signal workspace_restore_requested
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -74,6 +78,8 @@ var _lbl_curvature_value: Label
 var _chk_foveation: CheckBox
 var _slider_foveation: HSlider
 var _lbl_foveation_value: Label
+var _btn_workspace_save: Button
+var _btn_workspace_restore: Button
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -269,6 +275,17 @@ func _build_ui() -> void:
 	mon_lbl.text = "Available Monitors:"
 	vbox.add_child(mon_lbl)
 
+	var workspace_row := HBoxContainer.new()
+	vbox.add_child(workspace_row)
+	_btn_workspace_save = Button.new()
+	_btn_workspace_save.text = "Save Workspace"
+	_btn_workspace_save.pressed.connect(_on_workspace_save_pressed)
+	workspace_row.add_child(_btn_workspace_save)
+	_btn_workspace_restore = Button.new()
+	_btn_workspace_restore.text = "Restore Workspace"
+	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
+	workspace_row.add_child(_btn_workspace_restore)
+
 	# Scrollable monitor list
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -416,6 +433,12 @@ func _update_foveation_ui() -> void:
 		_slider_foveation.editable = _foveation_enabled
 	if _lbl_foveation_value:
 		_lbl_foveation_value.text = "%.2f" % _foveation_strength
+
+func _on_workspace_save_pressed() -> void:
+	workspace_save_requested.emit()
+
+func _on_workspace_restore_pressed() -> void:
+	workspace_restore_requested.emit()
 
 # ---------------------------------------------------------------------------
 # Config persistence

@@ -83,6 +83,7 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	# Update the mesh size
 	if mesh is PlaneMesh:
 		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
+	_update_latency_label_anchor()
 
 	# Create a properly-sized texture
 	screen_image = Image.create(width, height, false, Image.FORMAT_RGBA8)
@@ -154,10 +155,52 @@ func scale_panel(delta_scale: float) -> void:
 	panel_height = panel_width / (float(screen_width) / float(screen_height))
 	if mesh is PlaneMesh:
 		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
+	_update_latency_label_anchor()
 
 ## Programmatically set the panel position in world space.
 func set_panel_position(pos: Vector3) -> void:
 	global_transform.origin = pos
+
+## Serialize panel transform/size for workspace persistence.
+func get_layout_state() -> Dictionary:
+	var basis := global_transform.basis
+	return {
+		"position": [
+			global_transform.origin.x,
+			global_transform.origin.y,
+			global_transform.origin.z
+		],
+		"basis": [
+			basis.x.x, basis.x.y, basis.x.z,
+			basis.y.x, basis.y.y, basis.y.z,
+			basis.z.x, basis.z.y, basis.z.z
+		],
+		"panel_width": panel_width
+	}
+
+## Restore panel transform/size from a serialized workspace layout state.
+func apply_layout_state(state: Dictionary) -> void:
+	if state.is_empty():
+		return
+
+	var pos_data: Array = state.get("position", [])
+	var basis_data: Array = state.get("basis", [])
+
+	if pos_data.size() == 3 and basis_data.size() == 9:
+		var restored_basis := Basis(
+			Vector3(basis_data[0], basis_data[1], basis_data[2]),
+			Vector3(basis_data[3], basis_data[4], basis_data[5]),
+			Vector3(basis_data[6], basis_data[7], basis_data[8]))
+		global_transform = Transform3D(
+			restored_basis,
+			Vector3(pos_data[0], pos_data[1], pos_data[2]))
+
+	var restored_width: float = state.get("panel_width", panel_width)
+	panel_width = clamp(restored_width, 0.4, 4.0)
+	panel_height = panel_width / (float(screen_width) / float(screen_height))
+	if mesh is PlaneMesh:
+		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
+	_update_latency_label_anchor()
 
 ## Update the displayed latency value.
 func set_latency(ms: float) -> void:
@@ -294,9 +337,13 @@ func _create_latency_label() -> void:
 	_latency_label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
 
 	# Position in top-right corner of the panel
-	_latency_label.position = Vector3(panel_width * 0.5 - 0.05, panel_height * 0.5 - 0.03, 0.001)
+	_update_latency_label_anchor()
 	_latency_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	add_child(_latency_label)
+
+func _update_latency_label_anchor() -> void:
+	if _latency_label:
+		_latency_label.position = Vector3(panel_width * 0.5 - 0.05, panel_height * 0.5 - 0.03, 0.001)
 
 func _update_latency_label() -> void:
 	if not _latency_label:

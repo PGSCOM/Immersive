@@ -15,6 +15,7 @@ const MAX_SCREENS := 3
 const RECONNECT_DELAY := 5.0    ## Seconds between reconnect attempts
 const LATENCY_INTERVAL := 2.0   ## Seconds between latency probes
 const CONFIG_PATH := "user://immersive2_config.cfg"
+const WORKSPACE_PATH := "user://immersive2_workspace.json"
 
 # ---------------------------------------------------------------------------
 # Scene references
@@ -63,12 +64,18 @@ var _probe_id: int = 0
 var _probe_sent_us: int = 0
 var _latency_ms: float = 0.0
 
+# Workspace persistence
+var _workspace_monitor_ids: Array = []
+var _workspace_panel_layouts: Array = []
+var _pending_workspace_restore: bool = false
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 
 func _ready() -> void:
 	_load_config()
+	_load_workspace_layout()
 	_init_xr()
 	_init_eye_gaze_controller()
 	_init_network()
@@ -246,6 +253,10 @@ func _init_ui_overlay() -> void:
 		ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
 	if ui_overlay.has_signal("foveation_settings_changed"):
 		ui_overlay.foveation_settings_changed.connect(_on_overlay_foveation_settings_changed)
+	if ui_overlay.has_signal("workspace_save_requested"):
+		ui_overlay.workspace_save_requested.connect(_on_overlay_workspace_save_requested)
+	if ui_overlay.has_signal("workspace_restore_requested"):
+		ui_overlay.workspace_restore_requested.connect(_on_overlay_workspace_restore_requested)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -295,6 +306,8 @@ func _on_connected() -> void:
 	current_state = State.CONNECTED
 	_reconnect_timer = 0.0
 	_update_overlay_state()
+	if _workspace_panel_layouts.size() > 0:
+		_pending_workspace_restore = true
 	print("[Immersive-2] Connected to host")
 
 func _on_disconnected() -> void:
@@ -311,7 +324,11 @@ func _on_monitor_list(monitors: Array) -> void:
 	if ui_overlay and ui_overlay.has_method("set_monitor_list"):
 		ui_overlay.set_monitor_list(monitors)
 
-	# Auto-select the first monitor for MVP
+	if _pending_workspace_restore and _workspace_monitor_ids.size() > 0:
+		if _request_workspace_monitors():
+			return
+
+	# Default monitor selection
 	if monitors.size() > 0:
 		select_monitor(monitors[0].id, 0)
 
@@ -333,6 +350,14 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 		panel.set_resolution(width, height, codec)
 		_apply_panel_visual_settings(panel)
 		panel.set_meta("monitor_id", monitor_id)
+
+		var saved_layout := _find_saved_layout_for_monitor(monitor_id)
+		if saved_layout.is_empty():
+			saved_layout = _find_saved_layout_for_slot(slot)
+		if panel.has_method("apply_layout_state") and not saved_layout.is_empty():
+			panel.apply_layout_state(saved_layout)
+
+	_mark_workspace_restored_if_complete()
 
 func _on_video_frame(frame_data: PackedByteArray, width: int, height: int) -> void:
 	# Deliver frame to the matching panel (by monitor_id stored in meta)
@@ -385,6 +410,12 @@ func _on_overlay_foveation_settings_changed(enabled: bool, strength: float) -> v
 	foveation_strength = clamp(strength, 0.0, 1.0)
 	_apply_visual_settings_to_all_panels()
 	_save_config()
+
+func _on_overlay_workspace_save_requested() -> void:
+	save_workspace_layout()
+
+func _on_overlay_workspace_restore_requested() -> void:
+	restore_workspace_layout()
 
 # ---------------------------------------------------------------------------
 # Input handling
@@ -455,6 +486,127 @@ func _resolve_gaze_ray() -> Dictionary:
 		"origin": origin,
 		"direction": direction
 	}
+
+func save_workspace_layout() -> void:
+	var panel_states: Array = []
+	var monitor_ids: Array = []
+
+	for i in range(screen_panels.size()):
+		var panel = screen_panels[i]
+		if not is_instance_valid(panel) or not panel.has_method("get_layout_state"):
+			continue
+
+		var monitor_id: int = int(panel.get_meta("monitor_id", -1))
+		if monitor_id >= 0:
+			monitor_ids.append(monitor_id)
+
+		panel_states.append({
+			"slot": i,
+			"monitor_id": monitor_id,
+			"layout": panel.get_layout_state()
+		})
+
+	if panel_states.is_empty():
+		print("[Immersive-2] Workspace save skipped: no active panels")
+		return
+
+	var payload := {
+		"version": 1,
+		"monitor_ids": monitor_ids,
+		"panels": panel_states
+	}
+
+	var file := FileAccess.open(WORKSPACE_PATH, FileAccess.WRITE)
+	if not file:
+		push_error("[Immersive-2] Failed to open workspace file for writing")
+		return
+
+	file.store_string(JSON.stringify(payload, "\t"))
+	_workspace_monitor_ids = monitor_ids.duplicate()
+	_workspace_panel_layouts = panel_states.duplicate(true)
+	print("[Immersive-2] Workspace saved (%d panel(s))" % panel_states.size())
+
+func restore_workspace_layout() -> void:
+	_load_workspace_layout()
+	if _workspace_panel_layouts.is_empty():
+		print("[Immersive-2] Workspace restore skipped: no saved layout")
+		return
+
+	_pending_workspace_restore = true
+	_clear_all_screens()
+
+	if current_state == State.CONNECTED or current_state == State.STREAMING:
+		_request_workspace_monitors()
+
+func _load_workspace_layout() -> void:
+	_workspace_monitor_ids.clear()
+	_workspace_panel_layouts.clear()
+	_pending_workspace_restore = false
+
+	if not FileAccess.file_exists(WORKSPACE_PATH):
+		return
+
+	var file := FileAccess.open(WORKSPACE_PATH, FileAccess.READ)
+	if not file:
+		return
+
+	var parsed = JSON.parse_string(file.get_as_text())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+
+	_workspace_monitor_ids = parsed.get("monitor_ids", [])
+	_workspace_panel_layouts = parsed.get("panels", [])
+	_pending_workspace_restore = _workspace_panel_layouts.size() > 0
+
+func _request_workspace_monitors() -> bool:
+	if not network_client:
+		return false
+
+	var available_ids: Array = []
+	for mon in available_monitors:
+		available_ids.append(mon.id)
+
+	var selected_ids: Array = []
+	for mon_id in _workspace_monitor_ids:
+		if available_ids.has(mon_id):
+			selected_ids.append(mon_id)
+		if selected_ids.size() >= MAX_SCREENS:
+			break
+
+	if selected_ids.is_empty():
+		return false
+
+	if network_client.has_method("select_monitors") and selected_ids.size() > 1:
+		network_client.select_monitors(selected_ids)
+	else:
+		network_client.select_monitor(selected_ids[0])
+
+	print("[Immersive-2] Restoring workspace monitors: %s" % selected_ids)
+	return true
+
+func _find_saved_layout_for_monitor(monitor_id: int) -> Dictionary:
+	for item in _workspace_panel_layouts:
+		if int(item.get("monitor_id", -1)) == monitor_id:
+			return item.get("layout", {})
+	return {}
+
+func _find_saved_layout_for_slot(slot: int) -> Dictionary:
+	for item in _workspace_panel_layouts:
+		if int(item.get("slot", -1)) == slot:
+			return item.get("layout", {})
+	return {}
+
+func _mark_workspace_restored_if_complete() -> void:
+	if not _pending_workspace_restore:
+		return
+
+	var restored_count := 0
+	for panel in screen_panels:
+		if is_instance_valid(panel) and int(panel.get_meta("monitor_id", -1)) >= 0:
+			restored_count += 1
+
+	if restored_count >= min(_workspace_monitor_ids.size(), MAX_SCREENS):
+		_pending_workspace_restore = false
 
 # ---------------------------------------------------------------------------
 # Config persistence
