@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3 uid="uid://main_scene"]
+[gd_scene load_steps=7 format=3 uid="uid://main_scene"]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/screen_panel.gd" id="2_screen"]
 [ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
 [ext_resource type="Script" path="res://scripts/ui_overlay.gd" id="4_overlay"]
 [ext_resource type="Shader" path="res://shaders/screen.gdshader" id="5_shader"]
+[ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_screen"]
 shader = ExtResource("5_shader")
@@ -63,6 +64,9 @@ visible = false
 
 [node name="UIOverlay" type="Node3D" parent="."]
 script = ExtResource("4_overlay")
+visible = false
+
+[node name="VirtualKeyboard" parent="." instance=ExtResource("6_vkbd")]
 visible = false
 
 [node name="Environment" type="WorldEnvironment" parent="."]

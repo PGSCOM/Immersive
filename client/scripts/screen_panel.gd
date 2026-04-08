@@ -108,6 +108,14 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		screen_texture = ImageTexture.create_from_image(screen_image)
 		_apply_texture()
 
+## Scale the panel up/down using thumbstick.
+## Called from vr_input.gd when thumbstick Y is held while grip is pressed.
+func scale_panel(delta_scale: float) -> void:
+	panel_width = clamp(panel_width + delta_scale, 0.4, 4.0)
+	panel_height = panel_width / (float(screen_width) / float(screen_height))
+	if mesh is PlaneMesh:
+		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
+
 ## Programmatically set the panel position in world space.
 func set_panel_position(pos: Vector3) -> void:
 	global_transform.origin = pos
