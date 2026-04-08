@@ -170,14 +170,14 @@ jobs:
             2>&1 || true
 
       - name: Upload Client Windows Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: immersive2_client_windows
           path: client/export/windows/*
           if-no-files-found: warn
 
       - name: Upload Client Android Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: immersive2_client_android
           path: client/export/android/*

@@ -47,9 +47,9 @@ jobs:
           echo "publish_dir=$PUBLISH_DIR" >> $GITHUB_ENV
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v1
+        uses: actions/upload-pages-artifact@v4
         with:
           path: ${{ env.publish_dir }}
 
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v1
+        uses: actions/deploy-pages@v5
