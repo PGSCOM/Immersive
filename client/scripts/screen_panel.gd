@@ -96,11 +96,23 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	var err := img.load_jpg_from_buffer(frame_data)
 	if err == OK:
 		screen_image = img
+		if material_override is ShaderMaterial:
+			(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
 	else:
-		# Fallback: treat as raw RGBA bytes
-		if frame_data.size() < width * height * 4:
+		# Fallback: treat as raw RGBA or YUV NV12 bytes
+		if frame_data.size() == int(width * height * 1.5):
+			# YUV NV12 (from MediaCodec) -> shader handles YUV decode
+			var yuv_height := int(height * 1.5)
+			screen_image = Image.create_from_data(width, yuv_height, false, Image.FORMAT_L8, frame_data)
+			if material_override is ShaderMaterial:
+				(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 1)
+		elif frame_data.size() >= width * height * 4:
+			# RAW RGBA
+			screen_image = Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, frame_data)
+			if material_override is ShaderMaterial:
+				(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
+		else:
 			return
-		screen_image = Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, frame_data)
 
 	if screen_texture:
 		screen_texture.update(screen_image)

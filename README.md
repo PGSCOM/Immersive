@@ -190,10 +190,8 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - [x] Screen resize/scale in VR (grip + thumbstick Y)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
-
-### In Progress
-- [ ] H.264 hardware decode on Android (MediaCodec path wired in; requires GDExtension for full YUV→RGBA conversion)
-- [ ] IDD virtual display driver (detection implemented; create/destroy requires WDK + driver signing — see [docs/IDD_DRIVER.md](docs/IDD_DRIVER.md))
+- [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
+- [x] IDD virtual display driver (Auto-creates self-signed certificates, no test-signing or WHQL required)
 
 ### Planned / Future
 - [ ] Curved screen mode
