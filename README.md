@@ -11,7 +11,7 @@ screens as floating panels. VR controller input is sent back to the PC.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                        Windows Host                              │
+│        Host (Windows full / Linux+macOS portable mode)          │
 │                                                                  │
 │  ┌─────────────┐   ┌──────────────┐   ┌───────────────────────┐ │
 │  │ IDD Virtual  │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
@@ -53,7 +53,7 @@ screens as floating panels. VR controller input is sent back to the PC.
 
 ```
 Immersive-2/
-├── host/                    # Windows host application (C++)
+├── host/                    # Host application (Windows + Linux/macOS portable)
 │   ├── CMakeLists.txt
 │   ├── include/
 │   │   ├── capture/         # DXGI screen capture
@@ -99,10 +99,11 @@ Immersive-2/
 
 ## Requirements
 
-### Windows Host
-- Windows 10/11 (x64)
-- Visual Studio 2022 or MinGW-w64
+### Host
+- Windows 10/11 (x64) for full DXGI capture + SendInput + IDD features
+- Linux/macOS for portable host mode (network/protocol development and testing)
 - CMake 3.20+
+- Visual Studio 2022 / MinGW-w64 (Windows) or Clang/GCC (Linux/macOS)
 - **No GPU encoder required** — the built-in MJPEG software encoder works on any CPU
 
 ### VR Client
@@ -112,7 +113,7 @@ Immersive-2/
 
 ## Quick Start
 
-### 1. Build the Windows Host
+### 1. Build the Host
 
 ```powershell
 cd host
@@ -120,6 +121,16 @@ cmake -B build -G "Visual Studio 17 2022" -A x64 ^
   -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
 cmake --build build --config Release
 .\build\Release\immersive2_host.exe
+```
+
+Linux/macOS (portable host mode):
+
+```bash
+cd host
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+cmake --build build
+./build/immersive2_host
 ```
 
 The host listens on TCP :19800 (control) and UDP :19801 (video).
@@ -194,13 +205,13 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 - [x] Eye-tracking based foveated rendering (OpenXR eye gaze + head-gaze fallback)
 - [x] Hand tracking support (pinch pointer/click, no controllers required)
 - [x] Workspace save/restore (panel transform + monitor assignments)
+- [x] macOS/Linux host support (portable mode + CI builds)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
 - [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
 - [x] IDD virtual display driver (Auto-creates self-signed certificates, no test-signing or WHQL required)
 
 ### Planned / Future
-- [ ] macOS/Linux host support
 - [ ] Web client (WebXR)
 
 ## Protocol

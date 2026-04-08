@@ -2,12 +2,14 @@
 
 ## Prerequisites
 
-### Windows Host
+### Host (Windows / Linux / macOS)
 
-- **Windows 10/11** (x64)
-- **Visual Studio 2022** with "Desktop development with C++" workload
-  - Or MinGW-w64 with GCC 12+
 - **CMake 3.20+** ([cmake.org](https://cmake.org/download/))
+- **Windows 10/11 (x64)** for full host features
+  - Visual Studio 2022 with "Desktop development with C++" workload
+  - Or MinGW-w64 with GCC 12+
+- **Linux/macOS** for portable host mode
+  - GCC 12+ or Clang 14+
 - **GPU hardware encoder SDK** (optional — the MJPEG software encoder works with no GPU):
   - NVIDIA: CUDA Toolkit + NVIDIA Video Codec SDK
   - AMD: AMD Advanced Media Framework (AMF) SDK
@@ -23,7 +25,7 @@
 
 ---
 
-## Building the Windows Host
+## Building the Host
 
 ### Using Visual Studio 2022
 
@@ -52,6 +54,19 @@ cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release \
 cmake --build build
 ```
 
+### Linux / macOS (portable mode)
+
+```bash
+cd host
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+cmake --build build
+./build/immersive2_host
+```
+
+Portable mode provides protocol/network development support and stubbed host backends
+for capture/input/audio where platform APIs are unavailable.
+
 ### CMake Options
 
 | Option         | Default | Description                                        |
@@ -71,6 +86,9 @@ When all hardware encoders are disabled (`=OFF`), the MJPEG software encoder
 4. When the client selects a monitor, starts DXGI capture + MJPEG encoding
 5. Streams encoded frames over UDP :19801 in chunks of ≤ 1400 bytes
 6. Receives mouse/keyboard input from the VR client and injects it via SendInput
+
+On Linux/macOS portable mode, capture/input/virtual-display backends are stubbed for
+development and protocol testing.
 
 ---
 
@@ -135,8 +153,8 @@ godot --headless \
 
 ### Basic Setup
 
-1. Connect the Windows PC and VR headset to the same Wi-Fi network
-2. Start the host on Windows:
+1. Connect the host machine and VR headset to the same Wi-Fi network
+2. Start the host:
    ```powershell
    .\host\build\Release\immersive2_host.exe
    ```
@@ -181,11 +199,15 @@ GitHub Actions runs on every push:
 
 - **`host-windows`** job: builds the C++ host with MSVC (Visual Studio 17 2022)
   using `-DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF` (MJPEG software encoder)
+- **`host-linux`** job: builds the portable host on Ubuntu
+- **`host-macos`** job: builds the portable host on macOS
 - **`client-build`** job: installs Godot 4.3 headless, exports Windows Desktop and
   Android APK builds
 
 Artifacts are uploaded as:
 - `immersive2_host_windows`
+- `immersive2_host_linux`
+- `immersive2_host_macos`
 - `immersive2_client_windows`
 - `immersive2_client_android`
 
@@ -194,8 +216,8 @@ Artifacts are uploaded as:
 ## Troubleshooting
 
 ### Host: "No displays found"
-- Ensure you are running on Windows (DXGI is Windows-only)
-- The DXGI capture implementation is currently a stub; real capture via DDA is in progress
+- On Windows: ensure monitors are active and GPU drivers are installed
+- On Linux/macOS portable mode: a stub display is exposed for development/testing
 
 ### Client: OpenXR not initializing
 - Ensure the headset runtime is active (put the headset on or use PC link)

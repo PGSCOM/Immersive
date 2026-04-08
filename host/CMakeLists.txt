@@ -4,6 +4,8 @@ project(Immersive2Host VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Threads REQUIRED)
+
 # Options
 option(ENABLE_NVENC "Enable NVIDIA NVENC encoder" ON)
 option(ENABLE_AMF  "Enable AMD AMF encoder" ON)
@@ -60,6 +62,10 @@ target_include_directories(immersive2_host PRIVATE
     ${PROTOCOL_DIR}
 )
 
+target_link_libraries(immersive2_host PRIVATE
+    Threads::Threads
+)
+
 # Platform-specific settings (Windows)
 if(WIN32)
     target_link_libraries(immersive2_host PRIVATE
@@ -82,6 +88,12 @@ if(WIN32)
         _CRT_SECURE_NO_WARNINGS   # Suppress fopen/sprintf deprecation (stb_image_write)
         _WIN32_WINNT=0x0602       # Windows 8+ for MFTEnumEx, WASAPI loopback
         WINVER=0x0602
+    )
+endif()
+
+if(NOT WIN32)
+    target_compile_definitions(immersive2_host PRIVATE
+        IMMERSIVE_PORTABLE_HOST=1
     )
 endif()
 

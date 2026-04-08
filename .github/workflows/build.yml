@@ -31,6 +31,54 @@ jobs:
           path: host/build/Release/*
           if-no-files-found: warn
 
+  host-linux:
+    name: Build Host (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+
+      - name: Build
+        run: |
+          cmake --build host/build --config Release
+
+      - name: Upload Host Artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive2_host_linux
+          path: |
+            host/build/immersive2_host
+            host/build/Release/immersive2_host
+          if-no-files-found: warn
+
+  host-macos:
+    name: Build Host (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+
+      - name: Build
+        run: |
+          cmake --build host/build --config Release
+
+      - name: Upload Host Artifact (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: immersive2_host_macos
+          path: |
+            host/build/immersive2_host
+            host/build/Release/immersive2_host
+          if-no-files-found: warn
+
   client-build:
     name: Build Client (Godot)
     runs-on: ubuntu-latest

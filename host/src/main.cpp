@@ -50,6 +50,11 @@ namespace {
 int main(int argc, char* argv[]) {
     std::cout << "=== Immersive-2 Host v0.1.0 ===\n\n";
 
+#ifndef _WIN32
+    std::cout << "[Host] Portable mode (Linux/macOS): using stub capture/input backends.\n"
+              << "       This mode is intended for development and protocol testing.\n\n";
+#endif
+
     // Register signal handlers for graceful shutdown
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
