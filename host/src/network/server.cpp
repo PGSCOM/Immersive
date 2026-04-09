@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <chrono>
+#include <limits>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -203,6 +204,10 @@ public:
         if (it == clients_.end() || !it->second.udp_addr_set) return;
 
         auto& flow = it->second.flow_state[monitor_id];
+        if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+            flow.ack_seen = false;
+            flow.last_ack = frame_number;
+        }
         if (flow.ack_seen) {
             uint32_t backlog = (frame_number >= flow.last_ack)
                 ? (frame_number - flow.last_ack)
@@ -254,6 +259,12 @@ public:
                               protocol::MessageType type,
                               const void* payload,
                               size_t payload_size) override {
+        if (payload_size > std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[Server] Control payload too large: "
+                      << payload_size << " bytes\n";
+            return false;
+        }
+
         std::lock_guard<std::mutex> lock(clients_mutex_);
         auto it = clients_.find(client_id);
         if (it == clients_.end()) return false;
@@ -262,9 +273,13 @@ public:
         header.type = static_cast<uint8_t>(type);
         header.length = static_cast<uint32_t>(payload_size);
 
-        send_tcp(it->second.tcp_socket, &header, sizeof(header));
+        if (!send_tcp(it->second.tcp_socket, &header, sizeof(header))) {
+            return false;
+        }
         if (payload_size > 0 && payload) {
-            send_tcp(it->second.tcp_socket, payload, payload_size);
+            if (!send_tcp(it->second.tcp_socket, payload, payload_size)) {
+                return false;
+            }
         }
         return true;
     }
@@ -524,8 +539,12 @@ private:
         return true;
     }
 
-    static void send_tcp(SocketType sock, const void* data, size_t size) {
-        send(sock, reinterpret_cast<const char*>(data), static_cast<int>(size), 0);
+    static bool send_tcp(SocketType sock, const void* data, size_t size) {
+        int sent = send(sock,
+                        reinterpret_cast<const char*>(data),
+                        static_cast<int>(size),
+                        0);
+        return sent == static_cast<int>(size);
     }
 
     ServerConfig config_;

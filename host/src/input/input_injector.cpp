@@ -69,7 +69,7 @@ public:
 
         INPUT win_input = {};
         win_input.type = INPUT_MOUSE;
-        win_input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
+        win_input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK;
 
         normalize_to_absolute(target, win_input.mi.dx, win_input.mi.dy);
 

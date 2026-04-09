@@ -116,7 +116,7 @@ static bool find_detached_virtual_monitor(std::wstring& device_name) {
             bool looks_virtual = (monitor.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0 ||
                                  wcsstr(monitor.DeviceString, L"Virtual") != nullptr;
             if (!attached && looks_virtual) {
-                device_name = monitor.DeviceName;
+                device_name = adapter.DeviceName;
                 return true;
             }
         }
@@ -205,9 +205,9 @@ public:
         dm.dmDisplayFrequency = config.refresh_rate;
 
         // Place the virtual monitor to the right of the current virtual desktop
+        int virtual_left   = GetSystemMetrics(SM_XVIRTUALSCREEN);
         int virtual_width  = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int virtual_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        dm.dmPosition.x = virtual_width;
+        dm.dmPosition.x = virtual_left + virtual_width;
         dm.dmPosition.y = 0;
 
         LONG result = ChangeDisplaySettingsExW(
