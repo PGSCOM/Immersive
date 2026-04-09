@@ -24,7 +24,7 @@ project/
 │   ├── screen_panel.gd     # Virtual screen panel in 3D
 │   └── vr_input.gd         # VR input handling
 └── shaders/
-    └── screen.gdshader     # Screen rendering shader
+	└── screen.gdshader     # Screen rendering shader
 ```
 
 ### How It Works
