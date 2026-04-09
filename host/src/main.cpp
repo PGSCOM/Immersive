@@ -117,6 +117,7 @@ int main(int argc, char* argv[]) {
     // 3. Input injector
     auto input_injector = immersive::create_input_injector();
     input_injector->initialize();
+    input_injector->set_displays(displays);
 
     // 4. Virtual display manager (optional)
     auto vdm = immersive::create_virtual_display_manager();
@@ -164,18 +165,15 @@ int main(int argc, char* argv[]) {
 
         // Notify about audio stream if enabled
         if (audio_enable) {
-            immersive::protocol::ControlHeader ahdr;
-            ahdr.type   = static_cast<uint8_t>(immersive::protocol::MessageType::AUDIO_START);
-            ahdr.length = sizeof(immersive::protocol::AudioStart);
-
             immersive::protocol::AudioStart astart;
             astart.sample_rate = 48000;
             astart.channels    = 2;
             astart.audio_port  = audio_port;
-
-            // server->send_control_message is not in the interface; we piggy-back on
-            // send_monitor_list infrastructure — for now log the intent.
-            // A future update to the INetworkServer interface will add send_raw_control().
+            server->send_control_message(
+                client_id,
+                immersive::protocol::MessageType::AUDIO_START,
+                &astart,
+                sizeof(astart));
             std::cout << "[Host] Audio stream available on UDP:" << audio_port << "\n";
         }
     });
@@ -267,17 +265,6 @@ int main(int argc, char* argv[]) {
     if (audio_enable && audio_capture) {
 #ifdef _WIN32
         audio_thread = std::thread([&]() {
-            // Open a separate UDP socket for audio streaming
-            WSADATA wsa;
-            WSAStartup(MAKEWORD(2, 2), &wsa);
-
-            SOCKET audio_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-            // We broadcast to all known clients.
-            // For a production build this would use per-client sockets from the server.
-            // For now, we send to the broadcast address on the audio port.
-            // The client must bind to the audio port to receive.
-
             while (g_running) {
                 if (!streaming) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -304,20 +291,8 @@ int main(int argc, char* argv[]) {
                 std::memcpy(pkt.data() + sizeof(ahdr),
                             audio_frame->samples.data(), pcm_bytes);
 
-                // Determine destination: re-use active client UDP address
-                // In a real implementation, the server exposes client UDP addresses.
-                // Here we send to the video UDP port's known client address by using
-                // server->send_video_packet as a template — for audio we use the same client.
-                // Since send_video_packet already handles that, we forward audio via the
-                // same UDP socket on a separate port.
-                // We leave the actual sendto for the full multi-client server refactor.
-                // This stub logs progress.
-                (void)audio_sock;
-                // TODO: sendto(audio_sock, ...) to each connected client
+                server->broadcast_udp(pkt.data(), pkt.size(), audio_port);
             }
-
-            closesocket(audio_sock);
-            WSACleanup();
         });
 #endif
     }

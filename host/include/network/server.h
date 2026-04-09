@@ -3,6 +3,7 @@
 /// Network streaming server.
 /// Manages TCP control channel and UDP video stream.
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -58,6 +59,17 @@ public:
                                    uint32_t frame_number,
                                    const uint8_t* data,
                                    uint32_t size) = 0;
+
+    /// Send a raw control-channel message (TCP)
+    virtual bool send_control_message(uint32_t client_id,
+                                      protocol::MessageType type,
+                                      const void* payload,
+                                      size_t payload_size) = 0;
+
+    /// Broadcast a UDP payload to all known clients (helper for audio channel)
+    virtual void broadcast_udp(const uint8_t* data,
+                               size_t size,
+                               uint16_t port) = 0;
 
     /// Set event callbacks
     virtual void set_on_client_connected(ClientConnectedCallback cb) = 0;

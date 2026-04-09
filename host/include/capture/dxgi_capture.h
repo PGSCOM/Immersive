@@ -16,6 +16,8 @@ struct DisplayInfo {
     uint16_t    width;
     uint16_t    height;
     uint8_t     refresh_rate;
+    int32_t     origin_x;
+    int32_t     origin_y;
     std::string name;
     bool        is_primary;
 };
