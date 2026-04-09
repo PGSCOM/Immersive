@@ -161,6 +161,8 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 2. Deploy to headset via `adb install`
 3. Press **B/Y** in VR to open the UI overlay
 
+CI builds publish an `immersive2_client_android` artifact containing a debug-signed `Immersive2.apk`; install it with `adb install -r Immersive2.apk`.
+
 ### 3. Connect
 
 - Enter the host PC's local IP in the overlay
