@@ -12,6 +12,7 @@ const TRIGGER_PRESS_THRESHOLD := 0.55
 const TRIGGER_RELEASE_THRESHOLD := 0.35
 const GRIP_PRESS_THRESHOLD := 0.55
 const GRIP_RELEASE_THRESHOLD := 0.35
+const THUMBSTICK_SCROLL_THRESHOLD := 0.1
 
 ## Reference to the main scene controller.
 @onready var main_scene: Node3D = get_node("/root/Main")
@@ -295,11 +296,11 @@ func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 			return
 
 		# Otherwise map thumbstick Y to scroll
-		if abs(value.y) > 0.1 and _ui_hovered and main_scene.has_method("send_ui_pointer_scroll"):
+		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD and _ui_hovered and main_scene.has_method("send_ui_pointer_scroll"):
 			main_scene.send_ui_pointer_scroll(value.y)
 			return
 
-		if abs(value.y) > 0.1 and _last_uv.x >= 0:
+		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD and _last_uv.x >= 0:
 			var scroll: int = int(value.y * 120)
 			if _active_panel and _active_panel.has_method("uv_to_pixel"):
 				var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)

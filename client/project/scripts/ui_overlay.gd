@@ -115,6 +115,7 @@ func toggle_visibility() -> void:
 	else:
 		_ui_button_mask = 0
 		_ui_pointer_valid = false
+		_ui_pointer_pos = Vector2.ZERO
 		hide()
 
 ## Update the displayed connection state.
@@ -471,7 +472,7 @@ func inject_pointer_scroll(delta_y: float) -> void:
 	if abs(delta_y) < 0.1:
 		return
 
-	var button_index := MOUSE_BUTTON_WHEEL_UP if delta_y > 0.0 else MOUSE_BUTTON_WHEEL_DOWN
+	var button_index := MOUSE_BUTTON_WHEEL_DOWN if delta_y > 0.0 else MOUSE_BUTTON_WHEEL_UP
 	var down := InputEventMouseButton.new()
 	down.position = _ui_pointer_pos
 	down.global_position = _ui_pointer_pos
