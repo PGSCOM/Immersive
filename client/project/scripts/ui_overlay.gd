@@ -404,9 +404,7 @@ func _reposition_in_front_of_camera() -> void:
 	global_transform.basis = camera.global_transform.basis
 
 func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
-	if not _visible_overlay:
-		return {"valid": false}
-	if not is_instance_valid(_panel_mesh):
+	if not _visible_overlay or not is_instance_valid(_panel_mesh):
 		return {"valid": false}
 
 	var local_origin: Vector3 = _panel_mesh.global_transform.affine_inverse() * ray_origin
@@ -434,11 +432,12 @@ func inject_pointer_move(uv: Vector2) -> void:
 	if not is_instance_valid(_viewport):
 		return
 	var pos := _uv_to_viewport_pos(uv)
+	var prev_pos := _ui_pointer_pos if _ui_pointer_valid else pos
 
 	var event := InputEventMouseMotion.new()
 	event.position = pos
 	event.global_position = pos
-	event.relative = pos - _ui_pointer_pos if _ui_pointer_valid else Vector2.ZERO
+	event.relative = pos - prev_pos
 	event.button_mask = _ui_button_mask
 	event.pressure = 1.0 if _ui_button_mask != 0 else 0.0
 	_viewport.push_input(event)
@@ -492,6 +491,8 @@ func inject_pointer_scroll(delta_y: float) -> void:
 	_viewport.push_input(up)
 
 func _uv_to_viewport_pos(uv: Vector2) -> Vector2:
+	if not is_instance_valid(_viewport):
+		return Vector2.ZERO
 	var size := Vector2(_viewport.size)
 	return Vector2(
 		clampf(uv.x, 0.0, 1.0) * max(size.x - 1.0, 0.0),
