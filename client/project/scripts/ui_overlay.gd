@@ -38,6 +38,8 @@ signal workspace_restore_requested
 @export var panel_distance: float = 1.0    ## Meters in front of the camera
 @export var panel_width: float    = 0.8    ## Panel width in meters
 @export var panel_height: float   = 0.5    ## Panel height in meters
+const RAY_DIRECTION_EPSILON := 0.0001
+const MIN_SCROLL_DELTA := 0.1
 
 # ---------------------------------------------------------------------------
 # State
@@ -409,7 +411,7 @@ func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictiona
 
 	var local_origin: Vector3 = _panel_mesh.global_transform.affine_inverse() * ray_origin
 	var local_dir: Vector3 = _panel_mesh.global_transform.basis.inverse() * ray_direction
-	if abs(local_dir.z) < 0.0001:
+	if abs(local_dir.z) < RAY_DIRECTION_EPSILON:
 		return {"valid": false}
 
 	var t: float = -local_origin.z / local_dir.z
@@ -469,7 +471,7 @@ func inject_pointer_scroll(delta_y: float) -> void:
 		return
 	if not _ui_pointer_valid:
 		return
-	if abs(delta_y) < 0.1:
+	if abs(delta_y) < MIN_SCROLL_DELTA:
 		return
 
 	var button_index := MOUSE_BUTTON_WHEEL_DOWN if delta_y > 0.0 else MOUSE_BUTTON_WHEEL_UP
