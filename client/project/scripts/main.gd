@@ -370,6 +370,23 @@ func get_panel_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dict
 		"monitor_id": int(best_panel.get_meta("monitor_id", 0))
 	}
 
+func get_ui_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	if ui_overlay and ui_overlay.has_method("ray_to_overlay_hit"):
+		return ui_overlay.ray_to_overlay_hit(ray_origin, ray_direction)
+	return {"valid": false}
+
+func send_ui_pointer_move(uv: Vector2) -> void:
+	if ui_overlay and ui_overlay.has_method("inject_pointer_move"):
+		ui_overlay.inject_pointer_move(uv)
+
+func send_ui_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT) -> void:
+	if ui_overlay and ui_overlay.has_method("inject_pointer_button"):
+		ui_overlay.inject_pointer_button(pressed, button_index)
+
+func send_ui_pointer_scroll(delta_y: float) -> void:
+	if ui_overlay and ui_overlay.has_method("inject_pointer_scroll"):
+		ui_overlay.inject_pointer_scroll(delta_y)
+
 # ---------------------------------------------------------------------------
 # UI Overlay
 # ---------------------------------------------------------------------------

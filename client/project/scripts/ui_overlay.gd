@@ -85,6 +85,9 @@ var _lbl_foveation_value: Label
 var _chk_passthrough: CheckBox
 var _btn_workspace_save: Button
 var _btn_workspace_restore: Button
+var _ui_pointer_pos: Vector2 = Vector2.ZERO
+var _ui_pointer_valid: bool = false
+var _ui_button_mask: int = 0
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -110,6 +113,8 @@ func toggle_visibility() -> void:
 		show()
 		_reposition_in_front_of_camera()
 	else:
+		_ui_button_mask = 0
+		_ui_pointer_valid = false
 		hide()
 
 ## Update the displayed connection state.
@@ -394,6 +399,106 @@ func _reposition_in_front_of_camera() -> void:
 	var forward: Vector3 = -camera.global_transform.basis.z
 	global_transform.origin = camera.global_transform.origin + forward * panel_distance
 	global_transform.basis = camera.global_transform.basis
+
+func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	if not _visible_overlay:
+		return {"valid": false}
+	if not is_instance_valid(_panel_mesh):
+		return {"valid": false}
+
+	var local_origin: Vector3 = _panel_mesh.global_transform.affine_inverse() * ray_origin
+	var local_dir: Vector3 = _panel_mesh.global_transform.basis.inverse() * ray_direction
+	if abs(local_dir.z) < 0.0001:
+		return {"valid": false}
+
+	var t: float = -local_origin.z / local_dir.z
+	if t < 0.0:
+		return {"valid": false}
+
+	var local_hit: Vector3 = local_origin + local_dir * t
+	var u: float = (local_hit.x / panel_width) + 0.5
+	var v: float = 0.5 - (local_hit.y / panel_height)
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return {"valid": false}
+
+	return {
+		"valid": true,
+		"uv": Vector2(u, v),
+		"distance": t
+	}
+
+func inject_pointer_move(uv: Vector2) -> void:
+	if not is_instance_valid(_viewport):
+		return
+	var pos := _uv_to_viewport_pos(uv)
+
+	var event := InputEventMouseMotion.new()
+	event.position = pos
+	event.global_position = pos
+	event.relative = pos - _ui_pointer_pos if _ui_pointer_valid else Vector2.ZERO
+	event.button_mask = _ui_button_mask
+	event.pressure = 1.0 if _ui_button_mask != 0 else 0.0
+	_viewport.push_input(event)
+
+	_ui_pointer_pos = pos
+	_ui_pointer_valid = true
+
+func inject_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT) -> void:
+	if not is_instance_valid(_viewport):
+		return
+	if not _ui_pointer_valid:
+		return
+
+	var mask := _button_index_to_mask(button_index)
+	if pressed:
+		_ui_button_mask |= mask
+	else:
+		_ui_button_mask &= ~mask
+
+	var event := InputEventMouseButton.new()
+	event.position = _ui_pointer_pos
+	event.global_position = _ui_pointer_pos
+	event.button_index = button_index
+	event.pressed = pressed
+	event.button_mask = _ui_button_mask
+	_viewport.push_input(event)
+
+func inject_pointer_scroll(delta_y: float) -> void:
+	if not is_instance_valid(_viewport):
+		return
+	if not _ui_pointer_valid:
+		return
+	if abs(delta_y) < 0.1:
+		return
+
+	var button_index := MOUSE_BUTTON_WHEEL_UP if delta_y > 0.0 else MOUSE_BUTTON_WHEEL_DOWN
+	var down := InputEventMouseButton.new()
+	down.position = _ui_pointer_pos
+	down.global_position = _ui_pointer_pos
+	down.button_index = button_index
+	down.pressed = true
+	down.button_mask = _ui_button_mask
+	_viewport.push_input(down)
+
+	var up := InputEventMouseButton.new()
+	up.position = _ui_pointer_pos
+	up.global_position = _ui_pointer_pos
+	up.button_index = button_index
+	up.pressed = false
+	up.button_mask = _ui_button_mask
+	_viewport.push_input(up)
+
+func _uv_to_viewport_pos(uv: Vector2) -> Vector2:
+	var size := Vector2(_viewport.size)
+	return Vector2(
+		clampf(uv.x, 0.0, 1.0) * max(size.x - 1.0, 0.0),
+		clampf(uv.y, 0.0, 1.0) * max(size.y - 1.0, 0.0)
+	)
+
+func _button_index_to_mask(button_index: int) -> int:
+	if button_index <= 0:
+		return 0
+	return 1 << (button_index - 1)
 
 # ---------------------------------------------------------------------------
 # Button callbacks

@@ -42,6 +42,7 @@ var _active_panel: MeshInstance3D = null
 var _scale_mode: bool = false
 var _tracking_state_known: bool = false
 var _last_tracking_active: bool = false
+var _ui_hovered: bool = false
 
 func _is_trigger_action(name: String) -> bool:
 	return name == "trigger_click" or name == "trigger_value" or name == "trigger" or name == "select" or name == "select_click" or name == "select_value"
@@ -80,6 +81,19 @@ func _update_pointer() -> void:
 
 	var ray_origin: Vector3 = source_transform.origin
 	var ray_direction: Vector3 = (-source_transform.basis.z).normalized()
+
+	if main_scene.has_method("get_ui_hit_from_ray"):
+		var ui_hit: Dictionary = main_scene.get_ui_hit_from_ray(ray_origin, ray_direction)
+		if ui_hit.get("valid", false):
+			_ui_hovered = true
+			_active_panel = null
+			_last_uv = Vector2(-1, -1)
+			if main_scene.has_method("send_ui_pointer_move"):
+				main_scene.send_ui_pointer_move(ui_hit.get("uv", Vector2(-1, -1)))
+			return
+
+	_ui_hovered = false
+
 	var hit: Dictionary = main_scene.get_panel_hit_from_ray(ray_origin, ray_direction)
 	if not hit.get("valid", false):
 		_active_panel = null
@@ -196,6 +210,9 @@ func _set_trigger_state(pressed: bool) -> void:
 
 	_trigger_pressed = pressed
 	print("[VRInput] Trigger %s" % ["DOWN" if pressed else "UP"])
+	if _ui_hovered and main_scene.has_method("send_ui_pointer_button"):
+		main_scene.send_ui_pointer_button(pressed, MOUSE_BUTTON_LEFT)
+		return
 	if pressed:
 		_send_click(0x01)
 	else:
@@ -278,6 +295,10 @@ func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 			return
 
 		# Otherwise map thumbstick Y to scroll
+		if abs(value.y) > 0.1 and _ui_hovered and main_scene.has_method("send_ui_pointer_scroll"):
+			main_scene.send_ui_pointer_scroll(value.y)
+			return
+
 		if abs(value.y) > 0.1 and _last_uv.x >= 0:
 			var scroll: int = int(value.y * 120)
 			if _active_panel and _active_panel.has_method("uv_to_pixel"):
