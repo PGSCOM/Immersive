@@ -16,8 +16,8 @@ const RECONNECT_DELAY := 5.0    ## Seconds between reconnect attempts
 const LATENCY_INTERVAL := 2.0   ## Seconds between latency probes
 const XR_INIT_RETRY_INTERVAL := 1.0
 const XR_INIT_MAX_RETRIES := 10
-const LEFT_TRACKER_PROBES := ["/user/hand/left", "/user/hand_tracker/left", "left_hand"]
-const RIGHT_TRACKER_PROBES := ["/user/hand/right", "/user/hand_tracker/right", "right_hand"]
+const LEFT_TRACKER_PROBES := ["/user/hand/left", "left_hand"]
+const RIGHT_TRACKER_PROBES := ["/user/hand/right", "right_hand"]
 const CONFIG_PATH := "user://immersive2_config.cfg"
 const WORKSPACE_PATH := "user://immersive2_workspace.json"
 
