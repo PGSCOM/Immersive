@@ -226,9 +226,13 @@ func _set_grip_state(pressed: bool) -> void:
 	_grip_pressed = pressed
 	print("[VRInput] Grip %s" % ["DOWN" if pressed else "UP"])
 	if pressed:
-		if not _scale_mode:
+		if _active_panel and _active_panel.has_method("start_drag"):
+			_active_panel.start_drag(self)
+		elif not _scale_mode:
 			_send_click(0x02)
 	else:
+		if _active_panel and _active_panel.has_method("stop_drag"):
+			_active_panel.stop_drag()
 		_scale_mode = false
 		_send_release(0x02)
 
@@ -300,12 +304,18 @@ func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 			main_scene.send_ui_pointer_scroll(value.y)
 			return
 
-		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD and _last_uv.x >= 0:
-			var scroll: int = int(value.y * 120)
+		var scroll_y: int = 0
+		var scroll_x: int = 0
+		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD:
+			scroll_y = int(value.y * 120)
+		if abs(value.x) > THUMBSTICK_SCROLL_THRESHOLD:
+			scroll_x = -int(value.x * 120)
+
+		if (scroll_y != 0 or scroll_x != 0) and _last_uv.x >= 0:
 			if _active_panel and _active_panel.has_method("uv_to_pixel"):
 				var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 				if main_scene.has_method("send_mouse_input"):
 					main_scene.send_mouse_input(
 						active_monitor_id,
 						pixel.x, pixel.y,
-						0, scroll)
+						0, scroll_y, scroll_x)

@@ -52,6 +52,7 @@ var _drag_offset: Transform3D
 
 # Latency label overlay (billboard)
 var _latency_label: Label3D    = null
+var _placeholder_label: Label3D = null
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -287,16 +288,16 @@ func _create_placeholder_texture() -> void:
 	screen_image = Image.create(screen_width, screen_height, false, Image.FORMAT_RGBA8)
 	screen_image.fill(Color(0.05, 0.05, 0.08, 1.0))
 
-	# Border
-	for x in range(screen_width):
-		screen_image.set_pixel(x, 0, Color(0.3, 0.3, 0.5, 1.0))
-		screen_image.set_pixel(x, screen_height - 1, Color(0.3, 0.3, 0.5, 1.0))
-	for y in range(screen_height):
-		screen_image.set_pixel(0, y, Color(0.3, 0.3, 0.5, 1.0))
-		screen_image.set_pixel(screen_width - 1, y, Color(0.3, 0.3, 0.5, 1.0))
+	var border_color := Color(0.3, 0.3, 0.5, 1.0)
+	screen_image.fill_rect(Rect2i(0, 0, screen_width, 1), border_color)
+	screen_image.fill_rect(Rect2i(0, screen_height - 1, screen_width, 1), border_color)
+	screen_image.fill_rect(Rect2i(0, 0, 1, screen_height), border_color)
+	screen_image.fill_rect(Rect2i(screen_width - 1, 0, 1, screen_height), border_color)
 
 	screen_texture = ImageTexture.create_from_image(screen_image)
 	_apply_texture()
+
+	_create_placeholder_label()
 
 func _apply_texture() -> void:
 	var mat := material_override
@@ -334,12 +335,23 @@ func _create_latency_label() -> void:
 	_latency_label.font_size = 24
 	_latency_label.modulate = Color(0.3, 1.0, 0.3)
 	_latency_label.no_depth_test = true
-	_latency_label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	_latency_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 
-	# Position in top-right corner of the panel
 	_update_latency_label_anchor()
 	_latency_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	add_child(_latency_label)
+
+func _create_placeholder_label() -> void:
+	_placeholder_label = Label3D.new()
+	_placeholder_label.text = "Immersive-2 · Waiting for stream"
+	_placeholder_label.font_size = 28
+	_placeholder_label.modulate = Color(0.5, 0.5, 0.7, 0.8)
+	_placeholder_label.no_depth_test = true
+	_placeholder_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_placeholder_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_placeholder_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_placeholder_label.position = Vector3(0, 0, 0.002)
+	add_child(_placeholder_label)
 
 func _update_latency_label_anchor() -> void:
 	if _latency_label:

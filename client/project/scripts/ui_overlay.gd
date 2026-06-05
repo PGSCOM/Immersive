@@ -36,8 +36,8 @@ signal workspace_restore_requested
 # ---------------------------------------------------------------------------
 
 @export var panel_distance: float = 1.0    ## Meters in front of the camera
-@export var panel_width: float    = 0.8    ## Panel width in meters
-@export var panel_height: float   = 0.5    ## Panel height in meters
+@export var panel_width: float    = 1.0    ## Panel width in meters
+@export var panel_height: float   = 0.65   ## Panel height in meters
 const RAY_DIRECTION_EPSILON := 0.0001
 const MIN_SCROLL_DELTA := 0.1
 
@@ -73,8 +73,11 @@ var _canvas: CanvasLayer        # inside SubViewport
 
 # UI controls (Control nodes inside the SubViewport)
 var _lbl_status: Label
+var _lbl_dot: Label
 var _lbl_ping: Label
 var _input_ip: LineEdit
+var _input_tcp: LineEdit
+var _input_udp: LineEdit
 var _btn_connect: Button
 var _monitor_list: VBoxContainer
 var _lbl_title: Label
@@ -162,12 +165,38 @@ func set_passthrough_settings(enabled: bool, supported: bool = true) -> void:
 # Internal — UI construction
 # ---------------------------------------------------------------------------
 
+func _make_section(parent: VBoxContainer, title: String) -> VBoxContainer:
+	var panel := PanelContainer.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.06, 0.08, 0.14, 0.7)
+	style.set_corner_radius_all(4)
+	style.content_margin_left = 6
+	style.content_margin_right = 6
+	style.content_margin_top = 4
+	style.content_margin_bottom = 4
+	panel.add_theme_stylebox_override("panel", style)
+	parent.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	panel.add_child(vbox)
+
+	var header := Label.new()
+	header.text = title
+	header.add_theme_font_size_override("font_size", 18)
+	header.add_theme_color_override("font_color", Color(0.6, 0.7, 0.9))
+	vbox.add_child(header)
+
+	return vbox
+
 func _build_ui() -> void:
+	var accent_color := Color(0.3, 0.6, 1.0)
+
 	# --- SubViewport ---
 	_viewport = SubViewport.new()
-	_viewport.size = Vector2i(800, 500)
+	_viewport.size = Vector2i(1000, 620)
 	_viewport.transparent_bg = true
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_viewport.gui_embed_subwindows = true
 	add_child(_viewport)
 
 	# --- Canvas inside viewport ---
@@ -177,35 +206,49 @@ func _build_ui() -> void:
 	# --- Root panel ---
 	var root_panel := PanelContainer.new()
 	root_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var root_bg := StyleBoxFlat.new()
+	root_bg.bg_color = Color(0.03, 0.05, 0.1, 0.92)
+	root_bg.set_corner_radius_all(6)
+	root_bg.content_margin_left = 12
+	root_bg.content_margin_right = 12
+	root_bg.content_margin_top = 8
+	root_bg.content_margin_bottom = 8
+	root_panel.add_theme_stylebox_override("panel", root_bg)
 	_canvas.add_child(root_panel)
 
-	var vbox := VBoxContainer.new()
-	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	root_panel.add_child(vbox)
+	var outer_vbox := VBoxContainer.new()
+	outer_vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root_panel.add_child(outer_vbox)
 
 	# Title
 	_lbl_title = Label.new()
 	_lbl_title.text = "Immersive-2 VR Client"
 	_lbl_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_lbl_title.add_theme_font_size_override("font_size", 22)
-	vbox.add_child(_lbl_title)
+	_lbl_title.add_theme_font_size_override("font_size", 28)
+	_lbl_title.add_theme_color_override("font_color", accent_color)
+	outer_vbox.add_child(_lbl_title)
 
-	# Separator
-	vbox.add_child(HSeparator.new())
+	# === CONEXIÓN Section ===
+	var conn_box := _make_section(outer_vbox, "Conexión")
 
-	# Status row
 	var status_row := HBoxContainer.new()
-	vbox.add_child(status_row)
+	conn_box.add_child(status_row)
+	_lbl_dot = Label.new()
+	_lbl_dot.text = "●"
+	_lbl_dot.add_theme_color_override("font_color", Color(0.8, 0.3, 0.3))
+	_lbl_dot.add_theme_font_size_override("font_size", 16)
+	_lbl_dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	status_row.add_child(_lbl_dot)
 	var status_lbl_title := Label.new()
-	status_lbl_title.text = "Status: "
+	status_lbl_title.text = " Status: "
 	status_row.add_child(status_lbl_title)
 	_lbl_status = Label.new()
 	_lbl_status.text = "Disconnected"
+	_lbl_status.add_theme_color_override("font_color", Color(0.8, 0.3, 0.3))
 	status_row.add_child(_lbl_status)
 
-	# Ping row
 	var ping_row := HBoxContainer.new()
-	vbox.add_child(ping_row)
+	conn_box.add_child(ping_row)
 	var ping_lbl_title := Label.new()
 	ping_lbl_title.text = "Latency: "
 	ping_row.add_child(ping_lbl_title)
@@ -213,9 +256,8 @@ func _build_ui() -> void:
 	_lbl_ping.text = "-- ms"
 	ping_row.add_child(_lbl_ping)
 
-	# IP input row
 	var ip_row := HBoxContainer.new()
-	vbox.add_child(ip_row)
+	conn_box.add_child(ip_row)
 	var ip_lbl := Label.new()
 	ip_lbl.text = "Host IP: "
 	ip_row.add_child(ip_lbl)
@@ -225,16 +267,57 @@ func _build_ui() -> void:
 	_input_ip.placeholder_text = "192.168.1.100"
 	ip_row.add_child(_input_ip)
 
-	# Connect button
+	var tcp_row := HBoxContainer.new()
+	conn_box.add_child(tcp_row)
+	var tcp_lbl := Label.new()
+	tcp_lbl.text = "TCP port: "
+	tcp_row.add_child(tcp_lbl)
+	_input_tcp = LineEdit.new()
+	_input_tcp.text = str(_tcp_port)
+	_input_tcp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_input_tcp.placeholder_text = "19800"
+	tcp_row.add_child(_input_tcp)
+
+	var udp_row := HBoxContainer.new()
+	conn_box.add_child(udp_row)
+	var udp_lbl := Label.new()
+	udp_lbl.text = "UDP port: "
+	udp_row.add_child(udp_lbl)
+	_input_udp = LineEdit.new()
+	_input_udp.text = str(_udp_port)
+	_input_udp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_input_udp.placeholder_text = "19801"
+	udp_row.add_child(_input_udp)
+
 	_btn_connect = Button.new()
 	_btn_connect.text = "Connect"
+	_btn_connect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_connect.pressed.connect(_on_connect_pressed)
-	vbox.add_child(_btn_connect)
+	var btn_green := StyleBoxFlat.new()
+	btn_green.bg_color = Color(0.15, 0.5, 0.2)
+	btn_green.set_corner_radius_all(4)
+	btn_green.content_margin_left = 8
+	btn_green.content_margin_right = 8
+	btn_green.content_margin_top = 4
+	btn_green.content_margin_bottom = 4
+	_btn_connect.add_theme_stylebox_override("normal", btn_green)
+	var btn_green_hover := StyleBoxFlat.new()
+	btn_green_hover.bg_color = Color(0.2, 0.6, 0.25)
+	btn_green_hover.set_corner_radius_all(4)
+	btn_green_hover.content_margin_left = 8
+	btn_green_hover.content_margin_right = 8
+	btn_green_hover.content_margin_top = 4
+	btn_green_hover.content_margin_bottom = 4
+	_btn_connect.add_theme_stylebox_override("hover", btn_green_hover)
+	_btn_connect.add_theme_color_override("font_color", Color(0.9, 0.95, 0.9))
+	_btn_connect.add_theme_font_size_override("font_size", 20)
+	conn_box.add_child(_btn_connect)
 
-	# Display controls
-	vbox.add_child(HSeparator.new())
+	# === DISPLAY Section ===
+	var disp_box := _make_section(outer_vbox, "Display")
+
 	var curved_row := HBoxContainer.new()
-	vbox.add_child(curved_row)
+	disp_box.add_child(curved_row)
 	_chk_curved = CheckBox.new()
 	_chk_curved.text = "Curved screen mode"
 	_chk_curved.button_pressed = _curved_enabled
@@ -242,9 +325,9 @@ func _build_ui() -> void:
 	curved_row.add_child(_chk_curved)
 
 	var curvature_row := HBoxContainer.new()
-	vbox.add_child(curvature_row)
+	disp_box.add_child(curvature_row)
 	var curvature_lbl := Label.new()
-	curvature_lbl.text = "Curve strength"
+	curvature_lbl.text = "Curve: "
 	curvature_row.add_child(curvature_lbl)
 	_slider_curvature = HSlider.new()
 	_slider_curvature.min_value = 0.0
@@ -256,21 +339,22 @@ func _build_ui() -> void:
 	curvature_row.add_child(_slider_curvature)
 	_lbl_curvature_value = Label.new()
 	_lbl_curvature_value.text = "%.2f" % _curvature_amount
+	_lbl_curvature_value.add_theme_font_size_override("font_size", 16)
 	curvature_row.add_child(_lbl_curvature_value)
 	_update_curvature_ui()
 
 	var foveation_row := HBoxContainer.new()
-	vbox.add_child(foveation_row)
+	disp_box.add_child(foveation_row)
 	_chk_foveation = CheckBox.new()
-	_chk_foveation.text = "Eye-tracked foveated rendering"
+	_chk_foveation.text = "Foveated rendering"
 	_chk_foveation.button_pressed = _foveation_enabled
 	_chk_foveation.toggled.connect(_on_foveation_toggled)
 	foveation_row.add_child(_chk_foveation)
 
 	var foveation_strength_row := HBoxContainer.new()
-	vbox.add_child(foveation_strength_row)
+	disp_box.add_child(foveation_strength_row)
 	var foveation_lbl := Label.new()
-	foveation_lbl.text = "Foveation strength"
+	foveation_lbl.text = "Strength: "
 	foveation_strength_row.add_child(foveation_lbl)
 	_slider_foveation = HSlider.new()
 	_slider_foveation.min_value = 0.0
@@ -282,41 +366,41 @@ func _build_ui() -> void:
 	foveation_strength_row.add_child(_slider_foveation)
 	_lbl_foveation_value = Label.new()
 	_lbl_foveation_value.text = "%.2f" % _foveation_strength
+	_lbl_foveation_value.add_theme_font_size_override("font_size", 16)
 	foveation_strength_row.add_child(_lbl_foveation_value)
 	_update_foveation_ui()
 
 	var passthrough_row := HBoxContainer.new()
-	vbox.add_child(passthrough_row)
+	disp_box.add_child(passthrough_row)
 	_chk_passthrough = CheckBox.new()
-	_chk_passthrough.text = "Passthrough background (mixed reality)"
+	_chk_passthrough.text = "Passthrough (mixed reality)"
 	_chk_passthrough.button_pressed = _passthrough_enabled
 	_chk_passthrough.toggled.connect(_on_passthrough_toggled)
 	passthrough_row.add_child(_chk_passthrough)
 	_update_passthrough_ui()
 
-	# Separator
-	vbox.add_child(HSeparator.new())
-
-	# Monitor list label
-	var mon_lbl := Label.new()
-	mon_lbl.text = "Available Monitors:"
-	vbox.add_child(mon_lbl)
+	# === WORKSPACE Section ===
+	var ws_box := _make_section(outer_vbox, "Workspace")
 
 	var workspace_row := HBoxContainer.new()
-	vbox.add_child(workspace_row)
+	ws_box.add_child(workspace_row)
 	_btn_workspace_save = Button.new()
-	_btn_workspace_save.text = "Save Workspace"
+	_btn_workspace_save.text = "Save"
+	_btn_workspace_save.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_workspace_save.pressed.connect(_on_workspace_save_pressed)
 	workspace_row.add_child(_btn_workspace_save)
 	_btn_workspace_restore = Button.new()
-	_btn_workspace_restore.text = "Restore Workspace"
+	_btn_workspace_restore.text = "Restore"
+	_btn_workspace_restore.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
 	workspace_row.add_child(_btn_workspace_restore)
 
-	# Scrollable monitor list
+	# === MONITORS Section ===
+	var mon_box := _make_section(outer_vbox, "Monitores")
+
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(scroll)
+	mon_box.add_child(scroll)
 
 	_monitor_list = VBoxContainer.new()
 	_monitor_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -376,7 +460,9 @@ func _update_labels() -> void:
 
 	if _lbl_status:
 		_lbl_status.text = state_text
-		_lbl_status.modulate = state_color
+		_lbl_status.add_theme_color_override("font_color", state_color)
+	if _lbl_dot:
+		_lbl_dot.add_theme_color_override("font_color", state_color)
 
 	if _lbl_ping:
 		if _ping_ms > 0.0:
@@ -513,10 +599,15 @@ func _on_connect_pressed() -> void:
 		_host_ip = _input_ip.text.strip_edges()
 		if _host_ip.is_empty():
 			_host_ip = "192.168.1.100"
+		_tcp_port = _input_tcp.text.to_int()
+		_udp_port = _input_udp.text.to_int()
+		if _tcp_port <= 0:
+			_tcp_port = 19800
+		if _udp_port <= 0:
+			_udp_port = 19801
 		_save_config()
 		connect_requested.emit(_host_ip, _tcp_port, _udp_port)
 	else:
-		# Disconnect
 		connect_requested.emit("", 0, 0)
 
 func _on_monitor_selected(monitor_id: int) -> void:

@@ -120,14 +120,15 @@ func select_monitor(monitor_id: int) -> void:
 	_send_control_message(MSG_MONITOR_SELECT, payload)
 
 ## Send mouse input to the host.
-func send_mouse_input(monitor_id: int, x: int, y: int, buttons: int, scroll: int) -> void:
+func send_mouse_input(monitor_id: int, x: int, y: int, buttons: int, scroll: int, scroll_h: int = 0) -> void:
 	var payload := PackedByteArray()
-	payload.resize(8)
+	payload.resize(10)
 	payload[0] = monitor_id
 	payload.encode_u16(1, x)
 	payload.encode_u16(3, y)
 	payload[5] = buttons
 	payload.encode_s16(6, scroll)
+	payload.encode_s16(8, scroll_h)
 	_send_control_message(MSG_INPUT_MOUSE, payload)
 
 ## Send keyboard input to the host.

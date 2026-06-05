@@ -585,9 +585,9 @@ func _on_overlay_workspace_restore_requested() -> void:
 # ---------------------------------------------------------------------------
 
 ## Called from vr_input.gd.
-func send_mouse_input(monitor_id: int, x: int, y: int, buttons: int, scroll: int) -> void:
+func send_mouse_input(monitor_id: int, x: int, y: int, buttons: int, scroll: int, scroll_h: int = 0) -> void:
 	if current_state == State.STREAMING and network_client:
-		network_client.send_mouse_input(monitor_id, x, y, buttons, scroll)
+		network_client.send_mouse_input(monitor_id, x, y, buttons, scroll, scroll_h)
 
 func send_keyboard_input(monitor_id: int, scancode: int, pressed: bool, modifiers: int) -> void:
 	if current_state == State.STREAMING and network_client:

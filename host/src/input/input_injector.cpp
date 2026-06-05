@@ -65,26 +65,54 @@ public:
         if (!initialized_) return;
 
 #ifdef _WIN32
+        // Move event
         POINT target = translate_to_virtual(input.monitor_id, input.x, input.y);
 
-        INPUT win_input = {};
-        win_input.type = INPUT_MOUSE;
-        win_input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK;
+        INPUT move_input = {};
+        move_input.type = INPUT_MOUSE;
+        move_input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK;
+        normalize_to_absolute(target, move_input.mi.dx, move_input.mi.dy);
+        SendInput(1, &move_input, sizeof(INPUT));
 
-        normalize_to_absolute(target, win_input.mi.dx, win_input.mi.dy);
-
-        // Handle button presses
-        if (input.buttons & 0x01) win_input.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
-        if (input.buttons & 0x02) win_input.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
-        if (input.buttons & 0x04) win_input.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
-
-        // Handle scroll
+        // Vertical scroll
         if (input.scroll_delta != 0) {
-            win_input.mi.dwFlags |= MOUSEEVENTF_WHEEL;
-            win_input.mi.mouseData = static_cast<DWORD>(input.scroll_delta);
+            INPUT scroll_input = {};
+            scroll_input.type = INPUT_MOUSE;
+            scroll_input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+            scroll_input.mi.mouseData = static_cast<DWORD>(input.scroll_delta);
+            SendInput(1, &scroll_input, sizeof(INPUT));
         }
 
-        SendInput(1, &win_input, sizeof(INPUT));
+        // Horizontal scroll
+        if (input.scroll_delta_h != 0) {
+            INPUT scroll_input = {};
+            scroll_input.type = INPUT_MOUSE;
+            scroll_input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+            scroll_input.mi.mouseData = static_cast<DWORD>(input.scroll_delta_h);
+            SendInput(1, &scroll_input, sizeof(INPUT));
+        }
+
+        // Button transitions
+        const uint8_t changed = input.buttons ^ prev_buttons_;
+        if (changed & 0x01) {
+            INPUT btn = {};
+            btn.type = INPUT_MOUSE;
+            btn.mi.dwFlags = (input.buttons & 0x01) ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+            SendInput(1, &btn, sizeof(INPUT));
+        }
+        if (changed & 0x02) {
+            INPUT btn = {};
+            btn.type = INPUT_MOUSE;
+            btn.mi.dwFlags = (input.buttons & 0x02) ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+            SendInput(1, &btn, sizeof(INPUT));
+        }
+        if (changed & 0x04) {
+            INPUT btn = {};
+            btn.type = INPUT_MOUSE;
+            btn.mi.dwFlags = (input.buttons & 0x04) ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+            SendInput(1, &btn, sizeof(INPUT));
+        }
+        prev_buttons_ = input.buttons;
 #else
         // Non-Windows stub
         std::cout << "[InputInjector] Mouse: monitor=" << (int)input.monitor_id
@@ -173,6 +201,7 @@ private:
             ((pt.y - virtual_top_) * 65535LL) / height_minus_one);
     }
 
+    uint8_t prev_buttons_ = 0;
     std::unordered_map<uint8_t, MonitorArea> monitors_;
     LONG virtual_left_   = 0;
     LONG virtual_top_    = 0;

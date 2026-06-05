@@ -1,10 +1,7 @@
-[gd_scene load_steps=15 format=3 uid="uid://b3scjvo7tp8ds"]
+[gd_scene load_steps=9 format=3 uid="uid://b3scjvo7tp8ds"]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
-[ext_resource type="Script" path="res://scripts/screen_panel.gd" id="2_screen"]
 [ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
-[ext_resource type="Script" path="res://scripts/ui_overlay.gd" id="4_overlay"]
-[ext_resource type="Shader" path="res://shaders/screen.gdshader" id="5_shader"]
 [ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_controller"]
@@ -26,32 +23,11 @@ emission_energy_multiplier = 2.0
 [sub_resource type="BoxMesh" id="BoxMesh_laser"]
 size = Vector3(0.003, 0.003, 3)
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_screen"]
-render_priority = 0
-shader = ExtResource("5_shader")
-shader_parameter/border_color = Color(0.2, 0.2, 0.3, 1)
-shader_parameter/border_width = 0.005
-shader_parameter/brightness = 1.0
-shader_parameter/contrast = 1.0
-shader_parameter/curvature = 0.0
-shader_parameter/is_yuv = 0
-shader_parameter/foveation_enabled = 0
-shader_parameter/gaze_uv = Vector2(0.5, 0.5)
-shader_parameter/foveation_strength = 0.0
-shader_parameter/foveation_inner_radius = 0.18
-shader_parameter/foveation_outer_radius = 0.72
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_screen"]
-size = Vector2(1.6, 0.9)
-orientation = 2
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_screen2"]
-size = Vector2(1.6, 0.9)
-orientation = 2
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_screen3"]
-size = Vector2(1.6, 0.9)
-orientation = 2
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 2
+background_color = Color(0.02, 0.03, 0.08, 1)
+ambient_light_color = Color(0.05, 0.05, 0.12, 1)
+ambient_light_energy = 0.4
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1_main")
@@ -97,31 +73,10 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.5)
 material_override = SubResource("StandardMaterial3D_laser")
 mesh = SubResource("BoxMesh_laser")
 
-[node name="ScreenPanel" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, -2)
-material_override = SubResource("ShaderMaterial_screen")
-mesh = SubResource("PlaneMesh_screen")
-script = ExtResource("2_screen")
-
-[node name="ScreenPanel2" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.8, 1.6, -2)
-visible = false
-mesh = SubResource("PlaneMesh_screen2")
-script = ExtResource("2_screen")
-
-[node name="ScreenPanel3" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.8, 1.6, -2)
-visible = false
-mesh = SubResource("PlaneMesh_screen3")
-script = ExtResource("2_screen")
-
-[node name="UIOverlay" type="Node3D" parent="."]
-visible = false
-script = ExtResource("4_overlay")
-
 [node name="VirtualKeyboard" parent="." instance=ExtResource("6_vkbd")]
 
 [node name="Environment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 5, 0)

@@ -112,6 +112,7 @@ struct InputMouse {
     uint16_t y;
     uint8_t  buttons;       ///< bitmask: bit0=left, bit1=right, bit2=middle
     int16_t  scroll_delta;
+    int16_t  scroll_delta_h;
 };
 
 struct InputKeyboard {
