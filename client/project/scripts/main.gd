@@ -175,11 +175,12 @@ func _tracker_has_data(tracker_name: String) -> bool:
 	var xr_tracker := XRServer.get_tracker(StringName(tracker_name))
 	if not xr_tracker:
 		return false
+	if tracker_name.begins_with("/user/"):
+		return true
 	if xr_tracker.has_method("get_has_tracking_data"):
 		return xr_tracker.get_has_tracking_data()
 	if xr_tracker.has_method("is_active"):
 		return xr_tracker.is_active()
-	# Some runtimes expose a tracker object before reporting tracking-data flags.
 	return true
 
 func _tracker_exists(tracker_name: String) -> bool:

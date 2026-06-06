@@ -1,4 +1,4 @@
-[gd_resource type="OpenXRActionMap" load_steps=47 format=3 uid="uid://c5st1emqp64ym"]
+[gd_resource type="OpenXRActionMap" load_steps=39 format=3 uid="uid://c5st1emqp64ym"]
 
 [sub_resource type="OpenXRAction" id="OpenXRAction_default_pose"]
 resource_name = "default_pose"
@@ -6,21 +6,9 @@ localized_name = "Default pose"
 action_type = 3
 toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 
-[sub_resource type="OpenXRAction" id="OpenXRAction_trigger_click"]
-resource_name = "trigger_click"
-localized_name = "Trigger click"
-action_type = 0
-toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
-
 [sub_resource type="OpenXRAction" id="OpenXRAction_trigger_value"]
 resource_name = "trigger_value"
 localized_name = "Trigger value"
-toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
-
-[sub_resource type="OpenXRAction" id="OpenXRAction_grip_click"]
-resource_name = "grip_click"
-localized_name = "Grip click"
-action_type = 0
 toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 
 [sub_resource type="OpenXRAction" id="OpenXRAction_grip_value"]
@@ -67,7 +55,7 @@ toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 [sub_resource type="OpenXRActionSet" id="OpenXRActionSet_mainset"]
 resource_name = "mainset"
 localized_name = "Main action set"
-actions = [SubResource("OpenXRAction_default_pose"), SubResource("OpenXRAction_trigger_click"), SubResource("OpenXRAction_trigger_value"), SubResource("OpenXRAction_grip_click"), SubResource("OpenXRAction_grip_value"), SubResource("OpenXRAction_primary_click"), SubResource("OpenXRAction_ax_button"), SubResource("OpenXRAction_by_button"), SubResource("OpenXRAction_aim_pose"), SubResource("OpenXRAction_grip_pose"), SubResource("OpenXRAction_primary")]
+actions = [SubResource("OpenXRAction_default_pose"), SubResource("OpenXRAction_trigger_value"), SubResource("OpenXRAction_grip_value"), SubResource("OpenXRAction_primary_click"), SubResource("OpenXRAction_ax_button"), SubResource("OpenXRAction_by_button"), SubResource("OpenXRAction_aim_pose"), SubResource("OpenXRAction_grip_pose"), SubResource("OpenXRAction_primary")]
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_default_pose_left"]
 action = SubResource("OpenXRAction_default_pose")
@@ -93,14 +81,6 @@ paths = PackedStringArray("/user/hand/left/input/grip/pose")
 action = SubResource("OpenXRAction_grip_pose")
 paths = PackedStringArray("/user/hand/right/input/grip/pose")
 
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_click_left"]
-action = SubResource("OpenXRAction_trigger_click")
-paths = PackedStringArray("/user/hand/left/input/trigger/value")
-
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_click_right"]
-action = SubResource("OpenXRAction_trigger_click")
-paths = PackedStringArray("/user/hand/right/input/trigger/value")
-
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_value_left"]
 action = SubResource("OpenXRAction_trigger_value")
 paths = PackedStringArray("/user/hand/left/input/trigger/value")
@@ -108,14 +88,6 @@ paths = PackedStringArray("/user/hand/left/input/trigger/value")
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_value_right"]
 action = SubResource("OpenXRAction_trigger_value")
 paths = PackedStringArray("/user/hand/right/input/trigger/value")
-
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_click_left"]
-action = SubResource("OpenXRAction_grip_click")
-paths = PackedStringArray("/user/hand/left/input/squeeze/value")
-
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_click_right"]
-action = SubResource("OpenXRAction_grip_click")
-paths = PackedStringArray("/user/hand/right/input/squeeze/value")
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_value_left"]
 action = SubResource("OpenXRAction_grip_value")
@@ -159,7 +131,7 @@ paths = PackedStringArray("/user/hand/right/input/b/click")
 
 [sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_touch"]
 interaction_profile_path = "/interaction_profiles/oculus/touch_controller"
-bindings = [SubResource("OpenXRIPBinding_default_pose_left"), SubResource("OpenXRIPBinding_default_pose_right"), SubResource("OpenXRIPBinding_aim_pose_left"), SubResource("OpenXRIPBinding_aim_pose_right"), SubResource("OpenXRIPBinding_grip_pose_left"), SubResource("OpenXRIPBinding_grip_pose_right"), SubResource("OpenXRIPBinding_trigger_click_left"), SubResource("OpenXRIPBinding_trigger_click_right"), SubResource("OpenXRIPBinding_trigger_value_left"), SubResource("OpenXRIPBinding_trigger_value_right"), SubResource("OpenXRIPBinding_grip_click_left"), SubResource("OpenXRIPBinding_grip_click_right"), SubResource("OpenXRIPBinding_grip_value_left"), SubResource("OpenXRIPBinding_grip_value_right"), SubResource("OpenXRIPBinding_primary_click_left"), SubResource("OpenXRIPBinding_primary_click_right"), SubResource("OpenXRIPBinding_primary_left"), SubResource("OpenXRIPBinding_primary_right"), SubResource("OpenXRIPBinding_ax_button_left"), SubResource("OpenXRIPBinding_ax_button_right"), SubResource("OpenXRIPBinding_by_button_left"), SubResource("OpenXRIPBinding_by_button_right")]
+bindings = [SubResource("OpenXRIPBinding_default_pose_left"), SubResource("OpenXRIPBinding_default_pose_right"), SubResource("OpenXRIPBinding_aim_pose_left"), SubResource("OpenXRIPBinding_aim_pose_right"), SubResource("OpenXRIPBinding_grip_pose_left"), SubResource("OpenXRIPBinding_grip_pose_right"), SubResource("OpenXRIPBinding_trigger_value_left"), SubResource("OpenXRIPBinding_trigger_value_right"), SubResource("OpenXRIPBinding_grip_value_left"), SubResource("OpenXRIPBinding_grip_value_right"), SubResource("OpenXRIPBinding_primary_click_left"), SubResource("OpenXRIPBinding_primary_click_right"), SubResource("OpenXRIPBinding_primary_left"), SubResource("OpenXRIPBinding_primary_right"), SubResource("OpenXRIPBinding_ax_button_left"), SubResource("OpenXRIPBinding_ax_button_right"), SubResource("OpenXRIPBinding_by_button_left"), SubResource("OpenXRIPBinding_by_button_right")]
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_default_pose_left"]
 action = SubResource("OpenXRAction_default_pose")
@@ -185,14 +157,6 @@ paths = PackedStringArray("/user/hand/left/input/grip/pose")
 action = SubResource("OpenXRAction_grip_pose")
 paths = PackedStringArray("/user/hand/right/input/grip/pose")
 
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_trigger_click_left"]
-action = SubResource("OpenXRAction_trigger_click")
-paths = PackedStringArray("/user/hand/left/input/select/click")
-
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_trigger_click_right"]
-action = SubResource("OpenXRAction_trigger_click")
-paths = PackedStringArray("/user/hand/right/input/select/click")
-
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_trigger_value_left"]
 action = SubResource("OpenXRAction_trigger_value")
 paths = PackedStringArray("/user/hand/left/input/select/click")
@@ -203,7 +167,7 @@ paths = PackedStringArray("/user/hand/right/input/select/click")
 
 [sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_simple"]
 interaction_profile_path = "/interaction_profiles/khr/simple_controller"
-bindings = [SubResource("OpenXRIPBinding_simple_default_pose_left"), SubResource("OpenXRIPBinding_simple_default_pose_right"), SubResource("OpenXRIPBinding_simple_aim_pose_left"), SubResource("OpenXRIPBinding_simple_aim_pose_right"), SubResource("OpenXRIPBinding_simple_grip_pose_left"), SubResource("OpenXRIPBinding_simple_grip_pose_right"), SubResource("OpenXRIPBinding_simple_trigger_click_left"), SubResource("OpenXRIPBinding_simple_trigger_click_right"), SubResource("OpenXRIPBinding_simple_trigger_value_left"), SubResource("OpenXRIPBinding_simple_trigger_value_right")]
+bindings = [SubResource("OpenXRIPBinding_simple_default_pose_left"), SubResource("OpenXRIPBinding_simple_default_pose_right"), SubResource("OpenXRIPBinding_simple_aim_pose_left"), SubResource("OpenXRIPBinding_simple_aim_pose_right"), SubResource("OpenXRIPBinding_simple_grip_pose_left"), SubResource("OpenXRIPBinding_simple_grip_pose_right"), SubResource("OpenXRIPBinding_simple_trigger_value_left"), SubResource("OpenXRIPBinding_simple_trigger_value_right")]
 
 [resource]
 action_sets = [SubResource("OpenXRActionSet_mainset")]
