@@ -15,6 +15,7 @@
 #include "driver/idd_manager.h"
 #include <algorithm>
 #include <iostream>
+#include <cwchar>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -100,6 +101,28 @@ static bool virtual_display_by_friendly_name() {
     SetupDiDestroyDeviceInfoList(dev_info);
     return found;
 }
+
+/// Locate a detached virtual display target and return its device name.
+static bool find_detached_virtual_monitor(std::wstring& device_name) {
+    DISPLAY_DEVICEW adapter = {};
+    adapter.cb = sizeof(adapter);
+
+    for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); ++i) {
+        // Enumerate monitors on this adapter
+        DISPLAY_DEVICEW monitor = {};
+        monitor.cb = sizeof(monitor);
+        for (DWORD j = 0; EnumDisplayDevicesW(adapter.DeviceName, j, &monitor, 0); ++j) {
+            bool attached = (monitor.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
+            bool looks_virtual = (monitor.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0 ||
+                                 wcsstr(monitor.DeviceString, L"Virtual") != nullptr;
+            if (!attached && looks_virtual) {
+                device_name = adapter.DeviceName;
+                return true;
+            }
+        }
+    }
+    return false;
+}
 #endif  // _WIN32
 
 // ---------------------------------------------------------------------------
@@ -167,12 +190,47 @@ public:
             return 0;
         }
 
-        // TODO: Communicate with the IDD driver to create a virtual display.
-        // This will use DeviceIoControl or a custom user-mode interface
-        // to the kernel-mode IDD driver.
+        std::wstring device_name;
+#ifdef _WIN32
+        if (!find_detached_virtual_monitor(device_name)) {
+            std::cerr << "[IDDManager] No detached virtual monitor available to attach.\n";
+            return 0;
+        }
+
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+        dm.dmPelsWidth  = config.width;
+        dm.dmPelsHeight = config.height;
+        dm.dmDisplayFrequency = config.refresh_rate;
+
+        // Place the virtual monitor to the right of the current virtual desktop
+        int virtual_left   = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int virtual_width  = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        dm.dmPosition.x = virtual_left + virtual_width;
+        dm.dmPosition.y = 0;
+
+        LONG result = ChangeDisplaySettingsExW(
+            device_name.c_str(),
+            &dm,
+            nullptr,
+            CDS_UPDATEREGISTRY | CDS_NORESET,
+            nullptr);
+
+        if (result != DISP_CHANGE_SUCCESSFUL) {
+            std::cerr << "[IDDManager] Failed to attach virtual display (code "
+                      << result << ")\n";
+            return 0;
+        }
+
+        // Commit the desktop topology update
+        ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+#else
+        (void)device_name;
+#endif
 
         uint8_t id = next_id_++;
-        active_displays_.push_back(id);
+        active_displays_.push_back({id, device_name});
 
         std::cout << "[IDDManager] Created virtual display " << (int)id
                   << " (" << config.width << "x" << config.height
@@ -182,30 +240,69 @@ public:
     }
 
     bool remove_display(uint8_t display_id) override {
-        auto it = std::find(active_displays_.begin(), active_displays_.end(), display_id);
+        auto it = std::find_if(active_displays_.begin(), active_displays_.end(),
+                               [display_id](const VirtualDisplayRecord& rec) {
+                                   return rec.id == display_id;
+                               });
         if (it == active_displays_.end()) return false;
 
-        // TODO: Tell the IDD driver to remove this display
+        bool detached = true;
+#ifdef _WIN32
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        dm.dmPelsWidth = 0;
+        dm.dmPelsHeight = 0;
+        dm.dmPosition.x = 0;
+        dm.dmPosition.y = 0;
+
+        LONG result = ChangeDisplaySettingsExW(
+            it->device_name.c_str(),
+            &dm,
+            nullptr,
+            CDS_UPDATEREGISTRY | CDS_NORESET,
+            nullptr);
+        if (result != DISP_CHANGE_SUCCESSFUL) {
+            std::cerr << "[IDDManager] Failed to detach virtual display "
+                      << (int)display_id << " (code " << result << ")\n";
+            detached = false;
+        } else {
+            ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+        }
+#endif
         active_displays_.erase(it);
 
-        std::cout << "[IDDManager] Removed virtual display " << (int)display_id << "\n";
+        if (detached) {
+            std::cout << "[IDDManager] Removed virtual display " << (int)display_id << "\n";
+        }
         return true;
     }
 
     void remove_all_displays() override {
-        for (auto id : active_displays_) {
-            std::cout << "[IDDManager] Removing virtual display " << (int)id << "\n";
+        // Copy to avoid mutating while iterating
+        auto displays = active_displays_;
+        for (const auto& rec : displays) {
+            remove_display(rec.id);
         }
         active_displays_.clear();
     }
 
     std::vector<uint8_t> get_active_displays() const override {
-        return active_displays_;
+        std::vector<uint8_t> ids;
+        ids.reserve(active_displays_.size());
+        for (const auto& rec : active_displays_) {
+            ids.push_back(rec.id);
+        }
+        return ids;
     }
 
 private:
-    uint8_t              next_id_ = 1;
-    std::vector<uint8_t> active_displays_;
+    struct VirtualDisplayRecord {
+        uint8_t id;
+        std::wstring device_name;
+    };
+    uint8_t                          next_id_ = 1;
+    std::vector<VirtualDisplayRecord> active_displays_;
 };
 
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {

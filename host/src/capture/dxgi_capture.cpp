@@ -52,6 +52,8 @@ public:
                 info.height = static_cast<uint16_t>(
                     desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
                 info.refresh_rate = 60;  // Default; can query via mode enumeration
+                info.origin_x = static_cast<int32_t>(desc.DesktopCoordinates.left);
+                info.origin_y = static_cast<int32_t>(desc.DesktopCoordinates.top);
                 info.is_primary = (desc.DesktopCoordinates.left == 0 &&
                                    desc.DesktopCoordinates.top == 0);
 
@@ -71,6 +73,8 @@ public:
         stub.width = 1920;
         stub.height = 1080;
         stub.refresh_rate = 60;
+        stub.origin_x = 0;
+        stub.origin_y = 0;
         stub.name = "Stub Display (non-Windows)";
         stub.is_primary = true;
         displays.push_back(stub);

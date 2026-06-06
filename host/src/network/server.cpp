@@ -12,6 +12,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <cstring>
+#include <chrono>
+#include <limits>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -47,6 +49,12 @@ struct ClientState {
     struct sockaddr_in  udp_addr;
     bool                udp_addr_set = false;
     std::string         name;
+    struct FlowState {
+        uint32_t last_ack = 0;
+        bool     ack_seen = false;
+        std::chrono::steady_clock::time_point last_log{};
+    };
+    std::unordered_map<uint8_t, FlowState> flow_state;
 };
 
 class NetworkServer : public INetworkServer {
@@ -56,6 +64,8 @@ public:
     ~NetworkServer() override {
         stop();
     }
+
+    static constexpr uint32_t kMaxInFlightFrames = 6;
 
     bool start(const ServerConfig& config) override {
         if (running_) return false;
@@ -178,16 +188,10 @@ public:
 
     void send_stream_start(uint32_t client_id,
                            const protocol::StreamStart& info) override {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto it = clients_.find(client_id);
-        if (it == clients_.end()) return;
-
-        protocol::ControlHeader header;
-        header.type = static_cast<uint8_t>(protocol::MessageType::STREAM_START);
-        header.length = sizeof(info);
-
-        send_tcp(it->second.tcp_socket, &header, sizeof(header));
-        send_tcp(it->second.tcp_socket, &info, sizeof(info));
+        send_control_message(client_id,
+                             protocol::MessageType::STREAM_START,
+                             &info,
+                             sizeof(info));
     }
 
     void send_video_packet(uint32_t client_id,
@@ -198,6 +202,30 @@ public:
         std::lock_guard<std::mutex> lock(clients_mutex_);
         auto it = clients_.find(client_id);
         if (it == clients_.end() || !it->second.udp_addr_set) return;
+
+        auto& flow = it->second.flow_state[monitor_id];
+        if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+            flow.ack_seen = false;
+            flow.last_ack = frame_number;
+        }
+        if (flow.ack_seen) {
+            uint32_t backlog = (frame_number >= flow.last_ack)
+                ? (frame_number - flow.last_ack)
+                : 0;
+            if (backlog > kMaxInFlightFrames) {
+                auto now = std::chrono::steady_clock::now();
+                if (flow.last_log.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
+                    std::cout << "[Server] Dropping frame " << frame_number
+                              << " for client " << client_id
+                              << " monitor " << static_cast<int>(monitor_id)
+                              << " (backlog " << backlog << " > "
+                              << kMaxInFlightFrames << ")\n";
+                    flow.last_log = now;
+                }
+                return;
+            }
+        }
 
         uint16_t chunk_count = protocol::compute_chunk_count(size);
 
@@ -224,6 +252,53 @@ public:
                    static_cast<int>(packet.size()), 0,
                    reinterpret_cast<struct sockaddr*>(&it->second.udp_addr),
                    sizeof(it->second.udp_addr));
+        }
+    }
+
+    bool send_control_message(uint32_t client_id,
+                              protocol::MessageType type,
+                              const void* payload,
+                              size_t payload_size) override {
+        if (payload_size > std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[Server] Control payload too large: "
+                      << payload_size << " bytes\n";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.find(client_id);
+        if (it == clients_.end()) return false;
+
+        protocol::ControlHeader header;
+        header.type = static_cast<uint8_t>(type);
+        header.length = static_cast<uint32_t>(payload_size);
+
+        if (!send_tcp(it->second.tcp_socket, &header, sizeof(header))) {
+            return false;
+        }
+        if (payload_size > 0 && payload) {
+            if (!send_tcp(it->second.tcp_socket, payload, payload_size)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void broadcast_udp(const uint8_t* data,
+                       size_t size,
+                       uint16_t port) override {
+        if (!data || size == 0) return;
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (const auto& [id, client] : clients_) {
+            if (!client.udp_addr_set) continue;
+            auto dest = client.udp_addr;
+            dest.sin_port = htons(port);
+            sendto(udp_socket_,
+                   reinterpret_cast<const char*>(data),
+                   static_cast<int>(size),
+                   0,
+                   reinterpret_cast<struct sockaddr*>(&dest),
+                   sizeof(dest));
         }
     }
 
@@ -390,7 +465,13 @@ private:
                 if (payload.size() >= sizeof(protocol::FrameAck)) {
                     protocol::FrameAck ack;
                     std::memcpy(&ack, payload.data(), sizeof(ack));
-                    // TODO: use for adaptive bitrate / pacing
+                    std::lock_guard<std::mutex> lock(clients_mutex_);
+                    auto it = clients_.find(client_id);
+                    if (it != clients_.end()) {
+                        auto& flow = it->second.flow_state[ack.monitor_id];
+                        flow.ack_seen = true;
+                        flow.last_ack = std::max(flow.last_ack, ack.frame_number);
+                    }
                 }
                 break;
             }
@@ -403,14 +484,15 @@ private:
                     protocol::LatencyResponse resp;
                     resp.probe_id          = probe.probe_id;
                     resp.client_timestamp  = probe.client_timestamp;
-                    // server_timestamp: approximate via probe receipt time
-                    resp.server_timestamp  = 0;  // TODO: fill with actual system time
+                    auto now = std::chrono::steady_clock::now();
+                    resp.server_timestamp = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            now.time_since_epoch()).count());
 
-                    protocol::ControlHeader resp_header;
-                    resp_header.type   = static_cast<uint8_t>(protocol::MessageType::LATENCY_RESPONSE);
-                    resp_header.length = sizeof(resp);
-                    send_tcp(sock, &resp_header, sizeof(resp_header));
-                    send_tcp(sock, &resp, sizeof(resp));
+                    send_control_message(client_id,
+                                         protocol::MessageType::LATENCY_RESPONSE,
+                                         &resp,
+                                         sizeof(resp));
                 }
                 break;
             }
@@ -457,8 +539,12 @@ private:
         return true;
     }
 
-    static void send_tcp(SocketType sock, const void* data, size_t size) {
-        send(sock, reinterpret_cast<const char*>(data), static_cast<int>(size), 0);
+    static bool send_tcp(SocketType sock, const void* data, size_t size) {
+        int sent = send(sock,
+                        reinterpret_cast<const char*>(data),
+                        static_cast<int>(size),
+                        0);
+        return sent == static_cast<int>(size);
     }
 
     ServerConfig config_;

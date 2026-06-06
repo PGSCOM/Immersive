@@ -1,0 +1,82 @@
+[gd_scene load_steps=9 format=3 uid="uid://b3scjvo7tp8ds"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
+[ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_controller"]
+albedo_color = Color(0.12, 0.12, 0.12, 1)
+emission_enabled = true
+emission = Color(0.08, 0.08, 0.08, 1)
+emission_energy_multiplier = 0.4
+
+[sub_resource type="BoxMesh" id="BoxMesh_controller"]
+size = Vector3(0.05, 0.03, 0.12)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_laser"]
+transparency = 1
+albedo_color = Color(0.9, 0.15, 0.15, 0.85)
+emission_enabled = true
+emission = Color(1, 0.2, 0.2, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_laser"]
+size = Vector3(0.003, 0.003, 3)
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 2
+background_color = Color(0.02, 0.03, 0.08, 1)
+ambient_light_color = Color(0.05, 0.05, 0.12, 1)
+ambient_light_energy = 0.4
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="XROrigin3D" type="XROrigin3D" parent="."]
+
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 1.25, -0.4)
+tracker = &"/user/hand/left"
+pose = &"grip_pose"
+
+[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/LeftController"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
+material_override = SubResource("StandardMaterial3D_controller")
+mesh = SubResource("BoxMesh_controller")
+
+[node name="RightController" type="XRController3D" parent="XROrigin3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 1.25, -0.4)
+tracker = &"/user/hand/right"
+pose = &"grip_pose"
+script = ExtResource("3_input")
+
+[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/RightController"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
+material_override = SubResource("StandardMaterial3D_controller")
+mesh = SubResource("BoxMesh_controller")
+
+[node name="RightAim" type="XRController3D" parent="XROrigin3D"]
+tracker = &"/user/hand/right"
+pose = &"aim_pose"
+
+[node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightAim"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, 0)
+
+[node name="RayCast3D" type="RayCast3D" parent="XROrigin3D/RightAim/RaycastOrigin"]
+target_position = Vector3(0, 0, -10)
+
+[node name="LaserPointer" type="MeshInstance3D" parent="XROrigin3D/RightAim/RaycastOrigin"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.5)
+material_override = SubResource("StandardMaterial3D_laser")
+mesh = SubResource("BoxMesh_laser")
+
+[node name="VirtualKeyboard" parent="." instance=ExtResource("6_vkbd")]
+
+[node name="Environment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 5, 0)

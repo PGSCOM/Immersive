@@ -114,13 +114,9 @@ func _on_button_pressed(button_name: String) -> void:
 			# Thumbstick click → middle mouse button
 			_send_click(0x04)
 		"ax_button":
-			# A/X button → toggle virtual keyboard
-			if virtual_keyboard and virtual_keyboard.has_method("toggle_visibility"):
-				virtual_keyboard.toggle_visibility()
-			else:
-				# Fallback: send Escape key (original behaviour)
-				if main_scene.has_method("send_keyboard_input"):
-					main_scene.send_keyboard_input(active_monitor_id, 0x1B, true, 0)
+			# A/X → toggle UI overlay (removed: broken 3D virtual keyboard)
+			if main_scene and main_scene.has_method("toggle_ui_overlay"):
+				main_scene.toggle_ui_overlay()
 		"by_button":
 			# B/Y button → Enter key
 			if main_scene.has_method("send_keyboard_input"):

@@ -5,8 +5,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "protocol.h"
+#include "capture/dxgi_capture.h"
 
 namespace immersive {
 
@@ -17,6 +19,9 @@ public:
 
     /// Initialize the input injector
     virtual bool initialize() = 0;
+
+    /// Provide display layout for coordinate translation
+    virtual void set_displays(const std::vector<DisplayInfo>& displays) = 0;
 
     /// Inject a mouse event
     virtual void inject_mouse(const protocol::InputMouse& input) = 0;

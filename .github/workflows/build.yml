@@ -172,9 +172,9 @@ jobs:
           cp "${CLIENT_DIR}/project/project.godot" "${CI_PROJECT_DIR}/project.godot"
           cp "${CLIENT_DIR}/project/export_presets.cfg" "${CI_PROJECT_DIR}/export_presets.cfg"
           cp "${CLIENT_DIR}/project/openxr_action_map.tres" "${CI_PROJECT_DIR}/openxr_action_map.tres"
-          cp -R "${CLIENT_DIR}/scenes" "${CI_PROJECT_DIR}/scenes"
-          cp -R "${CLIENT_DIR}/scripts" "${CI_PROJECT_DIR}/scripts"
-          cp -R "${CLIENT_DIR}/shaders" "${CI_PROJECT_DIR}/shaders"
+          cp -R "${CLIENT_DIR}/project/scenes" "${CI_PROJECT_DIR}/scenes"
+          cp -R "${CLIENT_DIR}/project/scripts" "${CI_PROJECT_DIR}/scripts"
+          cp -R "${CLIENT_DIR}/project/shaders" "${CI_PROJECT_DIR}/shaders"
 
           # Godot 4.3 expects gradle_build/use_gradle_build for Android Gradle exports.
           # Ensure CI uses the Gradle path required by OpenXR and SDK overrides.
