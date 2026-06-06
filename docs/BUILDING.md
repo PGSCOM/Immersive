@@ -20,7 +20,7 @@
 - **Godot Engine 4.6.3** ([godotengine.org](https://godotengine.org/download))
 - **Android SDK + NDK** (for Quest/Pico builds)
   - Install via Android Studio or `sdkmanager`
-  - Required packages: `platforms;android-32`, `build-tools;33.0.2`, `ndk;25.2.9519653`
+  - Required packages: `platforms;android-36`, `build-tools;36.1.0`, `ndk;29.0.14206865`
 - **Meta Quest** or **Pico 4** headset in developer mode
 
 ---
