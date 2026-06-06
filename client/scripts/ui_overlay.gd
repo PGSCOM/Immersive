@@ -261,8 +261,10 @@ func _flat(bg: Color, border: Color,
 	var s               := StyleBoxFlat.new()
 	s.bg_color           = bg
 	s.border_color       = border
-	s.border_width_left  = s.border_width_right = 1
-	s.border_width_top   = s.border_width_bottom = 1
+	s.border_width_left  = 1
+	s.border_width_right = 1
+	s.border_width_top   = 1
+	s.border_width_bottom = 1
 	s.corner_radius_top_left     = radius
 	s.corner_radius_top_right    = radius
 	s.corner_radius_bottom_left  = radius
