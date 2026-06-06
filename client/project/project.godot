@@ -14,7 +14,7 @@ config/name="Immersive-2 VR Client"
 config/description="Open-source virtual desktop for VR headsets"
 config/version="0.1.0"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.3", "Mobile")
+config/features=PackedStringArray("4.6", "Mobile")
 
 [display]
 

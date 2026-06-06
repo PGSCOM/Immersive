@@ -116,7 +116,7 @@ Immersive-2/
 - **No GPU encoder required** — the built-in MJPEG software encoder works on any CPU
 
 ### VR Client
-- Godot Engine 4.3+
+- Godot Engine 4.6.3+
 - Meta Quest 2/3/Pro or Pico 4 (developer mode enabled)
 - Wi-Fi connection to the host machine
 
@@ -151,7 +151,7 @@ The host listens on TCP :19800 (control) and UDP :19801 (video).
 ### 2. Run the VR Client
 
 **Desktop testing:**
-1. Open `client/project/` in Godot 4.3+
+1. Open `client/project/` in Godot 4.6.3+
 2. Press **F5** to run
 3. Press **O** to open the UI overlay
 4. Enter the host IP and click Connect
