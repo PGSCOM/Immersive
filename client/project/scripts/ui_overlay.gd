@@ -1,12 +1,9 @@
 ## VR UI Overlay for Immersive-2.
 ##
-## Displays connection status, host IP input, monitor selection, and latency.
-## Rendered as a floating SubViewport panel in 3D space (attached to XROrigin3D).
-##
-## Usage:
-##   - Add a Node3D child with a MeshInstance3D (PlaneMesh) + SubViewport
-##   - Attach this script to the root Node3D
-##   - Connect the signals from main.gd to update state
+## Floating SubViewport panel that shows connection status, IP input,
+## monitor selection, and display settings.
+## Smoothly follows the camera each frame when visible (lazy-billboard
+## pattern used by the Godot VR editor and godot-xr-tools).
 
 extends Node3D
 
@@ -14,32 +11,30 @@ extends Node3D
 # Signals
 # ---------------------------------------------------------------------------
 
-## Emitted when the user presses the Connect button.
 signal connect_requested(ip: String, tcp_port: int, udp_port: int)
-## Emitted when the user selects a monitor from the list.
 signal monitor_selected(monitor_id: int)
-## Emitted when the user requests to add a second or third screen panel.
 signal add_screen_panel(monitor_id: int, slot: int)
-## Emitted when curved display mode settings change.
 signal screen_curvature_changed(enabled: bool, amount: float)
-## Emitted when foveated rendering settings change.
 signal foveation_settings_changed(enabled: bool, strength: float)
-## Emitted when passthrough mode is toggled.
 signal passthrough_toggled(enabled: bool)
-## Emitted when workspace save is requested.
 signal workspace_save_requested
-## Emitted when workspace restore is requested.
 signal workspace_restore_requested
 
 # ---------------------------------------------------------------------------
 # Exports
 # ---------------------------------------------------------------------------
 
-@export var panel_distance: float = 1.0    ## Meters in front of the camera
-@export var panel_width: float    = 1.0    ## Panel width in meters
-@export var panel_height: float   = 0.65   ## Panel height in meters
-const RAY_DIRECTION_EPSILON := 0.0001
-const MIN_SCROLL_DELTA := 0.1
+@export var panel_distance : float = 1.0   ## Metres in front of camera
+@export var panel_width    : float = 0.90  ## Panel width in metres
+@export var panel_height   : float = 0.62  ## Panel height in metres
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+const CONFIG_PATH  := "user://immersive2_config.cfg"
+## Smooth-follow speed: higher = snappier, lower = more floaty
+const FOLLOW_SPEED := 2.5
 
 # ---------------------------------------------------------------------------
 # State
@@ -47,52 +42,45 @@ const MIN_SCROLL_DELTA := 0.1
 
 enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, STREAMING }
 
-var _state: ConnectionState = ConnectionState.DISCONNECTED
-var _ping_ms: float = 0.0
-var _available_monitors: Array = []
-var _host_ip: String = "192.168.1.100"
-var _tcp_port: int = 19800
-var _udp_port: int = 19801
-var _visible_overlay: bool = false
-var _curved_enabled: bool = false
-var _curvature_amount: float = 0.18
-var _foveation_enabled: bool = false
-var _foveation_strength: float = 0.55
-var _passthrough_enabled: bool = false
-var _passthrough_supported: bool = true
-
-# Config file path
-const CONFIG_PATH := "user://immersive2_config.cfg"
+var _state                 : ConnectionState = ConnectionState.DISCONNECTED
+var _ping_ms               : float           = 0.0
+var _available_monitors    : Array           = []
+var _host_ip               : String          = "192.168.1.100"
+var _tcp_port              : int             = 19800
+var _udp_port              : int             = 19801
+var _visible_overlay       : bool            = false
+var _curved_enabled        : bool            = false
+var _curvature_amount      : float           = 0.18
+var _foveation_enabled     : bool            = false
+var _foveation_strength    : float           = 0.55
+var _passthrough_enabled   : bool            = false
+var _passthrough_supported : bool            = true
+var _last_pointer_uv       : Vector2         = Vector2(0.5, 0.5)
+var _kbd_visible           : bool            = false
 
 # ---------------------------------------------------------------------------
-# Internal node references (created dynamically)
+# Internal node references (built procedurally)
 # ---------------------------------------------------------------------------
-var _viewport: SubViewport
-var _panel_mesh: MeshInstance3D
-var _canvas: CanvasLayer        # inside SubViewport
 
-# UI controls (Control nodes inside the SubViewport)
-var _lbl_status: Label
-var _lbl_dot: Label
-var _lbl_ping: Label
-var _input_ip: LineEdit
-var _input_tcp: LineEdit
-var _input_udp: LineEdit
-var _btn_connect: Button
-var _monitor_list: VBoxContainer
-var _lbl_title: Label
-var _chk_curved: CheckBox
-var _slider_curvature: HSlider
-var _lbl_curvature_value: Label
-var _chk_foveation: CheckBox
-var _slider_foveation: HSlider
-var _lbl_foveation_value: Label
-var _chk_passthrough: CheckBox
-var _btn_workspace_save: Button
-var _btn_workspace_restore: Button
-var _ui_pointer_pos: Vector2 = Vector2.ZERO
-var _ui_pointer_valid: bool = false
-var _ui_button_mask: int = 0
+var _viewport              : SubViewport
+var _panel_mesh            : MeshInstance3D
+var _canvas                : CanvasLayer
+var _lbl_status            : Label
+var _lbl_ping              : Label
+var _input_ip              : LineEdit
+var _btn_connect           : Button
+var _monitor_list          : VBoxContainer
+var _lbl_title             : Label
+var _chk_curved            : CheckBox
+var _slider_curvature      : HSlider
+var _lbl_curvature_value   : Label
+var _chk_foveation         : CheckBox
+var _slider_foveation      : HSlider
+var _lbl_foveation_value   : Label
+var _chk_passthrough       : CheckBox
+var _btn_workspace_save    : Button
+var _btn_workspace_restore : Button
+var _kbd_container         : VBoxContainer  ## In-viewport numeric keyboard
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -102,493 +90,622 @@ func _ready() -> void:
 	_load_config()
 	_build_ui()
 	set_process(true)
-	hide()   # start hidden; shown by toggle_visibility()
+	hide()
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_labels()
+	if _visible_overlay:
+		_smooth_follow_camera(delta)
 
 # ---------------------------------------------------------------------------
-# Public API — called from main.gd
+# Public API
 # ---------------------------------------------------------------------------
 
-## Show or hide the overlay panel (called when user presses B/Y button).
+## Show / hide the overlay.  On show: snap to camera, then smooth-follow
+## takes over each frame.
 func toggle_visibility() -> void:
-	_visible_overlay = !_visible_overlay
+	_visible_overlay = not _visible_overlay
 	if _visible_overlay:
 		show()
 		_reposition_in_front_of_camera()
 	else:
-		_ui_button_mask = 0
-		_ui_pointer_valid = false
-		_ui_pointer_pos = Vector2.ZERO
 		hide()
 
-## Update the displayed connection state.
 func set_state(state: ConnectionState) -> void:
 	_state = state
 	_update_labels()
-	if state == ConnectionState.DISCONNECTED:
-		_btn_connect.text = "Connect"
-		_btn_connect.disabled = false
-	elif state == ConnectionState.CONNECTING:
-		_btn_connect.text = "Connecting..."
-		_btn_connect.disabled = true
-	elif state == ConnectionState.CONNECTED or state == ConnectionState.STREAMING:
-		_btn_connect.text = "Disconnect"
-		_btn_connect.disabled = false
+	if not _btn_connect:
+		return
+	match state:
+		ConnectionState.DISCONNECTED:
+			_btn_connect.text     = "Connect"
+			_btn_connect.disabled = false
+		ConnectionState.CONNECTING:
+			_btn_connect.text     = "Connecting…"
+			_btn_connect.disabled = true
+		ConnectionState.CONNECTED, ConnectionState.STREAMING:
+			_btn_connect.text     = "Disconnect"
+			_btn_connect.disabled = false
 
-## Update the monitor list.
 func set_monitor_list(monitors: Array) -> void:
 	_available_monitors = monitors
 	_rebuild_monitor_list()
 
-## Update the displayed latency value (in milliseconds).
 func set_latency(ms: float) -> void:
 	_ping_ms = ms
 
 func set_screen_curvature(enabled: bool, amount: float) -> void:
-	_curved_enabled = enabled
+	_curved_enabled   = enabled
 	_curvature_amount = clamp(amount, 0.0, 0.5)
 	_update_curvature_ui()
 
 func set_foveation_settings(enabled: bool, strength: float) -> void:
-	_foveation_enabled = enabled
+	_foveation_enabled  = enabled
 	_foveation_strength = clamp(strength, 0.0, 1.0)
 	_update_foveation_ui()
 
 func set_passthrough_settings(enabled: bool, supported: bool = true) -> void:
-	_passthrough_enabled = enabled
+	_passthrough_enabled   = enabled
 	_passthrough_supported = supported
 	_update_passthrough_ui()
 
 # ---------------------------------------------------------------------------
-# Internal — UI construction
+# VR pointer injection  (called by main.gd / vr_input.gd)
 # ---------------------------------------------------------------------------
 
-func _make_section(parent: VBoxContainer, title: String) -> VBoxContainer:
-	var panel := PanelContainer.new()
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.06, 0.08, 0.14, 0.7)
-	style.set_corner_radius_all(4)
-	style.content_margin_left = 6
-	style.content_margin_right = 6
-	style.content_margin_top = 4
-	style.content_margin_bottom = 4
-	panel.add_theme_stylebox_override("panel", style)
-	parent.add_child(panel)
+## Ray–plane intersection with the overlay mesh.
+## Returns { valid:bool, uv:Vector2, distance:float }.
+func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	if not visible or not _panel_mesh:
+		return {"valid": false}
+	var inv        := _panel_mesh.global_transform.affine_inverse()
+	var local_o    := inv * ray_origin
+	var local_d    := _panel_mesh.global_transform.basis.inverse() * ray_direction
+	if abs(local_d.z) < 0.0001:
+		return {"valid": false}
+	var t := -local_o.z / local_d.z
+	if t < 0.0:
+		return {"valid": false}
+	var hit := local_o + local_d * t
+	var u   := (hit.x / panel_width)  + 0.5
+	var v   := 0.5 - (hit.y / panel_height)
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return {"valid": false}
+	_last_pointer_uv = Vector2(u, v)
+	return {"valid": true, "uv": Vector2(u, v), "distance": t}
 
-	var vbox := VBoxContainer.new()
-	panel.add_child(vbox)
+## Push a mouse-motion event into the SubViewport.
+func inject_pointer_move(uv: Vector2) -> void:
+	if not _viewport:
+		return
+	_last_pointer_uv = uv
+	var px := Vector2(uv.x * _viewport.size.x, uv.y * _viewport.size.y)
+	var ev := InputEventMouseMotion.new()
+	ev.position        = px
+	ev.global_position = px
+	_viewport.push_input(ev)
 
-	var header := Label.new()
-	header.text = title
-	header.add_theme_font_size_override("font_size", 18)
-	header.add_theme_color_override("font_color", Color(0.6, 0.7, 0.9))
-	vbox.add_child(header)
+## Push a mouse-button event into the SubViewport.
+func inject_pointer_button(pressed: bool,
+		button_index: int = MOUSE_BUTTON_LEFT) -> void:
+	if not _viewport:
+		return
+	var px := _last_pointer_uv * Vector2(_viewport.size)
+	var ev := InputEventMouseButton.new()
+	ev.button_index    = button_index
+	ev.pressed         = pressed
+	ev.position        = px
+	ev.global_position = px
+	_viewport.push_input(ev)
 
-	return vbox
+## Push a scroll event into the SubViewport.
+func inject_pointer_scroll(delta_y: float) -> void:
+	if not _viewport:
+		return
+	var px := _last_pointer_uv * Vector2(_viewport.size)
+	var ev := InputEventMouseButton.new()
+	ev.button_index    = MOUSE_BUTTON_WHEEL_UP if delta_y > 0 else MOUSE_BUTTON_WHEEL_DOWN
+	ev.pressed         = true
+	ev.factor          = absf(delta_y)
+	ev.position        = px
+	ev.global_position = px
+	_viewport.push_input(ev)
+
+# ---------------------------------------------------------------------------
+# Camera follow  (Issue #1 fix)
+# ---------------------------------------------------------------------------
+
+## Each frame while visible: smoothly interpolate the panel transform
+## towards the target position in front of the camera.
+## Using Transform3D.interpolate_with() is the standard pattern in
+## godot-xr-tools and the Godot VR editor PR #67736.
+func _smooth_follow_camera(delta: float) -> void:
+	var camera := get_viewport().get_camera_3d()
+	if not camera:
+		return
+	var fwd := -camera.global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() < 0.0001:
+		fwd = Vector3(0.0, 0.0, -1.0)
+	else:
+		fwd = fwd.normalized()
+	var right         := fwd.cross(Vector3.UP).normalized()
+	var target_origin := camera.global_transform.origin \
+		+ fwd * panel_distance + Vector3(0.0, -0.08, 0.0)
+	var target_t      := Transform3D(Basis(right, Vector3.UP, -fwd), target_origin)
+	global_transform  = global_transform.interpolate_with(
+		target_t, minf(delta * FOLLOW_SPEED, 1.0))
+
+## Instant snap used on first show.
+func _reposition_in_front_of_camera() -> void:
+	var camera := get_viewport().get_camera_3d()
+	if not camera:
+		return
+	var fwd := -camera.global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() < 0.0001:
+		fwd = Vector3(0.0, 0.0, -1.0)
+	else:
+		fwd = fwd.normalized()
+	var right := fwd.cross(Vector3.UP).normalized()
+	global_transform.origin = camera.global_transform.origin \
+		+ fwd * panel_distance + Vector3(0.0, -0.08, 0.0)
+	global_transform.basis  = Basis(right, Vector3.UP, -fwd)
+
+# ---------------------------------------------------------------------------
+# Theme helpers  (Issue #2 — dark VR-friendly design)
+# ---------------------------------------------------------------------------
+
+func _flat(bg: Color, border: Color,
+		radius: int = 5, mg: int = 8) -> StyleBoxFlat:
+	var s               := StyleBoxFlat.new()
+	s.bg_color           = bg
+	s.border_color       = border
+	s.border_width_left  = s.border_width_right = 1
+	s.border_width_top   = s.border_width_bottom = 1
+	s.corner_radius_top_left     = radius
+	s.corner_radius_top_right    = radius
+	s.corner_radius_bottom_left  = radius
+	s.corner_radius_bottom_right = radius
+	s.content_margin_left  = mg
+	s.content_margin_right = mg
+	s.content_margin_top   = mg - 2
+	s.content_margin_bottom = mg - 2
+	return s
+
+func _apply_theme(root: Control) -> void:
+	var t := Theme.new()
+	# PanelContainer background
+	t.set_stylebox("panel", "PanelContainer",
+		_flat(Color(0.055, 0.065, 0.115, 0.97), Color(0.20, 0.30, 0.58), 7, 12))
+	# Buttons
+	t.set_stylebox("normal",   "Button", _flat(Color(0.12, 0.18, 0.36), Color(0.26, 0.38, 0.68)))
+	t.set_stylebox("hover",    "Button", _flat(Color(0.20, 0.32, 0.60), Color(0.35, 0.52, 0.90)))
+	t.set_stylebox("pressed",  "Button", _flat(Color(0.07, 0.11, 0.26), Color(0.18, 0.28, 0.52)))
+	t.set_stylebox("disabled", "Button", _flat(Color(0.08, 0.09, 0.14), Color(0.16, 0.17, 0.24)))
+	t.set_font_size("font_size", "Button", 18)
+	t.set_color("font_color",          "Button", Color(0.88, 0.92, 1.00))
+	t.set_color("font_disabled_color", "Button", Color(0.35, 0.38, 0.52))
+	# LineEdit
+	t.set_stylebox("normal", "LineEdit", _flat(Color(0.09, 0.10, 0.17), Color(0.26, 0.40, 0.70), 4, 8))
+	t.set_stylebox("focus",  "LineEdit", _flat(Color(0.11, 0.13, 0.21), Color(0.40, 0.62, 1.00), 4, 8))
+	t.set_font_size("font_size",              "LineEdit", 18)
+	t.set_color("font_color",            "LineEdit", Color(0.90, 0.94, 1.00))
+	t.set_color("font_placeholder_color","LineEdit", Color(0.40, 0.45, 0.62))
+	# Labels
+	t.set_font_size("font_size", "Label", 19)
+	t.set_color("font_color",    "Label", Color(0.87, 0.91, 1.00))
+	# CheckBox
+	t.set_font_size("font_size",           "CheckBox", 18)
+	t.set_color("font_color",              "CheckBox", Color(0.87, 0.91, 1.00))
+	t.set_color("font_disabled_color",     "CheckBox", Color(0.38, 0.40, 0.55))
+	# HSlider — make track visible
+	var track := StyleBoxFlat.new()
+	track.bg_color = Color(0.18, 0.22, 0.40)
+	track.corner_radius_top_left = track.corner_radius_top_right = 3
+	track.corner_radius_bottom_left = track.corner_radius_bottom_right = 3
+	t.set_stylebox("slider", "HSlider", track)
+	var grab := StyleBoxFlat.new()
+	grab.bg_color = Color(0.30, 0.52, 0.90)
+	grab.corner_radius_top_left = grab.corner_radius_top_right = 3
+	grab.corner_radius_bottom_left = grab.corner_radius_bottom_right = 3
+	t.set_stylebox("grabber_area", "HSlider", grab)
+	root.theme = t
+
+# ---------------------------------------------------------------------------
+# UI construction
+# ---------------------------------------------------------------------------
 
 func _build_ui() -> void:
-	var accent_color := Color(0.3, 0.6, 1.0)
-
-	# --- SubViewport ---
-	_viewport = SubViewport.new()
-	_viewport.size = Vector2i(1000, 620)
-	_viewport.transparent_bg = true
+	# ── SubViewport (900 × 620) ──────────────────────────────────────────
+	_viewport                          = SubViewport.new()
+	_viewport.size                     = Vector2i(900, 620)
+	_viewport.transparent_bg           = true
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	_viewport.gui_embed_subwindows = true
 	add_child(_viewport)
 
-	# --- Canvas inside viewport ---
 	_canvas = CanvasLayer.new()
 	_viewport.add_child(_canvas)
 
-	# --- Root panel ---
-	var root_panel := PanelContainer.new()
-	root_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var root_bg := StyleBoxFlat.new()
-	root_bg.bg_color = Color(0.03, 0.05, 0.1, 0.92)
-	root_bg.set_corner_radius_all(6)
-	root_bg.content_margin_left = 12
-	root_bg.content_margin_right = 12
-	root_bg.content_margin_top = 8
-	root_bg.content_margin_bottom = 8
-	root_panel.add_theme_stylebox_override("panel", root_bg)
-	_canvas.add_child(root_panel)
+	# ── Root container with dark theme ──────────────────────────────────
+	var root := PanelContainer.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_apply_theme(root)
+	_canvas.add_child(root)
 
-	var outer_vbox := VBoxContainer.new()
-	outer_vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	root_panel.add_child(outer_vbox)
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 6)
+	root.add_child(vbox)
 
-	# Title
+	# ── Title bar ────────────────────────────────────────────────────────
+	var title_bg := StyleBoxFlat.new()
+	title_bg.bg_color              = Color(0.09, 0.14, 0.30)
+	title_bg.border_width_bottom   = 1
+	title_bg.border_color          = Color(0.24, 0.38, 0.72)
+	title_bg.content_margin_top    = 10
+	title_bg.content_margin_bottom = 10
+	title_bg.content_margin_left   = 14
+	title_bg.content_margin_right  = 14
+	var title_panel := PanelContainer.new()
+	title_panel.add_theme_stylebox_override("panel", title_bg)
+	vbox.add_child(title_panel)
+
 	_lbl_title = Label.new()
-	_lbl_title.text = "Immersive-2 VR Client"
+	_lbl_title.text = "✦  Immersive-2"
 	_lbl_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_lbl_title.add_theme_font_size_override("font_size", 28)
-	_lbl_title.add_theme_color_override("font_color", accent_color)
-	outer_vbox.add_child(_lbl_title)
+	_lbl_title.add_theme_font_size_override("font_size", 22)
+	_lbl_title.add_theme_color_override("font_color", Color(0.72, 0.87, 1.00))
+	title_panel.add_child(_lbl_title)
 
-	# === CONEXIÓN Section ===
-	var conn_box := _make_section(outer_vbox, "Conexión")
+	# ── Status row ───────────────────────────────────────────────────────
+	var info_row := HBoxContainer.new()
+	info_row.add_theme_constant_override("separation", 20)
+	vbox.add_child(info_row)
 
-	var status_row := HBoxContainer.new()
-	conn_box.add_child(status_row)
-	_lbl_dot = Label.new()
-	_lbl_dot.text = "●"
-	_lbl_dot.add_theme_color_override("font_color", Color(0.8, 0.3, 0.3))
-	_lbl_dot.add_theme_font_size_override("font_size", 16)
-	_lbl_dot.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	status_row.add_child(_lbl_dot)
-	var status_lbl_title := Label.new()
-	status_lbl_title.text = " Status: "
-	status_row.add_child(status_lbl_title)
+	var st_box := HBoxContainer.new()
+	st_box.add_theme_constant_override("separation", 6)
+	info_row.add_child(st_box)
+	var st_lbl := Label.new()
+	st_lbl.text = "Status:"
+	st_lbl.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
+	st_box.add_child(st_lbl)
 	_lbl_status = Label.new()
 	_lbl_status.text = "Disconnected"
-	_lbl_status.add_theme_color_override("font_color", Color(0.8, 0.3, 0.3))
-	status_row.add_child(_lbl_status)
+	st_box.add_child(_lbl_status)
 
-	var ping_row := HBoxContainer.new()
-	conn_box.add_child(ping_row)
-	var ping_lbl_title := Label.new()
-	ping_lbl_title.text = "Latency: "
-	ping_row.add_child(ping_lbl_title)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info_row.add_child(spacer)
+
+	var ping_box := HBoxContainer.new()
+	ping_box.add_theme_constant_override("separation", 6)
+	info_row.add_child(ping_box)
+	var ping_lbl := Label.new()
+	ping_lbl.text = "Ping:"
+	ping_lbl.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
+	ping_box.add_child(ping_lbl)
 	_lbl_ping = Label.new()
 	_lbl_ping.text = "-- ms"
-	ping_row.add_child(_lbl_ping)
+	ping_box.add_child(_lbl_ping)
+
+	# ── Connection section ──────────────────────────────────────────────
+	_add_section_separator(vbox, "Connection")
 
 	var ip_row := HBoxContainer.new()
-	conn_box.add_child(ip_row)
-	var ip_lbl := Label.new()
-	ip_lbl.text = "Host IP: "
-	ip_row.add_child(ip_lbl)
+	ip_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(ip_row)
+	var ip_title := Label.new()
+	ip_title.text = "Host IP"
+	ip_title.add_theme_color_override("font_color", Color(0.68, 0.74, 0.94))
+	ip_title.custom_minimum_size = Vector2(68, 0)
+	ip_row.add_child(ip_title)
 	_input_ip = LineEdit.new()
-	_input_ip.text = _host_ip
+	_input_ip.text                  = _host_ip
 	_input_ip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_input_ip.placeholder_text = "192.168.1.100"
+	_input_ip.placeholder_text      = "192.168.1.100"
 	ip_row.add_child(_input_ip)
+	var kbd_toggle := Button.new()
+	kbd_toggle.text        = "⌨"
+	kbd_toggle.tooltip_text = "Show / hide IP keyboard"
+	kbd_toggle.pressed.connect(_on_toggle_kbd)
+	ip_row.add_child(kbd_toggle)
 
-	var tcp_row := HBoxContainer.new()
-	conn_box.add_child(tcp_row)
-	var tcp_lbl := Label.new()
-	tcp_lbl.text = "TCP port: "
-	tcp_row.add_child(tcp_lbl)
-	_input_tcp = LineEdit.new()
-	_input_tcp.text = str(_tcp_port)
-	_input_tcp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_input_tcp.placeholder_text = "19800"
-	tcp_row.add_child(_input_tcp)
-
-	var udp_row := HBoxContainer.new()
-	conn_box.add_child(udp_row)
-	var udp_lbl := Label.new()
-	udp_lbl.text = "UDP port: "
-	udp_row.add_child(udp_lbl)
-	_input_udp = LineEdit.new()
-	_input_udp.text = str(_udp_port)
-	_input_udp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_input_udp.placeholder_text = "19801"
-	udp_row.add_child(_input_udp)
+	# In-viewport IP keyboard (Issue #4)
+	_kbd_container         = _build_ip_keyboard()
+	_kbd_container.visible = false
+	vbox.add_child(_kbd_container)
 
 	_btn_connect = Button.new()
 	_btn_connect.text = "Connect"
-	_btn_connect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_connect.pressed.connect(_on_connect_pressed)
-	var btn_green := StyleBoxFlat.new()
-	btn_green.bg_color = Color(0.15, 0.5, 0.2)
-	btn_green.set_corner_radius_all(4)
-	btn_green.content_margin_left = 8
-	btn_green.content_margin_right = 8
-	btn_green.content_margin_top = 4
-	btn_green.content_margin_bottom = 4
-	_btn_connect.add_theme_stylebox_override("normal", btn_green)
-	var btn_green_hover := StyleBoxFlat.new()
-	btn_green_hover.bg_color = Color(0.2, 0.6, 0.25)
-	btn_green_hover.set_corner_radius_all(4)
-	btn_green_hover.content_margin_left = 8
-	btn_green_hover.content_margin_right = 8
-	btn_green_hover.content_margin_top = 4
-	btn_green_hover.content_margin_bottom = 4
-	_btn_connect.add_theme_stylebox_override("hover", btn_green_hover)
-	_btn_connect.add_theme_color_override("font_color", Color(0.9, 0.95, 0.9))
-	_btn_connect.add_theme_font_size_override("font_size", 20)
-	conn_box.add_child(_btn_connect)
+	vbox.add_child(_btn_connect)
 
-	# === DISPLAY Section ===
-	var disp_box := _make_section(outer_vbox, "Display")
+	# ── Display section ──────────────────────────────────────────────────
+	_add_section_separator(vbox, "Display")
 
-	var curved_row := HBoxContainer.new()
-	disp_box.add_child(curved_row)
+	# Curved screen (checkbox + slider on same row)
+	var curve_row := HBoxContainer.new()
+	curve_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(curve_row)
 	_chk_curved = CheckBox.new()
-	_chk_curved.text = "Curved screen mode"
+	_chk_curved.text           = "Curved screen"
 	_chk_curved.button_pressed = _curved_enabled
 	_chk_curved.toggled.connect(_on_curved_toggled)
-	curved_row.add_child(_chk_curved)
-
-	var curvature_row := HBoxContainer.new()
-	disp_box.add_child(curvature_row)
-	var curvature_lbl := Label.new()
-	curvature_lbl.text = "Curve: "
-	curvature_row.add_child(curvature_lbl)
+	curve_row.add_child(_chk_curved)
+	var curve_sp := Control.new()
+	curve_sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	curve_row.add_child(curve_sp)
 	_slider_curvature = HSlider.new()
-	_slider_curvature.min_value = 0.0
-	_slider_curvature.max_value = 0.5
-	_slider_curvature.step = 0.01
-	_slider_curvature.value = _curvature_amount
+	_slider_curvature.min_value             = 0.0
+	_slider_curvature.max_value             = 0.5
+	_slider_curvature.step                  = 0.01
+	_slider_curvature.value                 = _curvature_amount
+	_slider_curvature.custom_minimum_size   = Vector2(150, 0)
 	_slider_curvature.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_slider_curvature.value_changed.connect(_on_curvature_value_changed)
-	curvature_row.add_child(_slider_curvature)
+	curve_row.add_child(_slider_curvature)
 	_lbl_curvature_value = Label.new()
-	_lbl_curvature_value.text = "%.2f" % _curvature_amount
-	_lbl_curvature_value.add_theme_font_size_override("font_size", 16)
-	curvature_row.add_child(_lbl_curvature_value)
+	_lbl_curvature_value.text              = "%.2f" % _curvature_amount
+	_lbl_curvature_value.custom_minimum_size = Vector2(38, 0)
+	_lbl_curvature_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	curve_row.add_child(_lbl_curvature_value)
 	_update_curvature_ui()
 
-	var foveation_row := HBoxContainer.new()
-	disp_box.add_child(foveation_row)
+	# Foveated rendering
+	var fov_row := HBoxContainer.new()
+	fov_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(fov_row)
 	_chk_foveation = CheckBox.new()
-	_chk_foveation.text = "Foveated rendering"
+	_chk_foveation.text           = "Eye-tracked foveation"
 	_chk_foveation.button_pressed = _foveation_enabled
 	_chk_foveation.toggled.connect(_on_foveation_toggled)
-	foveation_row.add_child(_chk_foveation)
-
-	var foveation_strength_row := HBoxContainer.new()
-	disp_box.add_child(foveation_strength_row)
-	var foveation_lbl := Label.new()
-	foveation_lbl.text = "Strength: "
-	foveation_strength_row.add_child(foveation_lbl)
+	fov_row.add_child(_chk_foveation)
+	var fov_sp := Control.new()
+	fov_sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fov_row.add_child(fov_sp)
 	_slider_foveation = HSlider.new()
-	_slider_foveation.min_value = 0.0
-	_slider_foveation.max_value = 1.0
-	_slider_foveation.step = 0.01
-	_slider_foveation.value = _foveation_strength
+	_slider_foveation.min_value             = 0.0
+	_slider_foveation.max_value             = 1.0
+	_slider_foveation.step                  = 0.01
+	_slider_foveation.value                 = _foveation_strength
+	_slider_foveation.custom_minimum_size   = Vector2(150, 0)
 	_slider_foveation.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_slider_foveation.value_changed.connect(_on_foveation_strength_changed)
-	foveation_strength_row.add_child(_slider_foveation)
+	fov_row.add_child(_slider_foveation)
 	_lbl_foveation_value = Label.new()
-	_lbl_foveation_value.text = "%.2f" % _foveation_strength
-	_lbl_foveation_value.add_theme_font_size_override("font_size", 16)
-	foveation_strength_row.add_child(_lbl_foveation_value)
+	_lbl_foveation_value.text               = "%.2f" % _foveation_strength
+	_lbl_foveation_value.custom_minimum_size  = Vector2(38, 0)
+	_lbl_foveation_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	fov_row.add_child(_lbl_foveation_value)
 	_update_foveation_ui()
 
-	var passthrough_row := HBoxContainer.new()
-	disp_box.add_child(passthrough_row)
+	# Passthrough
+	var pass_row := HBoxContainer.new()
+	vbox.add_child(pass_row)
 	_chk_passthrough = CheckBox.new()
-	_chk_passthrough.text = "Passthrough (mixed reality)"
+	_chk_passthrough.text           = "Passthrough  (mixed reality)"
 	_chk_passthrough.button_pressed = _passthrough_enabled
 	_chk_passthrough.toggled.connect(_on_passthrough_toggled)
-	passthrough_row.add_child(_chk_passthrough)
+	pass_row.add_child(_chk_passthrough)
 	_update_passthrough_ui()
 
-	# === WORKSPACE Section ===
-	var ws_box := _make_section(outer_vbox, "Workspace")
+	# ── Monitors section ─────────────────────────────────────────────────
+	_add_section_separator(vbox, "Monitors")
 
-	var workspace_row := HBoxContainer.new()
-	ws_box.add_child(workspace_row)
+	var mon_hdr := HBoxContainer.new()
+	mon_hdr.add_theme_constant_override("separation", 6)
+	vbox.add_child(mon_hdr)
+	var mon_fill := Control.new()
+	mon_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mon_hdr.add_child(mon_fill)
 	_btn_workspace_save = Button.new()
-	_btn_workspace_save.text = "Save"
-	_btn_workspace_save.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_workspace_save.text = "💾 Save layout"
 	_btn_workspace_save.pressed.connect(_on_workspace_save_pressed)
-	workspace_row.add_child(_btn_workspace_save)
+	mon_hdr.add_child(_btn_workspace_save)
 	_btn_workspace_restore = Button.new()
-	_btn_workspace_restore.text = "Restore"
-	_btn_workspace_restore.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_workspace_restore.text = "↩ Restore"
 	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
-	workspace_row.add_child(_btn_workspace_restore)
-
-	# === MONITORS Section ===
-	var mon_box := _make_section(outer_vbox, "Monitores")
+	mon_hdr.add_child(_btn_workspace_restore)
 
 	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	mon_box.add_child(scroll)
+	scroll.size_flags_vertical  = Control.SIZE_EXPAND_FILL
+	scroll.custom_minimum_size  = Vector2(0, 80)
+	vbox.add_child(scroll)
 
 	_monitor_list = VBoxContainer.new()
 	_monitor_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_monitor_list.add_theme_constant_override("separation", 4)
 	scroll.add_child(_monitor_list)
 
-	# --- 3D mesh panel to display the viewport ---
+	# ── 3D mesh that renders the SubViewport in world space ───────────────
 	_panel_mesh = MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(panel_width, panel_height)
-	plane.orientation = PlaneMesh.FACE_Z
-	_panel_mesh.mesh = plane
-
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = _viewport.get_texture()
+	var plane          := PlaneMesh.new()
+	plane.size          = Vector2(panel_width, panel_height)
+	plane.orientation   = PlaneMesh.FACE_Z
+	_panel_mesh.mesh   = plane
+	var mat            := StandardMaterial3D.new()
+	mat.albedo_texture  = _viewport.get_texture()
 	mat.flags_transparent = true
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_panel_mesh.material_override = mat
 	add_child(_panel_mesh)
 
+# ---------------------------------------------------------------------------
+# Section separator helper
+# ---------------------------------------------------------------------------
+
+func _add_section_separator(parent: VBoxContainer, title: String) -> void:
+	var sep := HSeparator.new()
+	sep.add_theme_color_override("color", Color(0.18, 0.24, 0.44))
+	parent.add_child(sep)
+	var lbl := Label.new()
+	lbl.text = title.to_upper()
+	lbl.add_theme_font_size_override("font_size", 14)
+	lbl.add_theme_color_override("font_color", Color(0.42, 0.52, 0.78))
+	parent.add_child(lbl)
+
+# ---------------------------------------------------------------------------
+# In-viewport IP keyboard  (Issue #4)
+# ---------------------------------------------------------------------------
+
+func _build_ip_keyboard() -> VBoxContainer:
+	var wrapper := VBoxContainer.new()
+	wrapper.add_theme_constant_override("separation", 3)
+
+	var frame := PanelContainer.new()
+	var frame_bg := StyleBoxFlat.new()
+	frame_bg.bg_color              = Color(0.07, 0.09, 0.16)
+	frame_bg.border_color          = Color(0.20, 0.30, 0.56)
+	frame_bg.border_width_left     = frame_bg.border_width_right = 1
+	frame_bg.border_width_top      = frame_bg.border_width_bottom = 1
+	frame_bg.corner_radius_top_left = frame_bg.corner_radius_top_right = 4
+	frame_bg.corner_radius_bottom_left = frame_bg.corner_radius_bottom_right = 4
+	frame_bg.content_margin_left   = frame_bg.content_margin_right = 6
+	frame_bg.content_margin_top    = frame_bg.content_margin_bottom = 6
+	frame.add_theme_stylebox_override("panel", frame_bg)
+	wrapper.add_child(frame)
+
+	var inner := VBoxContainer.new()
+	inner.add_theme_constant_override("separation", 4)
+	frame.add_child(inner)
+
+	# Row 1 — digits + dot
+	var row1 := HBoxContainer.new()
+	row1.add_theme_constant_override("separation", 3)
+	inner.add_child(row1)
+	for ch in ["1","2","3","4","5","6","7","8","9","0","."]:
+		var b := Button.new()
+		b.text = ch
+		b.add_theme_font_size_override("font_size", 18)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var _ch := ch
+		b.pressed.connect(func(): _on_ip_kbd_key(_ch))
+		row1.add_child(b)
+
+	# Row 2 — control keys
+	var row2 := HBoxContainer.new()
+	row2.add_theme_constant_override("separation", 3)
+	inner.add_child(row2)
+
+	var bksp := Button.new()
+	bksp.text = "⌫  Back"
+	bksp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bksp.pressed.connect(func(): _on_ip_kbd_key("←"))
+	row2.add_child(bksp)
+
+	var clr := Button.new()
+	clr.text = "✕  Clear"
+	clr.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	clr.pressed.connect(func(): _on_ip_kbd_key("C"))
+	row2.add_child(clr)
+
+	var done := Button.new()
+	done.text = "✓  Done"
+	done.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	done.pressed.connect(func(): _on_toggle_kbd())
+	row2.add_child(done)
+
+	return wrapper
+
+func _on_toggle_kbd() -> void:
+	_kbd_visible = not _kbd_visible
+	if _kbd_container:
+		_kbd_container.visible = _kbd_visible
+
+func _on_ip_kbd_key(code: String) -> void:
+	if not _input_ip:
+		return
+	match code:
+		"←":
+			if _input_ip.text.length() > 0:
+				_input_ip.text = _input_ip.text.left(_input_ip.text.length() - 1)
+		"C":
+			_input_ip.text = ""
+		_:
+			_input_ip.text += code
+
+# ---------------------------------------------------------------------------
+# Monitor list rebuild
+# ---------------------------------------------------------------------------
+
 func _rebuild_monitor_list() -> void:
-	# Clear existing buttons
 	for child in _monitor_list.get_children():
 		child.queue_free()
-
 	for mon in _available_monitors:
 		var btn := Button.new()
-		btn.text = "[%d] %s  %dx%d @ %d Hz" % [
+		btn.text = "[%d]  %s  —  %dx%d @ %d Hz" % [
 			mon.get("id", 0),
 			mon.get("name", "Monitor"),
 			mon.get("width", 0),
 			mon.get("height", 0),
 			mon.get("refresh_rate", 60)
 		]
-		var mon_id: int = mon.get("id", 0)
-		btn.pressed.connect(func(): _on_monitor_selected(mon_id))
+		btn.add_theme_font_size_override("font_size", 17)
+		var mid: int = mon.get("id", 0)
+		btn.pressed.connect(func(): _on_monitor_selected(mid))
 		_monitor_list.add_child(btn)
 
+# ---------------------------------------------------------------------------
+# Label update  (called every frame)
+# ---------------------------------------------------------------------------
+
 func _update_labels() -> void:
-	var state_text: String
-	var state_color: Color
+	if not _lbl_status:
+		return
+	var txt: String
+	var col: Color
 	match _state:
 		ConnectionState.DISCONNECTED:
-			state_text = "Disconnected"
-			state_color = Color(0.8, 0.3, 0.3)
+			txt = "Disconnected";  col = Color(0.88, 0.30, 0.30)
 		ConnectionState.CONNECTING:
-			state_text = "Connecting..."
-			state_color = Color(0.9, 0.7, 0.2)
+			txt = "Connecting…";   col = Color(0.95, 0.78, 0.22)
 		ConnectionState.CONNECTED:
-			state_text = "Connected"
-			state_color = Color(0.3, 0.8, 0.3)
+			txt = "Connected";     col = Color(0.28, 0.85, 0.48)
 		ConnectionState.STREAMING:
-			state_text = "Streaming"
-			state_color = Color(0.2, 0.6, 1.0)
+			txt = "● Streaming";   col = Color(0.28, 0.70, 1.00)
 		_:
-			state_text = "Unknown"
-			state_color = Color.WHITE
-
-	if _lbl_status:
-		_lbl_status.text = state_text
-		_lbl_status.add_theme_color_override("font_color", state_color)
-	if _lbl_dot:
-		_lbl_dot.add_theme_color_override("font_color", state_color)
+			txt = "Unknown";       col = Color.WHITE
+	_lbl_status.text = txt
+	_lbl_status.modulate = col
 
 	if _lbl_ping:
 		if _ping_ms > 0.0:
-			var color := Color(0.3, 0.8, 0.3)
-			if _ping_ms > 30.0:
-				color = Color(0.9, 0.7, 0.2)
-			if _ping_ms > 60.0:
-				color = Color(0.8, 0.3, 0.3)
-			_lbl_ping.text = "%.1f ms" % _ping_ms
-			_lbl_ping.modulate = color
+			var c := Color(0.28, 0.85, 0.48)
+			if _ping_ms > 30.0: c = Color(0.95, 0.78, 0.22)
+			if _ping_ms > 60.0: c = Color(0.90, 0.30, 0.30)
+			_lbl_ping.text    = "%.1f ms" % _ping_ms
+			_lbl_ping.modulate = c
 		else:
-			_lbl_ping.text = "-- ms"
-			_lbl_ping.modulate = Color.WHITE
+			_lbl_ping.text    = "-- ms"
+			_lbl_ping.modulate = Color(0.50, 0.56, 0.78)
 
-func _reposition_in_front_of_camera() -> void:
-	# Find the XRCamera3D to position the overlay in view
-	var camera := get_viewport().get_camera_3d()
-	if camera == null:
-		camera = get_node_or_null("/root/Main/XROrigin3D/XRCamera3D")
-	if camera == null:
-		return
+# ---------------------------------------------------------------------------
+# Slider / checkbox UI sync
+# ---------------------------------------------------------------------------
 
-	var forward: Vector3 = -camera.global_transform.basis.z
-	global_transform.origin = camera.global_transform.origin + forward * panel_distance
-	global_transform.basis = camera.global_transform.basis
+func _update_curvature_ui() -> void:
+	if _chk_curved:
+		_chk_curved.button_pressed = _curved_enabled
+	if _slider_curvature:
+		_slider_curvature.value    = _curvature_amount
+		_slider_curvature.editable = _curved_enabled
+	if _lbl_curvature_value:
+		_lbl_curvature_value.text  = "%.2f" % _curvature_amount
 
-func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
-	if not _visible_overlay or not is_instance_valid(_panel_mesh):
-		return {"valid": false}
+func _update_foveation_ui() -> void:
+	if _chk_foveation:
+		_chk_foveation.button_pressed = _foveation_enabled
+	if _slider_foveation:
+		_slider_foveation.value    = _foveation_strength
+		_slider_foveation.editable = _foveation_enabled
+	if _lbl_foveation_value:
+		_lbl_foveation_value.text  = "%.2f" % _foveation_strength
 
-	var local_origin: Vector3 = _panel_mesh.global_transform.affine_inverse() * ray_origin
-	var local_dir: Vector3 = _panel_mesh.global_transform.basis.inverse() * ray_direction
-	if abs(local_dir.z) < RAY_DIRECTION_EPSILON:
-		return {"valid": false}
-
-	var t: float = -local_origin.z / local_dir.z
-	if t < 0.0:
-		return {"valid": false}
-
-	var local_hit: Vector3 = local_origin + local_dir * t
-	var u: float = (local_hit.x / panel_width) + 0.5
-	var v: float = 0.5 - (local_hit.y / panel_height)
-	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
-		return {"valid": false}
-
-	return {
-		"valid": true,
-		"uv": Vector2(u, v),
-		"distance": t
-	}
-
-func inject_pointer_move(uv: Vector2) -> void:
-	if not is_instance_valid(_viewport):
-		return
-	var pos := _uv_to_viewport_pos(uv)
-	var prev_pos := _ui_pointer_pos if _ui_pointer_valid else pos
-
-	var event := InputEventMouseMotion.new()
-	event.position = pos
-	event.global_position = pos
-	event.relative = pos - prev_pos
-	event.button_mask = _ui_button_mask
-	event.pressure = 1.0 if _ui_button_mask != 0 else 0.0
-	_viewport.push_input(event)
-
-	_ui_pointer_pos = pos
-	_ui_pointer_valid = true
-
-func inject_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT) -> void:
-	if not is_instance_valid(_viewport):
-		return
-	if not _ui_pointer_valid:
-		return
-
-	var mask := _button_index_to_mask(button_index)
-	if pressed:
-		_ui_button_mask |= mask
-	else:
-		_ui_button_mask &= ~mask
-
-	var event := InputEventMouseButton.new()
-	event.position = _ui_pointer_pos
-	event.global_position = _ui_pointer_pos
-	event.button_index = button_index
-	event.pressed = pressed
-	event.button_mask = _ui_button_mask
-	_viewport.push_input(event)
-
-func inject_pointer_scroll(delta_y: float) -> void:
-	if not is_instance_valid(_viewport):
-		return
-	if not _ui_pointer_valid:
-		return
-	if abs(delta_y) < MIN_SCROLL_DELTA:
-		return
-
-	var button_index := MOUSE_BUTTON_WHEEL_DOWN if delta_y > 0.0 else MOUSE_BUTTON_WHEEL_UP
-	var down := InputEventMouseButton.new()
-	down.position = _ui_pointer_pos
-	down.global_position = _ui_pointer_pos
-	down.button_index = button_index
-	down.pressed = true
-	down.button_mask = _ui_button_mask
-	_viewport.push_input(down)
-
-	var up := InputEventMouseButton.new()
-	up.position = _ui_pointer_pos
-	up.global_position = _ui_pointer_pos
-	up.button_index = button_index
-	up.pressed = false
-	up.button_mask = _ui_button_mask
-	_viewport.push_input(up)
-
-func _uv_to_viewport_pos(uv: Vector2) -> Vector2:
-	if not is_instance_valid(_viewport):
-		return Vector2.ZERO
-	var size := Vector2(_viewport.size)
-	return Vector2(
-		clampf(uv.x, 0.0, 1.0) * max(size.x - 1.0, 0.0),
-		clampf(uv.y, 0.0, 1.0) * max(size.y - 1.0, 0.0)
-	)
-
-func _button_index_to_mask(button_index: int) -> int:
-	if button_index <= 0:
-		return 0
-	return 1 << (button_index - 1)
+func _update_passthrough_ui() -> void:
+	if _chk_passthrough:
+		_chk_passthrough.button_pressed = _passthrough_enabled
+		_chk_passthrough.disabled       = not _passthrough_supported
 
 # ---------------------------------------------------------------------------
 # Button callbacks
@@ -599,12 +716,6 @@ func _on_connect_pressed() -> void:
 		_host_ip = _input_ip.text.strip_edges()
 		if _host_ip.is_empty():
 			_host_ip = "192.168.1.100"
-		_tcp_port = _input_tcp.text.to_int()
-		_udp_port = _input_udp.text.to_int()
-		if _tcp_port <= 0:
-			_tcp_port = 19800
-		if _udp_port <= 0:
-			_udp_port = 19801
 		_save_config()
 		connect_requested.emit(_host_ip, _tcp_port, _udp_port)
 	else:
@@ -645,33 +756,6 @@ func _on_passthrough_toggled(enabled: bool) -> void:
 	_save_config()
 	passthrough_toggled.emit(_passthrough_enabled)
 
-func _update_curvature_ui() -> void:
-	if _chk_curved:
-		_chk_curved.button_pressed = _curved_enabled
-	if _slider_curvature:
-		_slider_curvature.value = _curvature_amount
-		_slider_curvature.editable = _curved_enabled
-	if _lbl_curvature_value:
-		_lbl_curvature_value.text = "%.2f" % _curvature_amount
-
-func _update_foveation_ui() -> void:
-	if _chk_foveation:
-		_chk_foveation.button_pressed = _foveation_enabled
-	if _slider_foveation:
-		_slider_foveation.value = _foveation_strength
-		_slider_foveation.editable = _foveation_enabled
-	if _lbl_foveation_value:
-		_lbl_foveation_value.text = "%.2f" % _foveation_strength
-
-func _update_passthrough_ui() -> void:
-	if _chk_passthrough:
-		_chk_passthrough.button_pressed = _passthrough_enabled
-		_chk_passthrough.disabled = not _passthrough_supported
-		if _passthrough_supported:
-			_chk_passthrough.tooltip_text = ""
-		else:
-			_chk_passthrough.tooltip_text = "OpenXR runtime does not support passthrough"
-
 func _on_workspace_save_pressed() -> void:
 	workspace_save_requested.emit()
 
@@ -679,29 +763,30 @@ func _on_workspace_restore_pressed() -> void:
 	workspace_restore_requested.emit()
 
 # ---------------------------------------------------------------------------
-# Config persistence
+# Config persistence  (identical to original)
 # ---------------------------------------------------------------------------
 
 func _save_config() -> void:
 	var cfg := ConfigFile.new()
-	cfg.set_value("network", "host_ip", _host_ip)
-	cfg.set_value("network", "tcp_port", _tcp_port)
-	cfg.set_value("network", "udp_port", _udp_port)
-	cfg.set_value("display", "curved_enabled", _curved_enabled)
-	cfg.set_value("display", "curved_amount", _curvature_amount)
-	cfg.set_value("display", "foveation_enabled", _foveation_enabled)
+	cfg.set_value("network", "host_ip",           _host_ip)
+	cfg.set_value("network", "tcp_port",           _tcp_port)
+	cfg.set_value("network", "udp_port",           _udp_port)
+	cfg.set_value("display", "curved_enabled",     _curved_enabled)
+	cfg.set_value("display", "curved_amount",      _curvature_amount)
+	cfg.set_value("display", "foveation_enabled",  _foveation_enabled)
 	cfg.set_value("display", "foveation_strength", _foveation_strength)
-	cfg.set_value("display", "passthrough_enabled", _passthrough_enabled)
+	cfg.set_value("display", "passthrough_enabled",_passthrough_enabled)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
 	var cfg := ConfigFile.new()
-	if cfg.load(CONFIG_PATH) == OK:
-		_host_ip = cfg.get_value("network", "host_ip", "192.168.1.100")
-		_tcp_port = cfg.get_value("network", "tcp_port", 19800)
-		_udp_port = cfg.get_value("network", "udp_port", 19801)
-		_curved_enabled = cfg.get_value("display", "curved_enabled", false)
-		_curvature_amount = cfg.get_value("display", "curved_amount", 0.18)
-		_foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
-		_foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
-		_passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
+	if cfg.load(CONFIG_PATH) != OK:
+		return
+	_host_ip             = cfg.get_value("network", "host_ip",           "192.168.1.100")
+	_tcp_port            = cfg.get_value("network", "tcp_port",           19800)
+	_udp_port            = cfg.get_value("network", "udp_port",           19801)
+	_curved_enabled      = cfg.get_value("display", "curved_enabled",     false)
+	_curvature_amount    = cfg.get_value("display", "curved_amount",      0.18)
+	_foveation_enabled   = cfg.get_value("display", "foveation_enabled",  false)
+	_foveation_strength  = cfg.get_value("display", "foveation_strength", 0.55)
+	_passthrough_enabled = cfg.get_value("display", "passthrough_enabled",false)
