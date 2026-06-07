@@ -99,6 +99,10 @@ func _ready() -> void:
 	_init_ui_overlay()
 	if current_state == State.DISCONNECTED and ui_overlay and ui_overlay.has_method("toggle_visibility"):
 		ui_overlay.toggle_visibility()
+	if left_controller:
+		left_controller.tracking_changed.connect(_on_left_tracking_changed)
+	if right_controller:
+		right_controller.tracking_changed.connect(_on_right_tracking_changed)
 	print("[Immersive-2] VR Client started — press B/Y to open overlay")
 
 func _process(delta: float) -> void:
@@ -175,8 +179,6 @@ func _tracker_has_data(tracker_name: String) -> bool:
 	var xr_tracker := XRServer.get_tracker(StringName(tracker_name))
 	if not xr_tracker:
 		return false
-	if tracker_name.begins_with("/user/"):
-		return true
 	if xr_tracker.has_method("get_has_tracking_data"):
 		return xr_tracker.get_has_tracking_data()
 	if xr_tracker.has_method("is_active"):
@@ -185,6 +187,16 @@ func _tracker_has_data(tracker_name: String) -> bool:
 
 func _tracker_exists(tracker_name: String) -> bool:
 	return XRServer.get_tracker(StringName(tracker_name)) != null
+
+func _on_left_tracking_changed(active: bool) -> void:
+	if not active:
+		_left_tracker_locked  = false
+		_left_tracker_probe_timer = 0.0
+
+func _on_right_tracking_changed(active: bool) -> void:
+	if not active:
+		_right_tracker_locked = false
+		_right_tracker_probe_timer = 0.0
 
 func _update_controller_trackers(delta: float) -> void:
 	if not _xr_initialized:
@@ -210,17 +222,17 @@ func _update_single_controller_tracker(controller: XRController3D, probes: Array
 	if _tracker_has_data(current_tracker):
 		if sync_aim and is_instance_valid(right_aim):
 			right_aim.tracker = controller.tracker
-			right_aim.set("pose", StringName("aim_pose"))
+			right_aim.pose = &"aim_pose"
 		return true
 
 	for candidate in probes:
 		if not _tracker_has_data(candidate):
 			continue
 		controller.tracker = StringName(candidate)
-		controller.set("pose", StringName("grip_pose"))
+		controller.pose = &"grip_pose"
 		if sync_aim and is_instance_valid(right_aim):
 			right_aim.tracker = StringName(candidate)
-			right_aim.set("pose", StringName("aim_pose"))
+			right_aim.pose = &"aim_pose"
 		print("[Immersive-2] %s controller switched tracker=%s pose=grip_pose" % [label, candidate])
 		return true
 
@@ -229,10 +241,10 @@ func _update_single_controller_tracker(controller: XRController3D, probes: Array
 			continue
 		if String(controller.tracker) != candidate:
 			controller.tracker = StringName(candidate)
-			controller.set("pose", StringName("grip_pose"))
+			controller.pose = &"grip_pose"
 			if sync_aim and is_instance_valid(right_aim):
 				right_aim.tracker = StringName(candidate)
-				right_aim.set("pose", StringName("aim_pose"))
+				right_aim.pose = &"aim_pose"
 			print("[Immersive-2] %s controller fallback tracker=%s pose=grip_pose" % [label, candidate])
 		return false
 
@@ -245,7 +257,7 @@ func _init_eye_gaze_controller() -> void:
 	eye_gaze_controller = XRController3D.new()
 	eye_gaze_controller.name = "EyeGazeController"
 	eye_gaze_controller.tracker = &"/user/eyes_ext"
-	eye_gaze_controller.set("pose", &"eye_pose")
+	eye_gaze_controller.pose = &"eye_pose"
 	eye_gaze_controller.visible = false
 	xr_origin.add_child(eye_gaze_controller)
 

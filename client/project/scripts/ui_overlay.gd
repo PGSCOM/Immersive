@@ -92,10 +92,8 @@ func _ready() -> void:
 	set_process(true)
 	hide()
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	_update_labels()
-	if _visible_overlay:
-		_smooth_follow_camera(delta)
 
 # ---------------------------------------------------------------------------
 # Public API
