@@ -54,11 +54,14 @@ var _frame_buffer: Dictionary = {}
 var _stream_width: int = 0
 var _stream_height: int = 0
 
+var _tcp_buffer := PackedByteArray()
+
 func _ready() -> void:
 	set_process(false)
 
 ## Connect to the Immersive-2 host.
 func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
+	_tcp_buffer.clear()
 	_host_ip = ip
 	_tcp_port = tcp_port
 	_udp_port = udp_port
@@ -154,30 +157,33 @@ func _send_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	tcp_client.put_data(payload)
 
 func _read_tcp_messages() -> void:
-	while tcp_client.get_available_bytes() >= 5:
-		# Read header (5 bytes: 1 type + 4 length)
-		var header_data := tcp_client.get_data(5)
-		if header_data[0] != OK:
-			return
-		var header: PackedByteArray = header_data[1]
-		var msg_type: int = header[0]
-		var msg_length: int = header.decode_u32(1)
+	# Leer todos los bytes disponibles y guardarlos en el buffer seguro
+	var avail: int = tcp_client.get_available_bytes()
+	if avail > 0:
+		var data := tcp_client.get_data(avail)
+		if data[0] == OK:
+			_tcp_buffer.append_array(data[1])
 
-		# Sanity check: reject unreasonably large messages (> 1 MB)
+	# Procesar mensajes completos
+	while _tcp_buffer.size() >= 5:
+		var msg_type: int = _tcp_buffer[0]
+		var msg_length: int = _tcp_buffer.decode_u32(1)
+
+		# Filtro de seguridad
 		if msg_length > 1048576:
 			print("[Network] Rejecting oversized message: %d bytes" % msg_length)
+			disconnect_from_server() # Evita bucles infinitos
 			return
 
-		# Read payload
-		if msg_length > 0:
-			if tcp_client.get_available_bytes() < msg_length:
-				return  # Wait for more data
-			var payload_data := tcp_client.get_data(msg_length)
-			if payload_data[0] != OK:
-				return
-			_handle_control_message(msg_type, payload_data[1])
-		else:
-			_handle_control_message(msg_type, PackedByteArray())
+		# Si el buffer aún no tiene el mensaje completo, esperamos al siguiente fotograma
+		if _tcp_buffer.size() < 5 + msg_length:
+			return
+
+		var payload := _tcp_buffer.slice(5, 5 + msg_length)
+		# Avanzar el buffer eliminando el mensaje ya procesado
+		_tcp_buffer = _tcp_buffer.slice(5 + msg_length)
+
+		_handle_control_message(msg_type, payload)
 
 func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	match msg_type:
@@ -320,4 +326,5 @@ func disconnect_from_server() -> void:
 	tcp_client.disconnect_from_host()
 	udp_client.close()
 	_connected = false
+	_tcp_buffer.clear()
 	set_process(false)

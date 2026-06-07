@@ -116,6 +116,10 @@ public:
             return false;
         }
 
+        // Aumentar el buffer de envío UDP a 2 MB
+        int sndbuf = 2 * 1024 * 1024;
+        setsockopt(udp_socket_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
+
         struct sockaddr_in udp_addr = {};
         udp_addr.sin_family = AF_INET;
         udp_addr.sin_addr.s_addr = INADDR_ANY;

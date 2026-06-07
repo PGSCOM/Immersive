@@ -38,8 +38,9 @@ public:
 
         // JPEG quality: scale from bitrate hint (clamp 40–95)
         // Heuristic: 20000 kbps ~> quality 90
-        int q = static_cast<int>(config_.bitrate_kbps / 250);
-        quality_ = std::max(40, std::min(95, q));
+        // Bajamos la calidad por software para aligerar la red y el tiempo de CPU
+        int q = static_cast<int>(config_.bitrate_kbps / 400);
+        quality_ = std::max(30, std::min(65, q));
 
         std::cout << "[MjpegEncoder] Initialized: "
                   << config_.width << "x" << config_.height
