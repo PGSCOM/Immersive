@@ -186,39 +186,56 @@ public:
         mft_ = mft;
 
         // --- Configure output type (H.264) ---
+        bool output_set = false;
         ComPtr<IMFMediaType> out_type;
-        MFCreateMediaType(&out_type);
-        out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE,    MFVideoFormat_H264);
-        SetUINT32(out_type.Get(), MF_MT_AVG_BITRATE, cfg.bitrate_kbps * 1000);
-        SetUINT32(out_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
-        SetRatio(out_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
-        SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        
+        // Iterar sobre las plantillas que ofrece la GPU en lugar de crear una vacía
+        for (DWORD i = 0; SUCCEEDED(mft_->GetOutputAvailableType(0, i, &out_type)); ++i) {
+            GUID subtype;
+            out_type->GetGUID(MF_MT_SUBTYPE, &subtype);
+            if (subtype == MFVideoFormat_H264) {
+                SetUINT32(out_type.Get(), MF_MT_AVG_BITRATE, cfg.bitrate_kbps * 1000);
+                SetUINT32(out_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
+                SetRatio(out_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
+                SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                
+                hr = mft_->SetOutputType(0, out_type.Get(), 0);
+                if (SUCCEEDED(hr)) {
+                    output_set = true;
+                    break;
+                }
+            }
+        }
 
-        // Exigimos Nivel 5.1 High Profile para permitir 1920x1200 a 60fps sin que la GPU colapse
-        SetUINT32(out_type.Get(), MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
-        SetUINT32(out_type.Get(), MF_MT_MPEG2_LEVEL, eAVEncH264VLevel5_1);
-
-        hr = mft_->SetOutputType(0, out_type.Get(), 0);
-        if (FAILED(hr)) {
-            std::cerr << "[MfEncoder] SetOutputType failed (0x" << std::hex << hr << ")\n";
+        if (!output_set) {
+            std::cerr << "[MfEncoder] Failed to set any H.264 output type\n";
             return false;
         }
 
         // --- Configure input type (NV12) ---
+        bool input_set = false;
         ComPtr<IMFMediaType> in_type;
-        MFCreateMediaType(&in_type);
-        in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        in_type->SetGUID(MF_MT_SUBTYPE,    MFVideoFormat_NV12);
-        SetUINT32(in_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        SetRatio(in_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
-        SetRatio(in_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
-        SetRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        
+        for (DWORD i = 0; SUCCEEDED(mft_->GetInputAvailableType(0, i, &in_type)); ++i) {
+            GUID subtype;
+            in_type->GetGUID(MF_MT_SUBTYPE, &subtype);
+            if (subtype == MFVideoFormat_NV12) {
+                SetUINT32(in_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                SetRatio(in_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
+                SetRatio(in_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
+                SetRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                
+                hr = mft_->SetInputType(0, in_type.Get(), 0);
+                if (SUCCEEDED(hr)) {
+                    input_set = true;
+                    break;
+                }
+            }
+        }
 
-        hr = mft_->SetInputType(0, in_type.Get(), 0);
-        if (FAILED(hr)) {
-            std::cerr << "[MfEncoder] SetInputType failed (0x" << std::hex << hr << ")\n";
+        if (!input_set) {
+            std::cerr << "[MfEncoder] Failed to set NV12 input type (0x" << std::hex << hr << ")\n";
             return false;
         }
 
