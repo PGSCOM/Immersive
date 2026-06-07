@@ -17,10 +17,10 @@
 
 ### VR Client
 
-- **Godot Engine 4.3** ([godotengine.org](https://godotengine.org/download))
+- **Godot Engine 4.6.3** ([godotengine.org](https://godotengine.org/download))
 - **Android SDK + NDK** (for Quest/Pico builds)
   - Install via Android Studio or `sdkmanager`
-  - Required packages: `platforms;android-32`, `build-tools;33.0.2`, `ndk;25.2.9519653`
+  - Required packages: `platforms;android-36`, `build-tools;36.1.0`, `ndk;29.0.14206865`
 - **Meta Quest** or **Pico 4** headset in developer mode
 
 ---
@@ -96,7 +96,7 @@ development and protocol testing.
 
 ### Desktop Testing (no headset)
 
-1. Open Godot 4.3+
+1. Open Godot 4.6.3+
 2. Import the project from `client/project/`
 3. Press **F5** to run in desktop mode
 4. Press **O** to open the UI overlay, enter the host IP, and connect
@@ -105,7 +105,7 @@ development and protocol testing.
 
 #### Via Godot Editor
 
-1. Open the project in Godot 4.3+
+1. Open the project in Godot 4.6.3+
 2. Go to **Editor → Editor Settings → Export → Android**
 3. Set **Android SDK Path** to your Android SDK root
 4. Go to **Project → Export**
@@ -217,7 +217,7 @@ GitHub Actions runs on every push:
   using `-DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF` (MJPEG software encoder)
 - **`host-linux`** job: builds the portable host on Ubuntu
 - **`host-macos`** job: builds the portable host on macOS
-- **`client-build`** job: installs Godot 4.3 headless, exports Windows Desktop and
+- **`client-build`** job: installs Godot 4.6.3 headless, exports Windows Desktop and
   Android APK builds
 
 Artifacts are uploaded as:
@@ -246,4 +246,4 @@ Artifacts are uploaded as:
 
 ### Client: Export fails (missing templates)
 - Install export templates via **Editor → Manage Export Templates** in Godot
-- Or download from https://godotengine.org/download/archive/4.3-stable/
+- Or download from https://godotengine.org/download/archive/4.6.3-stable/

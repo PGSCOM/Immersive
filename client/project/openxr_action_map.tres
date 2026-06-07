@@ -1,4 +1,4 @@
-[gd_resource type="OpenXRActionMap" load_steps=39 format=3 uid="uid://c5st1emqp64ym"]
+[gd_resource type="OpenXRActionMap" format=3 uid="uid://c5st1emqp64ym"]
 
 [sub_resource type="OpenXRAction" id="OpenXRAction_default_pose"]
 resource_name = "default_pose"
@@ -59,75 +59,75 @@ actions = [SubResource("OpenXRAction_default_pose"), SubResource("OpenXRAction_t
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_default_pose_left"]
 action = SubResource("OpenXRAction_default_pose")
-paths = PackedStringArray("/user/hand/left/input/aim/pose")
+binding_path = "/user/hand/left/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_default_pose_right"]
 action = SubResource("OpenXRAction_default_pose")
-paths = PackedStringArray("/user/hand/right/input/aim/pose")
+binding_path = "/user/hand/right/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_aim_pose_left"]
 action = SubResource("OpenXRAction_aim_pose")
-paths = PackedStringArray("/user/hand/left/input/aim/pose")
+binding_path = "/user/hand/left/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_aim_pose_right"]
 action = SubResource("OpenXRAction_aim_pose")
-paths = PackedStringArray("/user/hand/right/input/aim/pose")
+binding_path = "/user/hand/right/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_pose_left"]
 action = SubResource("OpenXRAction_grip_pose")
-paths = PackedStringArray("/user/hand/left/input/grip/pose")
+binding_path = "/user/hand/left/input/grip/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_pose_right"]
 action = SubResource("OpenXRAction_grip_pose")
-paths = PackedStringArray("/user/hand/right/input/grip/pose")
+binding_path = "/user/hand/right/input/grip/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_value_left"]
 action = SubResource("OpenXRAction_trigger_value")
-paths = PackedStringArray("/user/hand/left/input/trigger/value")
+binding_path = "/user/hand/left/input/trigger/value"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_trigger_value_right"]
 action = SubResource("OpenXRAction_trigger_value")
-paths = PackedStringArray("/user/hand/right/input/trigger/value")
+binding_path = "/user/hand/right/input/trigger/value"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_value_left"]
 action = SubResource("OpenXRAction_grip_value")
-paths = PackedStringArray("/user/hand/left/input/squeeze/value")
+binding_path = "/user/hand/left/input/squeeze/value"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_grip_value_right"]
 action = SubResource("OpenXRAction_grip_value")
-paths = PackedStringArray("/user/hand/right/input/squeeze/value")
+binding_path = "/user/hand/right/input/squeeze/value"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_primary_click_left"]
 action = SubResource("OpenXRAction_primary_click")
-paths = PackedStringArray("/user/hand/left/input/thumbstick/click")
+binding_path = "/user/hand/left/input/thumbstick/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_primary_click_right"]
 action = SubResource("OpenXRAction_primary_click")
-paths = PackedStringArray("/user/hand/right/input/thumbstick/click")
+binding_path = "/user/hand/right/input/thumbstick/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_primary_left"]
 action = SubResource("OpenXRAction_primary")
-paths = PackedStringArray("/user/hand/left/input/thumbstick")
+binding_path = "/user/hand/left/input/thumbstick"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_primary_right"]
 action = SubResource("OpenXRAction_primary")
-paths = PackedStringArray("/user/hand/right/input/thumbstick")
+binding_path = "/user/hand/right/input/thumbstick"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_ax_button_left"]
 action = SubResource("OpenXRAction_ax_button")
-paths = PackedStringArray("/user/hand/left/input/x/click")
+binding_path = "/user/hand/left/input/x/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_ax_button_right"]
 action = SubResource("OpenXRAction_ax_button")
-paths = PackedStringArray("/user/hand/right/input/a/click")
+binding_path = "/user/hand/right/input/a/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_by_button_left"]
 action = SubResource("OpenXRAction_by_button")
-paths = PackedStringArray("/user/hand/left/input/y/click")
+binding_path = "/user/hand/left/input/y/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_by_button_right"]
 action = SubResource("OpenXRAction_by_button")
-paths = PackedStringArray("/user/hand/right/input/b/click")
+binding_path = "/user/hand/right/input/b/click"
 
 [sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_touch"]
 interaction_profile_path = "/interaction_profiles/oculus/touch_controller"
@@ -135,35 +135,35 @@ bindings = [SubResource("OpenXRIPBinding_default_pose_left"), SubResource("OpenX
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_default_pose_left"]
 action = SubResource("OpenXRAction_default_pose")
-paths = PackedStringArray("/user/hand/left/input/aim/pose")
+binding_path = "/user/hand/left/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_default_pose_right"]
 action = SubResource("OpenXRAction_default_pose")
-paths = PackedStringArray("/user/hand/right/input/aim/pose")
+binding_path = "/user/hand/right/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_aim_pose_left"]
 action = SubResource("OpenXRAction_aim_pose")
-paths = PackedStringArray("/user/hand/left/input/aim/pose")
+binding_path = "/user/hand/left/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_aim_pose_right"]
 action = SubResource("OpenXRAction_aim_pose")
-paths = PackedStringArray("/user/hand/right/input/aim/pose")
+binding_path = "/user/hand/right/input/aim/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_grip_pose_left"]
 action = SubResource("OpenXRAction_grip_pose")
-paths = PackedStringArray("/user/hand/left/input/grip/pose")
+binding_path = "/user/hand/left/input/grip/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_grip_pose_right"]
 action = SubResource("OpenXRAction_grip_pose")
-paths = PackedStringArray("/user/hand/right/input/grip/pose")
+binding_path = "/user/hand/right/input/grip/pose"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_trigger_value_left"]
 action = SubResource("OpenXRAction_trigger_value")
-paths = PackedStringArray("/user/hand/left/input/select/click")
+binding_path = "/user/hand/left/input/select/click"
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_simple_trigger_value_right"]
 action = SubResource("OpenXRAction_trigger_value")
-paths = PackedStringArray("/user/hand/right/input/select/click")
+binding_path = "/user/hand/right/input/select/click"
 
 [sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_simple"]
 interaction_profile_path = "/interaction_profiles/khr/simple_controller"

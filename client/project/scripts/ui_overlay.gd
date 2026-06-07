@@ -261,8 +261,10 @@ func _flat(bg: Color, border: Color,
 	var s               := StyleBoxFlat.new()
 	s.bg_color           = bg
 	s.border_color       = border
-	s.border_width_left  = s.border_width_right = 1
-	s.border_width_top   = s.border_width_bottom = 1
+	s.border_width_left  = 1
+	s.border_width_right = 1
+	s.border_width_top   = 1
+	s.border_width_bottom = 1
 	s.corner_radius_top_left     = radius
 	s.corner_radius_top_right    = radius
 	s.corner_radius_bottom_left  = radius
@@ -302,13 +304,17 @@ func _apply_theme(root: Control) -> void:
 	# HSlider — make track visible
 	var track := StyleBoxFlat.new()
 	track.bg_color = Color(0.18, 0.22, 0.40)
-	track.corner_radius_top_left = track.corner_radius_top_right = 3
-	track.corner_radius_bottom_left = track.corner_radius_bottom_right = 3
+	track.corner_radius_top_left = 3
+	track.corner_radius_top_right = 3
+	track.corner_radius_bottom_left = 3
+	track.corner_radius_bottom_right = 3
 	t.set_stylebox("slider", "HSlider", track)
 	var grab := StyleBoxFlat.new()
 	grab.bg_color = Color(0.30, 0.52, 0.90)
-	grab.corner_radius_top_left = grab.corner_radius_top_right = 3
-	grab.corner_radius_bottom_left = grab.corner_radius_bottom_right = 3
+	grab.corner_radius_top_left = 3
+	grab.corner_radius_top_right = 3
+	grab.corner_radius_bottom_left = 3
+	grab.corner_radius_bottom_right = 3
 	t.set_stylebox("grabber_area", "HSlider", grab)
 	root.theme = t
 
@@ -557,12 +563,18 @@ func _build_ip_keyboard() -> VBoxContainer:
 	var frame_bg := StyleBoxFlat.new()
 	frame_bg.bg_color              = Color(0.07, 0.09, 0.16)
 	frame_bg.border_color          = Color(0.20, 0.30, 0.56)
-	frame_bg.border_width_left     = frame_bg.border_width_right = 1
-	frame_bg.border_width_top      = frame_bg.border_width_bottom = 1
-	frame_bg.corner_radius_top_left = frame_bg.corner_radius_top_right = 4
-	frame_bg.corner_radius_bottom_left = frame_bg.corner_radius_bottom_right = 4
-	frame_bg.content_margin_left   = frame_bg.content_margin_right = 6
-	frame_bg.content_margin_top    = frame_bg.content_margin_bottom = 6
+	frame_bg.border_width_left     = 1
+	frame_bg.border_width_right    = 1
+	frame_bg.border_width_top      = 1
+	frame_bg.border_width_bottom   = 1
+	frame_bg.corner_radius_top_left = 4
+	frame_bg.corner_radius_top_right = 4
+	frame_bg.corner_radius_bottom_left = 4
+	frame_bg.corner_radius_bottom_right = 4
+	frame_bg.content_margin_left   = 6
+	frame_bg.content_margin_right  = 6
+	frame_bg.content_margin_top    = 6
+	frame_bg.content_margin_bottom = 6
 	frame.add_theme_stylebox_override("panel", frame_bg)
 	wrapper.add_child(frame)
 
@@ -579,7 +591,7 @@ func _build_ip_keyboard() -> VBoxContainer:
 		b.text = ch
 		b.add_theme_font_size_override("font_size", 18)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var _ch := ch
+		var _ch: String = ch
 		b.pressed.connect(func(): _on_ip_kbd_key(_ch))
 		row1.add_child(b)
 

@@ -1,10 +1,10 @@
 ## Immersive-2 VR Client
 
-Godot 4.3+ project for Meta Quest and Pico 4 headsets.
+Godot 4.6.3+ project for Meta Quest and Pico 4 headsets.
 
 ### Setup
 
-1. Install [Godot 4.3+](https://godotengine.org/download) with Android export templates
+1. Install [Godot 4.6.3+](https://godotengine.org/download) with Android export templates
 2. Open this folder as a Godot project
 3. Make sure the OpenXR plugin is enabled (Project → Project Settings → XR)
 4. Configure Android export (Project → Export → Android)
