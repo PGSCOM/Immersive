@@ -18,7 +18,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake -S host -B host/build -G "Visual Studio 17 2022" -A x64 -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+          cmake -S host -B host/build -G "Visual Studio 18 2026" -A x64 -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
 
       - name: Build
         run: |
