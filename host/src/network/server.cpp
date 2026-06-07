@@ -403,18 +403,13 @@ private:
                     std::cout << "[Server] Client " << client_id
                               << " says hello: " << hello.client_name << "\n";
 
-                    // Send HELLO_ACK
-                    protocol::ControlHeader ack_header;
-                    ack_header.type = static_cast<uint8_t>(protocol::MessageType::HELLO_ACK);
-                    ack_header.length = sizeof(protocol::HelloAck);
-
+                    // Send HELLO_ACK de forma segura para evitar mezclar bytes
                     protocol::HelloAck ack;
                     ack.protocol_version = protocol::PROTOCOL_VERSION;
                     ack.udp_port = config_.udp_port;
                     ack.monitor_count = 0;
 
-                    send_tcp(sock, &ack_header, sizeof(ack_header));
-                    send_tcp(sock, &ack, sizeof(ack));
+                    send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
                 }
                 break;
             }
@@ -501,11 +496,8 @@ private:
                 break;
             }
             case protocol::MessageType::PING: {
-                // Echo back
-                protocol::ControlHeader pong;
-                pong.type = static_cast<uint8_t>(protocol::MessageType::PING);
-                pong.length = 0;
-                send_tcp(sock, &pong, sizeof(pong));
+                // Echo back de forma segura
+                send_control_message(client_id, protocol::MessageType::PING, nullptr, 0);
                 break;
             }
             default:

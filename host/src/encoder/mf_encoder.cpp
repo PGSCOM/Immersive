@@ -195,8 +195,10 @@ public:
         SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
         SetRatio(out_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
         SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        // Eliminado para evitar restricciones de límite de resolución del perfil Main
-        // SetUINT32(out_type.Get(), MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+
+        // Exigimos Nivel 5.1 High Profile para permitir 1920x1200 a 60fps sin que la GPU colapse
+        SetUINT32(out_type.Get(), MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+        SetUINT32(out_type.Get(), MF_MT_MPEG2_LEVEL, eAVEncH264VLevel5_1);
 
         hr = mft_->SetOutputType(0, out_type.Get(), 0);
         if (FAILED(hr)) {

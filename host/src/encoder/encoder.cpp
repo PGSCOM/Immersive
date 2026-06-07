@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 #include <cstdlib>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // stb_image_write — single-header JPEG encoder
@@ -38,9 +39,8 @@ public:
 
         // JPEG quality: scale from bitrate hint (clamp 40–95)
         // Heuristic: 20000 kbps ~> quality 90
-        // Bajamos la calidad por software para aligerar la red y el tiempo de CPU
-        int q = static_cast<int>(config_.bitrate_kbps / 400);
-        quality_ = std::max(30, std::min(65, q));
+        // Forzar calidad baja para MJPEG
+        quality_ = 35;
 
         std::cout << "[MjpegEncoder] Initialized: "
                   << config_.width << "x" << config_.height
@@ -56,6 +56,14 @@ public:
             uint32_t       pitch,
             uint64_t       timestamp_us) override {
         if (!initialized_ || !bgra_data) return {};
+
+        // Limitar a ~24 FPS si usa software para no ahogar la red WiFi
+        static auto last_encode = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_encode).count() < 41) {
+            return {}; // Ignoramos este frame para no saturar
+        }
+        last_encode = now;
 
         // stb_image_write expects RGB or RGBA (not BGRA).
         // Convert BGRA → RGBA in-place into a temporary buffer.
