@@ -16,8 +16,6 @@ const RECONNECT_DELAY := 5.0    ## Seconds between reconnect attempts
 const LATENCY_INTERVAL := 2.0   ## Seconds between latency probes
 const XR_INIT_RETRY_INTERVAL := 1.0
 const XR_INIT_MAX_RETRIES := 10
-const LEFT_TRACKER_PROBES := ["/user/hand/left", "left_hand"]
-const RIGHT_TRACKER_PROBES := ["/user/hand/right", "right_hand"]
 const CONFIG_PATH := "user://immersive2_config.cfg"
 const WORKSPACE_PATH := "user://immersive2_workspace.json"
 
@@ -58,19 +56,9 @@ var network_client: Node = null
 ## UI overlay (lazy-created).
 var ui_overlay: Node = null
 
-## XR interface.
+## XR interface (managed by XRStarter).
 var xr_interface: XRInterface = null
 var eye_gaze_controller: XRController3D = null
-var _xr_initialized: bool = false
-var _xr_init_retry_timer: float = 0.0
-var _xr_init_attempts: int = 0
-var _left_tracker_probe_timer: float = 0.0
-var _right_tracker_probe_timer: float = 0.0
-var _left_tracker_index: int = 0
-var _right_tracker_index: int = 0
-var _left_tracker_locked: bool = false
-var _right_tracker_locked: bool = false
-
 # Reconnect timer
 var _reconnect_timer: float = 0.0
 var _should_reconnect: bool = false
@@ -93,162 +81,21 @@ var _pending_workspace_restore: bool = false
 func _ready() -> void:
 	_load_config()
 	_load_workspace_layout()
-	_init_xr()
 	_init_eye_gaze_controller()
 	_init_network()
 	_init_ui_overlay()
 	if current_state == State.DISCONNECTED and ui_overlay and ui_overlay.has_method("toggle_visibility"):
 		ui_overlay.toggle_visibility()
-	if left_controller:
-		left_controller.tracking_changed.connect(_on_left_tracking_changed)
-	if right_controller:
-		right_controller.tracking_changed.connect(_on_right_tracking_changed)
 	print("[Immersive-2] VR Client started — press B/Y to open overlay")
 
 func _process(delta: float) -> void:
-	_retry_init_xr(delta)
-	_update_controller_trackers(delta)
 	_handle_reconnect(delta)
 	_handle_latency_probe(delta)
 	_update_foveation_focus()
 
 # ---------------------------------------------------------------------------
-# XR initialisation
+# XR helpers
 # ---------------------------------------------------------------------------
-
-func _init_xr() -> void:
-	xr_interface = XRServer.find_interface("OpenXR")
-	if not xr_interface:
-		print("[Immersive-2] OpenXR interface not found, running in desktop mode")
-		return
-
-	if _try_enable_xr():
-		return
-
-	print("[Immersive-2] OpenXR runtime unavailable, retrying... (check runtime/headset)")
-
-func _try_enable_xr() -> bool:
-	if not xr_interface:
-		return false
-
-	var xr_ready := xr_interface.is_initialized()
-	if not xr_ready:
-		xr_ready = xr_interface.initialize()
-
-	if not xr_ready:
-		return false
-
-	if _xr_initialized:
-		return true
-
-	print("[Immersive-2] OpenXR initialized")
-	XRServer.primary_interface = xr_interface
-	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-	get_viewport().use_xr = true
-	_xr_initialized = true
-	_left_tracker_locked = false
-	_right_tracker_locked = false
-	_left_tracker_probe_timer = 0.0
-	_right_tracker_probe_timer = 0.0
-	_apply_passthrough_settings()
-	return true
-
-func _retry_init_xr(delta: float) -> void:
-	if _xr_initialized:
-		return
-	if not xr_interface:
-		return
-	if _xr_init_attempts >= XR_INIT_MAX_RETRIES:
-		return
-
-	_xr_init_retry_timer += delta
-	if _xr_init_retry_timer < XR_INIT_RETRY_INTERVAL:
-		return
-
-	_xr_init_retry_timer = 0.0
-	_xr_init_attempts += 1
-
-	if _try_enable_xr():
-		print("[Immersive-2] OpenXR became available after %d retries" % _xr_init_attempts)
-		return
-
-	if _xr_init_attempts == XR_INIT_MAX_RETRIES:
-		print("[Immersive-2] OpenXR still unavailable after retries; continuing in desktop mode")
-
-func _tracker_has_data(tracker_name: String) -> bool:
-	var xr_tracker := XRServer.get_tracker(StringName(tracker_name))
-	if not xr_tracker:
-		return false
-	if xr_tracker.has_method("get_has_tracking_data"):
-		return xr_tracker.get_has_tracking_data()
-	if xr_tracker.has_method("is_active"):
-		return xr_tracker.is_active()
-	return true
-
-func _tracker_exists(tracker_name: String) -> bool:
-	return XRServer.get_tracker(StringName(tracker_name)) != null
-
-func _on_left_tracking_changed(active: bool) -> void:
-	if not active:
-		_left_tracker_locked  = false
-		_left_tracker_probe_timer = 0.0
-
-func _on_right_tracking_changed(active: bool) -> void:
-	if not active:
-		_right_tracker_locked = false
-		_right_tracker_probe_timer = 0.0
-
-func _update_controller_trackers(delta: float) -> void:
-	if not _xr_initialized:
-		return
-
-	if not _left_tracker_locked:
-		_left_tracker_probe_timer += delta
-	if _left_tracker_probe_timer >= 1.0 and not _left_tracker_locked:
-		_left_tracker_probe_timer = 0.0
-		_left_tracker_locked = _update_single_controller_tracker(left_controller, LEFT_TRACKER_PROBES, "Left", true, false)
-
-	if not _right_tracker_locked:
-		_right_tracker_probe_timer += delta
-	if _right_tracker_probe_timer >= 0.5 and not _right_tracker_locked:
-		_right_tracker_probe_timer = 0.0
-		_right_tracker_locked = _update_single_controller_tracker(right_controller, RIGHT_TRACKER_PROBES, "Right", false, true)
-
-func _update_single_controller_tracker(controller: XRController3D, probes: Array, label: String, is_left: bool, sync_aim: bool) -> bool:
-	if not is_instance_valid(controller):
-		return false
-
-	var current_tracker := String(controller.tracker)
-	if _tracker_has_data(current_tracker):
-		if sync_aim and is_instance_valid(right_aim):
-			right_aim.tracker = controller.tracker
-			right_aim.pose = &"aim_pose"
-		return true
-
-	for candidate in probes:
-		if not _tracker_has_data(candidate):
-			continue
-		controller.tracker = StringName(candidate)
-		controller.pose = &"grip_pose"
-		if sync_aim and is_instance_valid(right_aim):
-			right_aim.tracker = StringName(candidate)
-			right_aim.pose = &"aim_pose"
-		print("[Immersive-2] %s controller switched tracker=%s pose=grip_pose" % [label, candidate])
-		return true
-
-	for candidate in probes:
-		if not _tracker_exists(candidate):
-			continue
-		if String(controller.tracker) != candidate:
-			controller.tracker = StringName(candidate)
-			controller.pose = &"grip_pose"
-			if sync_aim and is_instance_valid(right_aim):
-				right_aim.tracker = StringName(candidate)
-				right_aim.pose = &"aim_pose"
-			print("[Immersive-2] %s controller fallback tracker=%s pose=grip_pose" % [label, candidate])
-		return false
-
-	return false
 
 func _init_eye_gaze_controller() -> void:
 	if not xr_origin:
@@ -785,14 +632,16 @@ func _mark_workspace_restored_if_complete() -> void:
 		_pending_workspace_restore = false
 
 func _is_passthrough_supported() -> bool:
-	if not xr_interface or not xr_interface.is_initialized():
+	var interface := XRServer.get_primary_interface()
+	if not interface or not interface.is_initialized():
 		return false
-	var supported_modes: Array = xr_interface.get_supported_environment_blend_modes()
+	var supported_modes: Array = interface.get_supported_environment_blend_modes()
 	return XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in supported_modes
 
 func _apply_passthrough_settings() -> void:
 	var viewport := get_viewport()
-	if not xr_interface or not xr_interface.is_initialized():
+	var interface := XRServer.get_primary_interface()
+	if not interface or not interface.is_initialized():
 		viewport.transparent_bg = false
 		return
 
@@ -805,10 +654,10 @@ func _apply_passthrough_settings() -> void:
 	if passthrough_enabled:
 		target_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND
 
-	if not xr_interface.set_environment_blend_mode(target_mode):
+	if not interface.set_environment_blend_mode(target_mode):
 		if passthrough_enabled:
 			passthrough_enabled = false
-			xr_interface.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_OPAQUE)
+			interface.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_OPAQUE)
 			print("[Immersive-2] Failed to enable passthrough, falling back to opaque mode")
 
 	viewport.transparent_bg = passthrough_enabled

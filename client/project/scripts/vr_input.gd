@@ -1,12 +1,7 @@
-## VR Input handler for Immersive-2.
-## Translates VR controller input (trigger, grip, thumbstick)
-## into mouse/keyboard events and sends them to the host.
-##
-## Right controller:  pointer / click / scroll / panel drag
-## Left  controller:  A/X → virtual keyboard toggle
-##                    grip + thumbstick Y → scale active screen panel
+extends Node
 
-extends XRController3D
+## VR Input handler — plain Node attached as a child of the XRController3D.
+## This avoids any interference with XRController3D's internal processing.
 
 const TRIGGER_PRESS_THRESHOLD := 0.55
 const TRIGGER_RELEASE_THRESHOLD := 0.35
@@ -14,32 +9,19 @@ const GRIP_PRESS_THRESHOLD := 0.55
 const GRIP_RELEASE_THRESHOLD := 0.35
 const THUMBSTICK_SCROLL_THRESHOLD := 0.1
 
-## Reference to the main scene controller.
-@onready var main_scene: Node3D = get_node("/root/Main")
+@onready var controller: XRController3D = get_parent() as XRController3D
+@onready var main_scene: Node3D = get_node_or_null("/root/Main")
 
-## Reference to the virtual keyboard (added in main.tscn).
-@onready var virtual_keyboard: Node3D = get_node_or_null("/root/Main/VirtualKeyboard")
+## Raycast for pointer interaction (siblings under XROrigin3D).
+@onready var raycast: RayCast3D = get_node_or_null("/root/Main/XROrigin3D/RightAim/RaycastOrigin/RayCast3D")
+@onready var raycast_origin: Node3D = get_node_or_null("/root/Main/XROrigin3D/RightAim/RaycastOrigin")
 
-## Raycast for pointer interaction.
-@onready var raycast: RayCast3D = get_node_or_null("../RightAim/RaycastOrigin/RayCast3D")
-@onready var raycast_origin: Node3D = get_node_or_null("../RightAim/RaycastOrigin")
-
-## Active monitor ID for input events.
 var active_monitor_id: int = 0
-
-## Button states for detecting press/release.
 var _trigger_pressed: bool = false
-var _grip_pressed: bool    = false
-
-## Thumbstick current value.
+var _grip_pressed: bool = false
 var _thumbstick: Vector2 = Vector2.ZERO
-
-## Last known UV position on the screen.
 var _last_uv: Vector2 = Vector2(-1, -1)
-## Last panel under pointer.
 var _active_panel: MeshInstance3D = null
-
-## Scale-mode: grip is held while thumbstick Y is used to resize.
 var _scale_mode: bool = false
 var _tracking_state_known: bool = false
 var _last_tracking_active: bool = false
@@ -52,33 +34,32 @@ func _is_grip_action(name: String) -> bool:
 	return name == "grip_click" or name == "grip_value" or name == "grip" or name == "squeeze" or name == "squeeze_click" or name == "squeeze_value"
 
 func _ready() -> void:
-	set_process(true)
-	# Connect controller input signals
-	button_pressed.connect(_on_button_pressed)
-	button_released.connect(_on_button_released)
-	input_float_changed.connect(_on_input_float_changed)
-	input_vector2_changed.connect(_on_input_vector2_changed)
-	print("[VRInput] Ready tracker=%s pose=%s" % [String(tracker), String(get("pose"))])
+	if not controller:
+		push_error("[VRInput] Parent is not an XRController3D")
+		return
+	# Connect controller input signals from the parent controller
+	controller.button_pressed.connect(_on_button_pressed)
+	controller.button_released.connect(_on_button_released)
+	controller.input_float_changed.connect(_on_input_float_changed)
+	controller.input_vector2_changed.connect(_on_input_vector2_changed)
+	print("[VRInput] Ready tracker=%s pose=%s" % [String(controller.tracker), String(controller.get("pose"))])
 
-func _process(delta: float) -> void:
-	_update_tracking_debug(delta)
+func _process(_delta: float) -> void:
+	_update_tracking_debug()
 	_update_pointer()
-	_update_scale(delta)
+	_update_scale(_delta)
 
-# ---------------------------------------------------------------------------
-# Pointer / ray-cast interaction
-# ---------------------------------------------------------------------------
-
-## Update the laser pointer and detect screen intersection.
 func _update_pointer() -> void:
 	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
 		return
 
-	var source_transform := global_transform
+	var source_transform: Transform3D
 	if raycast_origin:
 		source_transform = raycast_origin.global_transform
 	elif raycast:
 		source_transform = raycast.global_transform
+	else:
+		source_transform = controller.global_transform
 
 	var ray_origin: Vector3 = source_transform.origin
 	var ray_direction: Vector3 = (-source_transform.basis.z).normalized()
@@ -107,81 +88,48 @@ func _update_pointer() -> void:
 
 	if _active_panel and _active_panel.has_method("uv_to_pixel"):
 		var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
-
-		# Send mouse move (no buttons pressed during hover)
 		var buttons: int = 0
 		if _trigger_pressed:
 			buttons |= 0x01  # Left click
 		if _grip_pressed:
 			buttons |= 0x02  # Right click
-
 		if main_scene.has_method("send_mouse_input"):
-			main_scene.send_mouse_input(
-				active_monitor_id,
-				pixel.x, pixel.y,
-				buttons, 0)
-
-# ---------------------------------------------------------------------------
-# Grip + thumbstick → panel scaling (Part 5)
-# ---------------------------------------------------------------------------
+			main_scene.send_mouse_input(active_monitor_id, pixel.x, pixel.y, buttons, 0)
 
 func _update_scale(delta: float) -> void:
-	# Scale mode is active when grip is held
 	if not _grip_pressed:
 		_scale_mode = false
 		return
-
 	if abs(_thumbstick.y) > 0.15:
 		_scale_mode = true
 		var delta_scale: float = _thumbstick.y * delta * 0.8
 		if _active_panel and _active_panel.has_method("scale_panel"):
 			_active_panel.scale_panel(delta_scale)
 
-# ---------------------------------------------------------------------------
-# Controller button pressed
-# ---------------------------------------------------------------------------
-
 func _on_button_pressed(button_name: String) -> void:
 	if _is_trigger_action(button_name):
 		_set_trigger_state(true)
 		return
-
 	if _is_grip_action(button_name):
 		_set_grip_state(true)
 		return
-
 	match button_name:
 		"primary_click":
-			# Thumbstick click → middle mouse button
 			_send_click(0x04)
 		"ax_button":
-			# A/X → toggle UI overlay (removed: broken 3D virtual keyboard)
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()
 		"by_button":
-			# B/Y button → overlay toggle
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()
-
-# ---------------------------------------------------------------------------
-# Controller button released
-# ---------------------------------------------------------------------------
 
 func _on_button_released(button_name: String) -> void:
 	if _is_trigger_action(button_name):
 		_set_trigger_state(false)
 		return
-
 	if _is_grip_action(button_name):
 		_set_grip_state(false)
 		return
-
-	match button_name:
-		"ax_button":
-			# A/X was Escape in the old code; now keyboard toggle — no release action needed
-			pass
-		"by_button":
-			pass
 
 func _on_input_float_changed(name: String, value: float) -> void:
 	if _is_trigger_action(name):
@@ -192,7 +140,6 @@ func _on_input_float_changed(name: String, value: float) -> void:
 			pressed = value >= TRIGGER_PRESS_THRESHOLD
 		_set_trigger_state(pressed)
 		return
-
 	if _is_grip_action(name):
 		var pressed := _grip_pressed
 		if _grip_pressed:
@@ -204,7 +151,6 @@ func _on_input_float_changed(name: String, value: float) -> void:
 func _set_trigger_state(pressed: bool) -> void:
 	if _trigger_pressed == pressed:
 		return
-
 	_trigger_pressed = pressed
 	print("[VRInput] Trigger %s" % ["DOWN" if pressed else "UP"])
 	if _ui_hovered and main_scene.has_method("send_ui_pointer_button"):
@@ -218,12 +164,11 @@ func _set_trigger_state(pressed: bool) -> void:
 func _set_grip_state(pressed: bool) -> void:
 	if _grip_pressed == pressed:
 		return
-
 	_grip_pressed = pressed
 	print("[VRInput] Grip %s" % ["DOWN" if pressed else "UP"])
 	if pressed:
 		if _active_panel and _active_panel.has_method("start_drag"):
-			_active_panel.start_drag(self)
+			_active_panel.start_drag(controller)
 		elif not _scale_mode:
 			_send_click(0x02)
 	else:
@@ -233,85 +178,53 @@ func _set_grip_state(pressed: bool) -> void:
 		_send_release(0x02)
 
 func _query_tracking_active() -> bool:
-	var xr_tracker := XRServer.get_tracker(tracker)
+	var xr_tracker := XRServer.get_tracker(controller.tracker)
 	if xr_tracker and xr_tracker.has_method("get_has_tracking_data"):
 		return xr_tracker.get_has_tracking_data()
 	return false
 
-func _update_tracking_debug(delta: float) -> void:
-	if delta < 0.0:
-		return
+func _update_tracking_debug() -> void:
 	var tracking_active := _query_tracking_active()
-
 	if _tracking_state_known and _last_tracking_active == tracking_active:
 		return
-
 	_tracking_state_known = true
 	_last_tracking_active = tracking_active
-	print("[VRInput] Tracking %s tracker=%s pose=%s" % ["ACTIVE" if tracking_active else "INACTIVE", String(tracker), String(get("pose"))])
+	print("[VRInput] Tracking %s tracker=%s pose=%s" % ["ACTIVE" if tracking_active else "INACTIVE", String(controller.tracker), String(controller.get("pose"))])
 
-# ---------------------------------------------------------------------------
-# Mouse helpers
-# ---------------------------------------------------------------------------
-
-## Send a mouse click at the current pointer position.
 func _send_click(button_mask: int) -> void:
 	if _last_uv.x < 0:
 		return
 	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
-
 	var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 	if main_scene.has_method("send_mouse_input"):
-		main_scene.send_mouse_input(
-			active_monitor_id,
-			pixel.x, pixel.y,
-			button_mask, 0)
+		main_scene.send_mouse_input(active_monitor_id, pixel.x, pixel.y, button_mask, 0)
 
-## Send a mouse release at the current pointer position.
-func _send_release(button_mask: int) -> void:
+func _send_release(_button_mask: int) -> void:
 	if _last_uv.x < 0:
 		return
 	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
-
 	var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 	if main_scene.has_method("send_mouse_input"):
-		main_scene.send_mouse_input(
-			active_monitor_id,
-			pixel.x, pixel.y,
-			0, 0)  # No buttons pressed = release
+		main_scene.send_mouse_input(active_monitor_id, pixel.x, pixel.y, 0, 0)
 
-# ---------------------------------------------------------------------------
-# Thumbstick input — scroll + scale
-# ---------------------------------------------------------------------------
-
-## Handle thumbstick input for scrolling and panel scaling.
 func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 	if name == "primary" or name == "thumbstick":
 		_thumbstick = value
-
-		# If grip is held, thumbstick Y drives panel scaling (handled in _update_scale)
 		if _grip_pressed:
 			return
-
-		# Otherwise map thumbstick Y to scroll
 		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD and _ui_hovered and main_scene.has_method("send_ui_pointer_scroll"):
 			main_scene.send_ui_pointer_scroll(value.y)
 			return
-
 		var scroll_y: int = 0
 		var scroll_x: int = 0
 		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD:
 			scroll_y = int(value.y * 120)
 		if abs(value.x) > THUMBSTICK_SCROLL_THRESHOLD:
 			scroll_x = -int(value.x * 120)
-
 		if (scroll_y != 0 or scroll_x != 0) and _last_uv.x >= 0:
 			if _active_panel and _active_panel.has_method("uv_to_pixel"):
 				var pixel: Vector2i = _active_panel.uv_to_pixel(_last_uv)
 				if main_scene.has_method("send_mouse_input"):
-					main_scene.send_mouse_input(
-						active_monitor_id,
-						pixel.x, pixel.y,
-						0, scroll_y, scroll_x)
+					main_scene.send_mouse_input(active_monitor_id, pixel.x, pixel.y, 0, scroll_y, scroll_x)
