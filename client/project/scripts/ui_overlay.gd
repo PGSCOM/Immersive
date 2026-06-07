@@ -591,7 +591,7 @@ func _build_ip_keyboard() -> VBoxContainer:
 		b.text = ch
 		b.add_theme_font_size_override("font_size", 18)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var _ch := ch
+		var _ch: String = ch
 		b.pressed.connect(func(): _on_ip_kbd_key(_ch))
 		row1.add_child(b)
 

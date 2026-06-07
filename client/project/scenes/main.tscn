@@ -1,7 +1,7 @@
-[gd_scene load_steps=9 format=3 uid="uid://b3scjvo7tp8ds"]
+[gd_scene format=3 uid="uid://b3scjvo7tp8ds"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
-[ext_resource type="Script" path="res://scripts/vr_input.gd" id="3_input"]
+[ext_resource type="Script" uid="uid://cf0ocmus3oijt" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://cmaj1wgebj0lt" path="res://scripts/vr_input.gd" id="3_input"]
 [ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_controller"]
@@ -29,54 +29,54 @@ background_color = Color(0.02, 0.03, 0.08, 1)
 ambient_light_color = Color(0.05, 0.05, 0.12, 1)
 ambient_light_energy = 0.4
 
-[node name="Main" type="Node3D"]
+[node name="Main" type="Node3D" unique_id=1505727608]
 script = ExtResource("1_main")
 
-[node name="XROrigin3D" type="XROrigin3D" parent="."]
+[node name="XROrigin3D" type="XROrigin3D" parent="." unique_id=62912204]
 
-[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D" unique_id=1331768535]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 
-[node name="LeftController" type="XRController3D" parent="XROrigin3D"]
+[node name="LeftController" type="XRController3D" parent="XROrigin3D" unique_id=531405879]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 1.25, -0.4)
 tracker = &"/user/hand/left"
 pose = &"grip_pose"
 
-[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/LeftController"]
+[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/LeftController" unique_id=1585038273]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
 material_override = SubResource("StandardMaterial3D_controller")
 mesh = SubResource("BoxMesh_controller")
 
-[node name="RightController" type="XRController3D" parent="XROrigin3D"]
+[node name="RightController" type="XRController3D" parent="XROrigin3D" unique_id=236919948]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 1.25, -0.4)
 tracker = &"/user/hand/right"
 pose = &"grip_pose"
 script = ExtResource("3_input")
 
-[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/RightController"]
+[node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/RightController" unique_id=1684311371]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
 material_override = SubResource("StandardMaterial3D_controller")
 mesh = SubResource("BoxMesh_controller")
 
-[node name="RightAim" type="XRController3D" parent="XROrigin3D"]
+[node name="RightAim" type="XRController3D" parent="XROrigin3D" unique_id=638144865]
 tracker = &"/user/hand/right"
 pose = &"aim_pose"
 
-[node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightAim"]
+[node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightAim" unique_id=756867234]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, 0)
 
-[node name="RayCast3D" type="RayCast3D" parent="XROrigin3D/RightAim/RaycastOrigin"]
+[node name="RayCast3D" type="RayCast3D" parent="XROrigin3D/RightAim/RaycastOrigin" unique_id=1316469003]
 target_position = Vector3(0, 0, -10)
 
-[node name="LaserPointer" type="MeshInstance3D" parent="XROrigin3D/RightAim/RaycastOrigin"]
+[node name="LaserPointer" type="MeshInstance3D" parent="XROrigin3D/RightAim/RaycastOrigin" unique_id=946486588]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1.5)
 material_override = SubResource("StandardMaterial3D_laser")
 mesh = SubResource("BoxMesh_laser")
 
-[node name="VirtualKeyboard" parent="." instance=ExtResource("6_vkbd")]
+[node name="VirtualKeyboard" parent="." unique_id=210724909 instance=ExtResource("6_vkbd")]
 
-[node name="Environment" type="WorldEnvironment" parent="."]
+[node name="Environment" type="WorldEnvironment" parent="." unique_id=1362345047]
 environment = SubResource("Environment_env")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1698267393]
 transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 5, 0)
