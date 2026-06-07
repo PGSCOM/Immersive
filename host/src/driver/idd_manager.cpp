@@ -146,9 +146,9 @@ static void ensure_ids_certificate_installed() {
         "  Write-Host 'Generated and trusted certificate for IDD bypassing.'; "
         "} else { Write-Host 'Certificate already trusted.' }";
     
-    std::string cmd = "powershell -Command \"";
+    std::string cmd = "powershell -WindowStyle Hidden -NoProfile -NonInteractive -Command \"";
     cmd += ps1;
-    cmd += "\"";
+    cmd += "\" > NUL 2>&1";
     // We launch it hidden via system. In a real desktop app, CreateProcess without a window would be better.
     system(cmd.c_str());
 #endif

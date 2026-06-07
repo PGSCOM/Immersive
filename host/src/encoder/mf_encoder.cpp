@@ -195,7 +195,8 @@ public:
         SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
         SetRatio(out_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
         SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        SetUINT32(out_type.Get(), MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        // Eliminado para evitar restricciones de límite de resolución del perfil Main
+        // SetUINT32(out_type.Get(), MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
 
         hr = mft_->SetOutputType(0, out_type.Get(), 0);
         if (FAILED(hr)) {

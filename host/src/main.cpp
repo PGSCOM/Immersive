@@ -219,8 +219,13 @@ int main(int argc, char* argv[]) {
 
         if (!encoder->initialize(enc_config)) {
             std::cerr << "[Host] Failed to initialize encoder\n";
-            capture->stop_capture();
-            return;
+            std::cout << "[Host] Falling back to software MJPEG encoder...\n";
+            encoder = immersive::create_encoder(immersive::EncoderBackend::SOFTWARE);
+            if (!encoder->initialize(enc_config)) {
+                std::cerr << "[Host] Failed to initialize software encoder too\n";
+                capture->stop_capture();
+                return;
+            }
         }
 
         // Notify client that stream is starting
