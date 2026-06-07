@@ -9,13 +9,11 @@ toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 [sub_resource type="OpenXRAction" id="OpenXRAction_trigger_value"]
 resource_name = "trigger_value"
 localized_name = "Trigger value"
-action_type = 1
 toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 
 [sub_resource type="OpenXRAction" id="OpenXRAction_grip_value"]
 resource_name = "grip_value"
 localized_name = "Grip value"
-action_type = 1
 toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 
 [sub_resource type="OpenXRAction" id="OpenXRAction_primary_click"]

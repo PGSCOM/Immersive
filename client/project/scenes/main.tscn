@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://b3scjvo7tp8ds"]
 
 [ext_resource type="Script" uid="uid://cf0ocmus3oijt" path="res://scripts/main.gd" id="1_main"]
-[ext_resource type="Script" path="res://scripts/xr_starter.gd" id="1_starter"]
+[ext_resource type="Script" uid="uid://su24ds7dm77u" path="res://scripts/xr_starter.gd" id="1_starter"]
 [ext_resource type="Script" uid="uid://cmaj1wgebj0lt" path="res://scripts/vr_input.gd" id="3_input"]
 [ext_resource type="PackedScene" path="res://scenes/virtual_keyboard.tscn" id="6_vkbd"]
 
@@ -27,13 +27,13 @@ size = Vector3(0.003, 0.003, 3)
 [sub_resource type="Environment" id="Environment_env"]
 background_mode = 2
 background_color = Color(0.02, 0.03, 0.08, 1)
-amient_light_color = Color(0.05, 0.05, 0.12, 1)
-amient_light_energy = 0.4
+ambient_light_color = Color(0.05, 0.05, 0.12, 1)
+ambient_light_energy = 0.4
 
 [node name="Main" type="Node3D" unique_id=1505727608]
 script = ExtResource("1_main")
 
-[node name="XRStarter" type="Node" parent="."]
+[node name="XRStarter" type="Node" parent="." unique_id=526527494]
 script = ExtResource("1_starter")
 
 [node name="XROrigin3D" type="XROrigin3D" parent="." unique_id=62912204]
@@ -47,7 +47,7 @@ tracker = &"left_hand"
 pose = &"aim"
 
 [node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/LeftController" unique_id=1585038273]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
+transform = Transform3D(1, 0, 0, 0, 0.76604456, -0.64278764, 0, 0.64278764, 0.76604456, 0, 0, 0.1)
 material_override = SubResource("StandardMaterial3D_controller")
 mesh = SubResource("BoxMesh_controller")
 
@@ -57,7 +57,7 @@ tracker = &"right_hand"
 pose = &"aim"
 
 [node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/RightController" unique_id=1684311371]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.135, -0.06)
+transform = Transform3D(1, 0, 0, 0, 0.76604456, -0.64278764, 0, 0.64278764, 0.76604456, 0, 0, 0.1)
 material_override = SubResource("StandardMaterial3D_controller")
 mesh = SubResource("BoxMesh_controller")
 
@@ -69,7 +69,7 @@ tracker = &"right_hand"
 pose = &"aim"
 
 [node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightAim" unique_id=756867234]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12, 0)
+transform = Transform3D(1, 0, 0, 0, 0.76604444, -0.6427876, 0, 0.6427876, 0.76604444, 0, 0, 0.1)
 
 [node name="RayCast3D" type="RayCast3D" parent="XROrigin3D/RightAim/RaycastOrigin" unique_id=1316469003]
 target_position = Vector3(0, 0, -10)
