@@ -190,6 +190,11 @@ int main(int argc, char* argv[]) {
         std::cout << "[Host] Client " << client_id
                   << " selected monitor " << (int)monitor_id << "\n";
 
+        // Parar stream previo si ya estaba activo (evita race condition)
+        if (streaming.exchange(false)) {
+            capture->stop_capture();
+        }
+
         // Find the display
         const immersive::DisplayInfo* selected = nullptr;
         for (const auto& d : displays) {

@@ -58,12 +58,12 @@ public:
         if (!initialized_ || !bgra_data) return {};
 
         // Limitar a ~24 FPS si usa software para no ahogar la red WiFi
-        static auto last_encode = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_encode).count() < 41) {
-            return {}; // Ignoramos este frame para no saturar
+        if (_last_encode.time_since_epoch().count() > 0 &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - _last_encode).count() < 41) {
+            return {};
         }
-        last_encode = now;
+        _last_encode = now;
 
         // stb_image_write expects RGB or RGBA (not BGRA).
         // Convert BGRA → RGBA in-place into a temporary buffer.
@@ -137,6 +137,7 @@ private:
     uint32_t      frame_count_   = 0;
     bool          force_keyframe_ = true;
     int           quality_        = 80;
+    std::chrono::steady_clock::time_point _last_encode{};
 };
 
 // ---------------------------------------------------------------------------

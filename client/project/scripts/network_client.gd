@@ -61,7 +61,13 @@ func _ready() -> void:
 
 ## Connect to the Immersive-2 host.
 func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
+	# Cerrar conexiones previas limpiamente antes de reconectar
+	udp_client.close()
+	tcp_client.disconnect_from_host()
 	_tcp_buffer.clear()
+	_connected = false
+	_frame_buffer.clear()
+
 	_host_ip = ip
 	_tcp_port = tcp_port
 	_udp_port = udp_port
@@ -90,6 +96,7 @@ func _process(_delta: float) -> void:
 		StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
 			if _connected:
 				_connected = false
+				udp_client.close()
 				disconnected_from_host.emit()
 				set_process(false)
 				print("[Network] Disconnected")
@@ -323,8 +330,9 @@ func send_latency_probe(probe_id: int, client_timestamp_us: int) -> void:
 	_send_control_message(MSG_LATENCY_PROBE, payload)
 
 func disconnect_from_server() -> void:
-	tcp_client.disconnect_from_host()
-	udp_client.close()
 	_connected = false
 	_tcp_buffer.clear()
+	_frame_buffer.clear()
+	tcp_client.disconnect_from_host()
+	udp_client.close()
 	set_process(false)

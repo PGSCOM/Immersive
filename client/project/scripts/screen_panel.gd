@@ -93,6 +93,8 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	_apply_texture()
 
 	is_active = true
+	if _placeholder_label:
+		_placeholder_label.hide()
 	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m" %
 		[width, height, panel_width, panel_height])
 
@@ -145,6 +147,8 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 
 	if screen_texture:
 		screen_texture.update(screen_image)
+		if _placeholder_label and _placeholder_label.visible:
+			_placeholder_label.hide()
 	else:
 		screen_texture = ImageTexture.create_from_image(screen_image)
 		_apply_texture()
