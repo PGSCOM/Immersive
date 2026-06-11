@@ -535,12 +535,17 @@ private:
         return true;
     }
 
+    /// Send exactly `size` bytes (send() may transmit fewer in one call).
     static bool send_tcp(SocketType sock, const void* data, size_t size) {
-        int sent = send(sock,
-                        reinterpret_cast<const char*>(data),
-                        static_cast<int>(size),
-                        0);
-        return sent == static_cast<int>(size);
+        const char* ptr = reinterpret_cast<const char*>(data);
+        size_t remaining = size;
+        while (remaining > 0) {
+            int sent = send(sock, ptr, static_cast<int>(remaining), 0);
+            if (sent <= 0) return false;
+            ptr += sent;
+            remaining -= static_cast<size_t>(sent);
+        }
+        return true;
     }
 
     ServerConfig config_;

@@ -43,9 +43,6 @@ var _running: bool = false
 var _jitter_buffer: Array = []  # sorted by seq number
 var _next_seq: int = -1          # next expected sequence number
 
-## How many frames are currently queued in the generator.
-var _buffered_frames: int = 0
-
 ## Whether playback has been started (we wait for MIN_BUFFER first).
 var _playback_started: bool = false
 
@@ -87,7 +84,6 @@ func start(host_ip: String, audio_port: int) -> bool:
 	_next_seq         = -1
 	_jitter_buffer.clear()
 	_playback_started = false
-	_buffered_frames  = 0
 
 	print("[AudioReceiver] Listening for audio on UDP:%d" % audio_port)
 	return true
@@ -127,7 +123,7 @@ func _parse_audio_packet(raw: PackedByteArray) -> void:
 
 	var seq:      int = (raw[0])        | (raw[1] << 8)  | (raw[2] << 16) | (raw[3] << 24)
 	var n_samples:int = (raw[4])        | (raw[5] << 8)
-	var n_ch:     int = raw[6]
+	var n_ch:     int = max(1, raw[6])
 
 	var expected_bytes: int = 8 + n_samples * n_ch * 2
 	if raw.size() < expected_bytes:
@@ -147,15 +143,29 @@ func _parse_audio_packet(raw: PackedByteArray) -> void:
 		offset += 2
 
 	# Insert into jitter buffer sorted by seq
-	_jitter_buffer.append({"seq": seq, "frames": frames})
+	_jitter_buffer.append({"seq": seq, "channels": n_ch, "frames": frames})
 	_jitter_buffer.sort_custom(func(a, b): return a["seq"] < b["seq"])
 
-	# Trim buffer to JITTER_WINDOW entries max
+	# Trim buffer: drop the OLDEST packets so latency stays bounded
 	while _jitter_buffer.size() > JITTER_WINDOW:
-		_jitter_buffer.pop_back()
+		_jitter_buffer.pop_front()
 
 func _push_to_generator() -> void:
-	if not _playback or _jitter_buffer.is_empty():
+	if _jitter_buffer.is_empty():
+		return
+
+	# Pre-buffer: wait until enough audio is queued before starting playback
+	if not _playback_started:
+		var total_frames := 0
+		for entry in _jitter_buffer:
+			total_frames += entry["frames"].size() / int(entry["channels"])
+		if total_frames < MIN_BUFFER:
+			return
+		_player.play()
+		_playback = _player.get_stream_playback()
+		_playback_started = true
+
+	if not _playback:
 		return
 
 	# Initialise expected seq from first packet
@@ -165,35 +175,30 @@ func _push_to_generator() -> void:
 	# Push sequential packets to generator
 	while not _jitter_buffer.is_empty():
 		var entry: Dictionary = _jitter_buffer[0]
-		# Allow a small gap (consider lost packets)
+		# If the gap is too big the missing packets are lost — resync
 		if entry["seq"] > _next_seq + JITTER_WINDOW:
+			_next_seq = entry["seq"]
+
+		var frames: PackedFloat32Array = entry["frames"]
+		var n_ch:   int = int(entry["channels"])
+		var n_samp: int = frames.size() / n_ch
+
+		# Don't overflow the generator's internal buffer
+		if _playback.get_frames_available() < n_samp:
 			break
 
 		_jitter_buffer.pop_front()
 		_next_seq = entry["seq"] + 1
 
-		var frames: PackedFloat32Array = entry["frames"]
-		var n_ch:   int = int(frames.size()) / (frames.size() / CHANNELS) if frames.size() > 0 else CHANNELS
-		var n_samp: int = frames.size() / n_ch
-
-		# Re-interleave to stereo if mono
+		# Re-interleave to stereo (duplicate if mono)
 		var stereo := PackedVector2Array()
 		stereo.resize(n_samp)
 		for i in range(n_samp):
-			var l: float = frames[i * n_ch] if n_ch >= 1 else 0.0
+			var l: float = frames[i * n_ch]
 			var r: float = frames[i * n_ch + 1] if n_ch >= 2 else l
 			stereo[i] = Vector2(l, r)
 
-		if not _playback_started:
-			_buffered_frames += n_samp
-			# Cache frames in jitter buffer until MIN_BUFFER is met
-			_jitter_buffer.push_front(entry)
-			if _buffered_frames >= MIN_BUFFER:
-				_player.play()
-				_playback_started = true
-			break
-		else:
-			_playback.push_buffer(stereo)
+		_playback.push_buffer(stereo)
 
 # ---------------------------------------------------------------------------
 # Internal — player setup
@@ -208,7 +213,5 @@ func _build_player() -> void:
 	_player.stream = gen
 	_player.autoplay = false
 	add_child(_player)
-
-	# Wait until play() is called before grabbing the playback object
-	await get_tree().process_frame
-	# _player.play() will be called once MIN_BUFFER frames are ready
+	# _player.play() is called (and _playback grabbed) once MIN_BUFFER
+	# frames have accumulated in the jitter buffer.

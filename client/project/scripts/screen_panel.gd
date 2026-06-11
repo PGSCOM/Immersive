@@ -126,6 +126,9 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	var img := Image.new()
 	var err := img.load_jpg_from_buffer(frame_data)
 	if err == OK:
+		# load_jpg returns RGB8; convert so the texture format stays stable
+		if img.get_format() != Image.FORMAT_RGBA8:
+			img.convert(Image.FORMAT_RGBA8)
 		screen_image = img
 		if material_override is ShaderMaterial:
 			(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
@@ -145,13 +148,19 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		else:
 			return
 
-	if screen_texture:
+	# ImageTexture.update() requires identical size and format; otherwise
+	# the texture must be recreated (e.g. resolution change, RGBA<->L8).
+	if screen_texture \
+			and screen_texture.get_width() == screen_image.get_width() \
+			and screen_texture.get_height() == screen_image.get_height() \
+			and screen_texture.get_format() == screen_image.get_format():
 		screen_texture.update(screen_image)
-		if _placeholder_label and _placeholder_label.visible:
-			_placeholder_label.hide()
 	else:
 		screen_texture = ImageTexture.create_from_image(screen_image)
 		_apply_texture()
+
+	if _placeholder_label and _placeholder_label.visible:
+		_placeholder_label.hide()
 
 ## Scale the panel up/down using thumbstick.
 ## Called from vr_input.gd when thumbstick Y is held while grip is pressed.

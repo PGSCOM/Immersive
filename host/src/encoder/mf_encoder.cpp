@@ -5,6 +5,12 @@
 /// hardware encoder: NVIDIA NVENC, AMD AMF, or Intel Quick Sync.
 /// Falls back to the software H.264 MFT if no hardware encoder is present.
 ///
+/// Hardware MFTs are asynchronous: they must be unlocked with
+/// MF_TRANSFORM_ASYNC_UNLOCK and driven through the
+/// METransformNeedInput / METransformHaveOutput event model.
+/// The software H.264 MFT is synchronous and uses the classic
+/// ProcessInput/ProcessOutput loop with caller-allocated output samples.
+///
 /// Input format:  BGRA 32-bit (converted to NV12 before submission)
 /// Output format: H.264 Annex-B bitstream
 
@@ -14,15 +20,19 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 #ifdef _WIN32
 // WIN32_LEAN_AND_MEAN is set globally; MF headers need objbase.h explicitly
 #include <windows.h>
 #include <objbase.h>   // CoInitializeEx, CoUninitialize
+#include <initguid.h>  // instantiate CODECAPI_* GUIDs in this TU
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mfidl.h>
 #include <mferror.h>
+#include <strmif.h>    // ICodecAPI
 #include <codecapi.h>
 #include <wrl/client.h>
 
@@ -64,7 +74,7 @@ void bgra_to_nv12(const uint8_t* bgra,
         // Chroma sub-sampling: one UV pair per 2×2 luma block
         if ((row & 1) == 0) {
             uint8_t* dst_uv = uv_plane + static_cast<size_t>(row / 2) * width;
-            for (uint32_t col = 0; col < width; col += 2) {
+            for (uint32_t col = 0; col + 1 < width; col += 2) {
                 uint8_t b = src[col * 4 + 0];
                 uint8_t g = src[col * 4 + 1];
                 uint8_t r = src[col * 4 + 2];
@@ -77,11 +87,6 @@ void bgra_to_nv12(const uint8_t* bgra,
             }
         }
     }
-}
-
-/// Helper: set a media type attribute as UINT32.
-inline HRESULT SetUINT32(IMFMediaType* mt, const GUID& key, UINT32 value) {
-    return mt->SetUINT32(key, value);
 }
 
 /// Helper: set a media type attribute as UINT64 (packed ratio).
@@ -106,10 +111,12 @@ public:
     ~MfEncoder() override { _shutdown(); }
 
     bool initialize(const EncoderConfig& cfg) override {
-        config_ = cfg;
-        initialized_ = false;
-
 #ifdef _WIN32
+        // Allow re-initialization (e.g. when the user selects another monitor)
+        _shutdown();
+
+        config_ = cfg;
+
         // Initialize COM on this thread (required before MFStartup)
         HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         com_initialized_ = SUCCEEDED(com_hr) || (com_hr == RPC_E_CHANGED_MODE);
@@ -122,143 +129,46 @@ public:
         }
         mf_started_ = true;
 
-        // --- Find the best H.264 hardware MFT ---
-        MFT_REGISTER_TYPE_INFO output_type = {};
-        output_type.guidMajorType = MFMediaType_Video;
-        output_type.guidSubtype   = MFVideoFormat_H264;
-
-        UINT32 flags = MFT_ENUM_FLAG_HARDWARE       |
-                       MFT_ENUM_FLAG_SYNCMFT         |
-                       MFT_ENUM_FLAG_ASYNCMFT        |
-                       MFT_ENUM_FLAG_SORTANDFILTER;
-
-        IMFActivate** activate_array = nullptr;
-        UINT32        activate_count = 0;
-
-        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-                       flags,
-                       nullptr,            // any input type
-                       &output_type,
-                       &activate_array,
-                       &activate_count);
-
-        if (FAILED(hr) || activate_count == 0) {
-            // Retry without hardware flag — use software MFT H.264
-            std::cout << "[MfEncoder] No hardware MFT encoder found, trying software MFT\n";
-            flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER;
-            if (activate_array) {
-                for (UINT32 i = 0; i < activate_count; ++i)
-                    activate_array[i]->Release();
-                CoTaskMemFree(activate_array);
-                activate_array = nullptr;
-                activate_count = 0;
-            }
-            hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-                           flags,
-                           nullptr,
-                           &output_type,
-                           &activate_array,
-                           &activate_count);
-        }
-
-        if (FAILED(hr) || activate_count == 0) {
-            std::cerr << "[MfEncoder] No MFT H.264 encoder found on this system\n";
+        if (!_create_transform()) {
+            _shutdown();
             return false;
         }
 
-        // Activate the first (best) encoder
-        ComPtr<IMFTransform> mft;
-        hr = activate_array[0]->ActivateObject(IID_PPV_ARGS(&mft));
-
-        // Check if it is hardware
-        UINT32 hw_url_len = 0;
-        is_hardware_ = SUCCEEDED(activate_array[0]->GetStringLength(MFT_FRIENDLY_NAME_Attribute, &hw_url_len));
-
-        for (UINT32 i = 0; i < activate_count; ++i)
-            activate_array[i]->Release();
-        CoTaskMemFree(activate_array);
-
-        if (FAILED(hr) || !mft) {
-            std::cerr << "[MfEncoder] ActivateObject failed (0x" << std::hex << hr << ")\n";
+        if (!_configure_types()) {
+            _shutdown();
             return false;
         }
 
-        mft_ = mft;
-
-        // --- Configure output type (H.264) ---
-        bool output_set = false;
-        ComPtr<IMFMediaType> out_type;
-        
-        // Iterar sobre las plantillas que ofrece la GPU en lugar de crear una vacía
-        for (DWORD i = 0; SUCCEEDED(mft_->GetOutputAvailableType(0, i, &out_type)); ++i) {
-            GUID subtype;
-            out_type->GetGUID(MF_MT_SUBTYPE, &subtype);
-            if (subtype == MFVideoFormat_H264) {
-                SetUINT32(out_type.Get(), MF_MT_AVG_BITRATE, cfg.bitrate_kbps * 1000);
-                SetUINT32(out_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-                SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
-                SetRatio(out_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
-                SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-                
-                hr = mft_->SetOutputType(0, out_type.Get(), 0);
-                if (SUCCEEDED(hr)) {
-                    output_set = true;
-                    break;
-                }
-            }
-        }
-
-        if (!output_set) {
-            std::cerr << "[MfEncoder] Failed to set any H.264 output type\n";
-            return false;
-        }
-
-        // --- Configure input type (NV12) ---
-        bool input_set = false;
-        ComPtr<IMFMediaType> in_type;
-        
-        for (DWORD i = 0; SUCCEEDED(mft_->GetInputAvailableType(0, i, &in_type)); ++i) {
-            GUID subtype;
-            in_type->GetGUID(MF_MT_SUBTYPE, &subtype);
-            if (subtype == MFVideoFormat_NV12) {
-                SetUINT32(in_type.Get(), MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-                SetRatio(in_type.Get(), MF_MT_FRAME_SIZE, cfg.width, cfg.height);
-                SetRatio(in_type.Get(), MF_MT_FRAME_RATE, cfg.fps, 1);
-                SetRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-                
-                hr = mft_->SetInputType(0, in_type.Get(), 0);
-                if (SUCCEEDED(hr)) {
-                    input_set = true;
-                    break;
-                }
-            }
-        }
-
-        if (!input_set) {
-            std::cerr << "[MfEncoder] Failed to set NV12 input type (0x" << std::hex << hr << ")\n";
-            return false;
-        }
+        // Best-effort low-latency tuning via ICodecAPI
+        _apply_codec_api_tuning();
 
         // Allocate NV12 scratch buffer
         nv12_buf_.resize(static_cast<size_t>(cfg.width) * cfg.height * 3 / 2);
 
-        // Start streaming
+        // Start streaming. Async MFTs only emit METransformNeedInput after
+        // NOTIFY_START_OF_STREAM; both messages are harmless for sync MFTs.
         hr = mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         if (FAILED(hr)) {
-            std::cerr << "[MfEncoder] ProcessMessage(BEGIN_STREAMING) failed\n";
+            std::cerr << "[MfEncoder] ProcessMessage(BEGIN_STREAMING) failed (0x"
+                      << std::hex << hr << ")\n";
+            _shutdown();
             return false;
         }
+        mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
         std::cout << "[MfEncoder] Initialized: "
                   << cfg.width << "x" << cfg.height
                   << " @ " << cfg.fps << " fps"
                   << " bitrate=" << cfg.bitrate_kbps << " kbps"
-                  << (is_hardware_ ? " [hardware]" : " [software MFT]") << "\n";
+                  << (is_hardware_ ? " [hardware]" : " [software MFT]")
+                  << (is_async_ ? " [async]" : " [sync]") << "\n";
 
-        initialized_ = true;
-        frame_count_  = 0;
+        initialized_         = true;
+        frame_count_         = 0;
+        need_input_credits_  = 0;
         return true;
 #else
+        (void)cfg;
         std::cerr << "[MfEncoder] Media Foundation is only available on Windows\n";
         return false;
 #endif
@@ -274,6 +184,15 @@ public:
         if (!initialized_ || !bgra_data) return {};
 
 #ifdef _WIN32
+        if (width != config_.width || height != config_.height) {
+            // Capture resolution no longer matches the encoder configuration
+            // (e.g. display mode change). The caller must re-initialize.
+            std::cerr << "[MfEncoder] Frame size " << std::dec << width << "x" << height
+                      << " does not match encoder " << config_.width << "x"
+                      << config_.height << ", dropping frame\n";
+            return {};
+        }
+
         // Convert BGRA → NV12
         bgra_to_nv12(bgra_data, width, height, pitch, nv12_buf_.data());
 
@@ -282,7 +201,7 @@ public:
         ComPtr<IMFMediaBuffer> buffer;
         DWORD buf_size = static_cast<DWORD>(nv12_buf_.size());
 
-        MFCreateMemoryBuffer(buf_size, &buffer);
+        if (FAILED(MFCreateMemoryBuffer(buf_size, &buffer))) return {};
 
         BYTE* raw = nullptr;
         DWORD max_len = 0, cur_len = 0;
@@ -291,22 +210,39 @@ public:
         buffer->Unlock();
         buffer->SetCurrentLength(buf_size);
 
-        MFCreateSample(&sample);
+        if (FAILED(MFCreateSample(&sample))) return {};
         sample->AddBuffer(buffer.Get());
 
         // Timestamp in 100-nanosecond units (MF time base)
         LONGLONG mf_time = static_cast<LONGLONG>(timestamp_us) * 10LL;
         sample->SetSampleTime(mf_time);
-        sample->SetSampleDuration(10000000LL / config_.fps);
+        sample->SetSampleDuration(10000000LL / std::max<uint32_t>(1, config_.fps));
 
-        HRESULT hr = mft_->ProcessInput(0, sample.Get(), 0);
-        if (FAILED(hr)) {
-            std::cerr << "[MfEncoder] ProcessInput failed (0x" << std::hex << hr << ")\n";
-            return {};
+        if (force_keyframe_) {
+            _force_keyframe_now();
+            force_keyframe_ = false;
         }
 
-        return _drain_output(timestamp_us);
+        std::vector<EncodedPacket> result;
+
+        if (is_async_) {
+            _encode_async(sample.Get(), result);
+        } else {
+            HRESULT hr = mft_->ProcessInput(0, sample.Get(), 0);
+            if (FAILED(hr)) {
+                std::cerr << "[MfEncoder] ProcessInput failed (0x" << std::hex << hr << ")\n";
+                return {};
+            }
+            // Drain all currently available output
+            while (_process_output_once(result)) {}
+        }
+
+        for (auto& pkt : result) {
+            if (pkt.timestamp_us == 0) pkt.timestamp_us = timestamp_us;
+        }
+        return result;
 #else
+        (void)width; (void)height; (void)pitch; (void)timestamp_us;
         return {};
 #endif
     }
@@ -314,18 +250,29 @@ public:
     std::vector<EncodedPacket> flush() override {
         if (!initialized_) return {};
 #ifdef _WIN32
+        std::vector<EncodedPacket> result;
         mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         mft_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-        return _drain_output(0);
+
+        if (is_async_) {
+            // Pump events until DrainComplete (bounded wait)
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            bool drained = false;
+            while (!drained && std::chrono::steady_clock::now() < deadline) {
+                if (!_pump_one_event(result, &drained)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
+        } else {
+            while (_process_output_once(result)) {}
+        }
+        return result;
 #else
         return {};
 #endif
     }
 
     void request_keyframe() override {
-        // Media Foundation encoders reset IDR on next encode automatically
-        // when ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN) is called.
-        // For simplicity, we mark the flag and let the next frame be IDR.
         force_keyframe_ = true;
     }
 
@@ -349,60 +296,369 @@ public:
 
 private:
     EncoderConfig         config_;
-    bool                  initialized_   = false;
-    bool                  is_hardware_   = false;
-    bool                  mf_started_    = false;
+    bool                  initialized_     = false;
+    bool                  is_hardware_     = false;
+    bool                  is_async_        = false;
+    bool                  mf_started_      = false;
     bool                  com_initialized_ = false;
-    bool                  force_keyframe_ = false;
-    uint32_t              frame_count_   = 0;
+    bool                  force_keyframe_  = false;
+    uint32_t              frame_count_     = 0;
+    int                   need_input_credits_ = 0;
     std::vector<uint8_t>  nv12_buf_;
 
 #ifdef _WIN32
-    ComPtr<IMFTransform> mft_;
+    ComPtr<IMFTransform>           mft_;
+    ComPtr<IMFMediaEventGenerator> event_gen_;
+    ComPtr<ICodecAPI>              codec_api_;
 
-    std::vector<EncodedPacket> _drain_output(uint64_t fallback_ts) {
-        std::vector<EncodedPacket> result;
+    /// Enumerate and activate the best available H.264 encoder MFT.
+    bool _create_transform() {
+        MFT_REGISTER_TYPE_INFO output_type = {};
+        output_type.guidMajorType = MFMediaType_Video;
+        output_type.guidSubtype   = MFVideoFormat_H264;
 
-        MFT_OUTPUT_DATA_BUFFER out_data = {};
-        DWORD                  status   = 0;
+        IMFActivate** activate_array = nullptr;
+        UINT32        activate_count = 0;
 
-        for (;;) {
-            out_data = {};
-            HRESULT hr = mft_->ProcessOutput(0, 1, &out_data, &status);
+        // Pass 1: hardware encoders (these are async MFTs)
+        HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                               MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                               nullptr,
+                               &output_type,
+                               &activate_array,
+                               &activate_count);
+        is_hardware_ = SUCCEEDED(hr) && activate_count > 0;
 
-            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-            if (hr == MF_E_TRANSFORM_STREAM_CHANGE)  break;
-            if (FAILED(hr))                           break;
+        if (!is_hardware_) {
+            if (activate_array) { CoTaskMemFree(activate_array); activate_array = nullptr; }
+            activate_count = 0;
 
-            if (out_data.pSample) {
-                EncodedPacket pkt;
-                pkt.timestamp_us = fallback_ts;
-                pkt.is_keyframe  = (frame_count_ == 0) || force_keyframe_;
-                force_keyframe_  = false;
-
-                // Extract bytes from the sample
-                DWORD buf_count = 0;
-                out_data.pSample->GetBufferCount(&buf_count);
-                for (DWORD b = 0; b < buf_count; ++b) {
-                    ComPtr<IMFMediaBuffer> mbuf;
-                    out_data.pSample->GetBufferByIndex(b, &mbuf);
-
-                    BYTE*  data    = nullptr;
-                    DWORD  cur_len = 0;
-                    mbuf->Lock(&data, nullptr, &cur_len);
-                    pkt.data.insert(pkt.data.end(), data, data + cur_len);
-                    mbuf->Unlock();
-                }
-
-                frame_count_++;
-                out_data.pSample->Release();
-                result.push_back(std::move(pkt));
-            }
-
-            if (out_data.pEvents) out_data.pEvents->Release();
+            // Pass 2: synchronous software MFT (Microsoft H264 Encoder)
+            std::cout << "[MfEncoder] No hardware MFT encoder found, trying software MFT\n";
+            hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                           MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                           nullptr,
+                           &output_type,
+                           &activate_array,
+                           &activate_count);
         }
 
-        return result;
+        if (FAILED(hr) || activate_count == 0) {
+            std::cerr << "[MfEncoder] No MFT H.264 encoder found on this system\n";
+            if (activate_array) CoTaskMemFree(activate_array);
+            return false;
+        }
+
+        // Log the friendly name of the chosen encoder
+        WCHAR friendly[256] = {};
+        UINT32 name_len = 0;
+        if (SUCCEEDED(activate_array[0]->GetString(MFT_FRIENDLY_NAME_Attribute,
+                                                   friendly, 255, &name_len))) {
+            char name_utf8[512] = {};
+            WideCharToMultiByte(CP_UTF8, 0, friendly, -1,
+                                name_utf8, sizeof(name_utf8), nullptr, nullptr);
+            std::cout << "[MfEncoder] Using encoder: " << name_utf8 << "\n";
+        }
+
+        ComPtr<IMFTransform> mft;
+        hr = activate_array[0]->ActivateObject(IID_PPV_ARGS(&mft));
+
+        for (UINT32 i = 0; i < activate_count; ++i)
+            activate_array[i]->Release();
+        CoTaskMemFree(activate_array);
+
+        if (FAILED(hr) || !mft) {
+            std::cerr << "[MfEncoder] ActivateObject failed (0x" << std::hex << hr << ")\n";
+            return false;
+        }
+        mft_ = mft;
+
+        // Async MFTs must be unlocked before any type negotiation, and are
+        // then driven exclusively through the media event generator.
+        is_async_ = false;
+        ComPtr<IMFAttributes> attrs;
+        if (SUCCEEDED(mft_->GetAttributes(&attrs)) && attrs) {
+            UINT32 async_flag = 0;
+            if (SUCCEEDED(attrs->GetUINT32(MF_TRANSFORM_ASYNC, &async_flag)) && async_flag) {
+                is_async_ = true;
+                hr = attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+                if (FAILED(hr)) {
+                    std::cerr << "[MfEncoder] Failed to unlock async MFT (0x"
+                              << std::hex << hr << ")\n";
+                    return false;
+                }
+                if (FAILED(mft_.As(&event_gen_)) || !event_gen_) {
+                    std::cerr << "[MfEncoder] Async MFT has no event generator\n";
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// Negotiate output (H.264) then input (NV12) media types.
+    /// Encoder MFTs require the output type to be set first.
+    bool _configure_types() {
+        // --- Output type ---
+        ComPtr<IMFMediaType> out_type;
+        HRESULT hr = MFCreateMediaType(&out_type);
+        if (FAILED(hr)) return false;
+
+        out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        out_type->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrate_kbps * 1000);
+        out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
+        SetRatio(out_type.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
+        SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+
+        hr = mft_->SetOutputType(0, out_type.Get(), 0);
+        if (FAILED(hr)) {
+            // Fallback: iterate the types the encoder proposes
+            bool output_set = false;
+            for (DWORD i = 0; ; ++i) {
+                ComPtr<IMFMediaType> t;
+                if (FAILED(mft_->GetOutputAvailableType(0, i, &t))) break;
+                GUID subtype = {};
+                t->GetGUID(MF_MT_SUBTYPE, &subtype);
+                if (subtype != MFVideoFormat_H264) continue;
+                t->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrate_kbps * 1000);
+                t->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                SetRatio(t.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
+                SetRatio(t.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
+                SetRatio(t.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                if (SUCCEEDED(mft_->SetOutputType(0, t.Get(), 0))) {
+                    output_set = true;
+                    break;
+                }
+            }
+            if (!output_set) {
+                std::cerr << "[MfEncoder] Failed to set any H.264 output type\n";
+                return false;
+            }
+        }
+
+        // --- Input type (NV12) ---
+        bool input_set = false;
+        for (DWORD i = 0; ; ++i) {
+            ComPtr<IMFMediaType> t;
+            if (FAILED(mft_->GetInputAvailableType(0, i, &t))) break;
+            GUID subtype = {};
+            t->GetGUID(MF_MT_SUBTYPE, &subtype);
+            if (subtype != MFVideoFormat_NV12) continue;
+            t->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            SetRatio(t.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
+            SetRatio(t.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
+            SetRatio(t.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+            if (SUCCEEDED(mft_->SetInputType(0, t.Get(), 0))) {
+                input_set = true;
+                break;
+            }
+        }
+
+        if (!input_set) {
+            // Fallback: build the NV12 type from scratch
+            ComPtr<IMFMediaType> in_type;
+            if (SUCCEEDED(MFCreateMediaType(&in_type))) {
+                in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+                in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+                in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                SetRatio(in_type.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
+                SetRatio(in_type.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
+                SetRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                input_set = SUCCEEDED(mft_->SetInputType(0, in_type.Get(), 0));
+            }
+        }
+
+        if (!input_set) {
+            std::cerr << "[MfEncoder] Failed to set NV12 input type\n";
+            return false;
+        }
+        return true;
+    }
+
+    /// Best-effort encoder tuning: CBR + low latency.
+    void _apply_codec_api_tuning() {
+        if (FAILED(mft_.As(&codec_api_)) || !codec_api_) return;
+
+        VARIANT v;
+        VariantInit(&v);
+
+        v.vt = VT_UI4;
+        v.ulVal = eAVEncCommonRateControlMode_CBR;
+        codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+
+        v.vt = VT_UI4;
+        v.ulVal = config_.bitrate_kbps * 1000;
+        codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+
+        v.vt = VT_BOOL;
+        v.boolVal = VARIANT_TRUE;
+        codec_api_->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+
+        v.vt = VT_UI4;
+        v.ulVal = config_.gop_size;
+        codec_api_->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
+    }
+
+    void _force_keyframe_now() {
+        if (!codec_api_) return;
+        VARIANT v;
+        VariantInit(&v);
+        v.vt = VT_UI4;
+        v.ulVal = 1;
+        codec_api_->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &v);
+    }
+
+    /// Async path: wait for an input credit, submit the sample, then
+    /// collect any output that is already available.
+    void _encode_async(IMFSample* sample, std::vector<EncodedPacket>& result) {
+        // Wait (bounded) until the encoder asks for input
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (need_input_credits_ == 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            if (!_pump_one_event(result, nullptr)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+
+        if (need_input_credits_ > 0) {
+            HRESULT hr = mft_->ProcessInput(0, sample, 0);
+            if (FAILED(hr)) {
+                std::cerr << "[MfEncoder] ProcessInput failed (0x" << std::hex << hr << ")\n";
+            } else {
+                need_input_credits_--;
+            }
+        } else {
+            std::cerr << "[MfEncoder] Encoder did not request input in time, dropping frame\n";
+        }
+
+        // Collect whatever output is ready right now (without blocking)
+        while (_pump_one_event(result, nullptr)) {}
+    }
+
+    /// Process a single pending MFT event. Returns false when no event is
+    /// available. drained_out (optional) is set when DrainComplete arrives.
+    bool _pump_one_event(std::vector<EncodedPacket>& result, bool* drained_out) {
+        if (!event_gen_) return false;
+
+        ComPtr<IMFMediaEvent> ev;
+        HRESULT hr = event_gen_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+        if (hr == MF_E_NO_EVENTS_AVAILABLE || FAILED(hr) || !ev) return false;
+
+        MediaEventType type = MEUnknown;
+        ev->GetType(&type);
+
+        switch (type) {
+        case METransformNeedInput:
+            need_input_credits_++;
+            break;
+        case METransformHaveOutput:
+            _process_output_once(result);
+            break;
+        case METransformDrainComplete:
+            if (drained_out) *drained_out = true;
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
+
+    /// Run one ProcessOutput call, appending the encoded packet to `result`.
+    /// Handles stream-change renegotiation and caller-allocated samples.
+    /// Returns true if a packet was produced or the call should be retried.
+    bool _process_output_once(std::vector<EncodedPacket>& result) {
+        MFT_OUTPUT_STREAM_INFO stream_info = {};
+        mft_->GetOutputStreamInfo(0, &stream_info);
+
+        const bool mft_provides_samples =
+            (stream_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES |
+                                    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0;
+
+        MFT_OUTPUT_DATA_BUFFER out_data = {};
+        out_data.dwStreamID = 0;
+
+        ComPtr<IMFSample>      alloc_sample;
+        ComPtr<IMFMediaBuffer> alloc_buffer;
+        if (!mft_provides_samples) {
+            DWORD size = stream_info.cbSize;
+            if (size == 0) {
+                size = config_.width * config_.height * 2;  // generous upper bound
+            }
+            if (FAILED(MFCreateSample(&alloc_sample)) ||
+                FAILED(MFCreateMemoryBuffer(size, &alloc_buffer))) {
+                return false;
+            }
+            alloc_sample->AddBuffer(alloc_buffer.Get());
+            out_data.pSample = alloc_sample.Get();
+        }
+
+        DWORD status = 0;
+        HRESULT hr = mft_->ProcessOutput(0, 1, &out_data, &status);
+
+        if (out_data.pEvents) {
+            out_data.pEvents->Release();
+            out_data.pEvents = nullptr;
+        }
+
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            return false;
+        }
+        if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+            // Renegotiate the output type and retry on the next call
+            ComPtr<IMFMediaType> new_type;
+            if (SUCCEEDED(mft_->GetOutputAvailableType(0, 0, &new_type))) {
+                mft_->SetOutputType(0, new_type.Get(), 0);
+            }
+            return true;
+        }
+        if (FAILED(hr)) {
+            std::cerr << "[MfEncoder] ProcessOutput failed (0x" << std::hex << hr << ")\n";
+            return false;
+        }
+
+        IMFSample* produced = out_data.pSample;
+        if (!produced) return false;
+
+        EncodedPacket pkt;
+        pkt.timestamp_us = 0;  // caller fills in
+
+        LONGLONG sample_time = 0;
+        if (SUCCEEDED(produced->GetSampleTime(&sample_time))) {
+            pkt.timestamp_us = static_cast<uint64_t>(sample_time / 10);
+        }
+
+        UINT32 clean_point = 0;
+        produced->GetUINT32(MFSampleExtension_CleanPoint, &clean_point);
+        pkt.is_keyframe = (clean_point != 0) || (frame_count_ == 0);
+
+        DWORD buf_count = 0;
+        produced->GetBufferCount(&buf_count);
+        for (DWORD b = 0; b < buf_count; ++b) {
+            ComPtr<IMFMediaBuffer> mbuf;
+            if (FAILED(produced->GetBufferByIndex(b, &mbuf))) continue;
+
+            BYTE*  data    = nullptr;
+            DWORD  cur_len = 0;
+            if (SUCCEEDED(mbuf->Lock(&data, nullptr, &cur_len))) {
+                pkt.data.insert(pkt.data.end(), data, data + cur_len);
+                mbuf->Unlock();
+            }
+        }
+
+        // Samples allocated by the MFT must be released by the caller
+        if (mft_provides_samples && out_data.pSample) {
+            out_data.pSample->Release();
+        }
+
+        if (!pkt.data.empty()) {
+            frame_count_++;
+            result.push_back(std::move(pkt));
+        }
+        return true;
     }
 #endif
 
@@ -410,6 +666,8 @@ private:
 #ifdef _WIN32
         if (mft_) {
             mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            codec_api_.Reset();
+            event_gen_.Reset();
             mft_.Reset();
         }
         if (mf_started_) {

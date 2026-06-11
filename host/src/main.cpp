@@ -11,9 +11,11 @@
 #include "audio/audio_capture.h"
 #include "protocol.h"
 
+#include <algorithm>
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <csignal>
 #include <chrono>
 #include <cstring>
@@ -42,6 +44,10 @@ namespace {
                   << "  --udp-port N        UDP video port (default: 19801)\n"
                   << "  --audio-port N      UDP audio port (default: 19802)\n"
                   << "  --no-audio          Disable audio streaming\n"
+                  << "  --codec NAME        Video codec: mjpeg (default) or h264.\n"
+                  << "                      h264 uses the GPU encoder but requires an\n"
+                  << "                      H.264 decoder on the client (experimental).\n"
+                  << "  --jpeg-quality N    MJPEG quality 10-95 (default: 35)\n"
                   << "  --help              Show this message\n";
         std::exit(1);
     }
@@ -65,6 +71,8 @@ int main(int argc, char* argv[]) {
     uint16_t udp_port     = immersive::protocol::DEFAULT_UDP_PORT;
     uint16_t audio_port   = immersive::protocol::DEFAULT_AUDIO_PORT;
     bool     audio_enable = true;
+    bool     use_h264     = false;
+    uint32_t jpeg_quality = 35;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -81,6 +89,19 @@ int main(int argc, char* argv[]) {
             audio_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--no-audio") {
             audio_enable = false;
+        } else if (arg == "--codec" && i + 1 < argc) {
+            std::string codec(argv[++i]);
+            if (codec == "h264") {
+                use_h264 = true;
+            } else if (codec == "mjpeg") {
+                use_h264 = false;
+            } else {
+                std::cerr << "[Host] Unknown codec: " << codec << "\n";
+                usage(argv[0]);
+            }
+        } else if (arg == "--jpeg-quality" && i + 1 < argc) {
+            int q = std::stoi(argv[++i]);
+            jpeg_quality = static_cast<uint32_t>(std::max(10, std::min(95, q)));
         } else {
             std::cerr << "[Host] Unknown argument: " << arg << "\n";
             usage(argv[0]);
@@ -110,8 +131,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 2. Encoder
-    auto encoder_backend = immersive::detect_best_encoder();
+    // 2. Encoder backend selection.
+    // MJPEG is the default because it is the only codec the current client
+    // can render on every platform. H.264 (GPU) is opt-in via --codec h264.
+    immersive::EncoderBackend encoder_backend = immersive::EncoderBackend::SOFTWARE;
+    if (use_h264) {
+        encoder_backend = immersive::detect_best_encoder();
+        if (encoder_backend == immersive::EncoderBackend::SOFTWARE) {
+            std::cout << "[Host] --codec h264 requested but no MF encoder available, using MJPEG\n";
+        }
+    } else {
+        std::cout << "[Host] Using MJPEG software encoder (use --codec h264 for GPU encoding)\n";
+    }
     auto encoder = immersive::create_encoder(encoder_backend);
 
     // 3. Input injector
@@ -152,7 +183,10 @@ int main(int argc, char* argv[]) {
         proto_monitors.push_back(info);
     }
 
-    // Active streaming state
+    // Active streaming state.
+    // stream_mutex protects capture/encoder reconfiguration against the
+    // capture-encode main loop (callbacks run on network threads).
+    std::mutex stream_mutex;
     std::atomic<bool> streaming{false};
     uint8_t  active_monitor_id = 0;
     uint32_t active_client_id  = 0;
@@ -180,6 +214,7 @@ int main(int argc, char* argv[]) {
 
     server->set_on_client_disconnected([&](uint32_t client_id) {
         std::cout << "[Host] Client " << client_id << " disconnected\n";
+        std::lock_guard<std::mutex> lock(stream_mutex);
         if (client_id == active_client_id) {
             streaming = false;
             capture->stop_capture();
@@ -189,6 +224,8 @@ int main(int argc, char* argv[]) {
     server->set_on_monitor_select([&](uint32_t client_id, uint8_t monitor_id) {
         std::cout << "[Host] Client " << client_id
                   << " selected monitor " << (int)monitor_id << "\n";
+
+        std::lock_guard<std::mutex> lock(stream_mutex);
 
         // Parar stream previo si ya estaba activo (evita race condition)
         if (streaming.exchange(false)) {
@@ -216,12 +253,15 @@ int main(int argc, char* argv[]) {
             return;
         }
 
-        // Initialize encoder
+        // (Re)create and initialize the encoder for this stream. Creating a
+        // fresh instance lets a previous MJPEG fallback recover to H.264.
         immersive::EncoderConfig enc_config;
-        enc_config.width  = selected->width;
-        enc_config.height = selected->height;
-        enc_config.fps    = selected->refresh_rate;
+        enc_config.width        = selected->width;
+        enc_config.height       = selected->height;
+        enc_config.fps          = selected->refresh_rate;
+        enc_config.jpeg_quality = jpeg_quality;
 
+        encoder = immersive::create_encoder(encoder_backend);
         if (!encoder->initialize(enc_config)) {
             std::cerr << "[Host] Failed to initialize encoder\n";
             std::cout << "[Host] Falling back to software MJPEG encoder...\n";
@@ -317,6 +357,9 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        std::unique_lock<std::mutex> lock(stream_mutex);
+        if (!streaming) continue;  // re-check after acquiring the lock
+
         auto frame = capture->acquire_frame(16);  // ~60fps timeout
         if (!frame) continue;
 
@@ -328,17 +371,21 @@ int main(int argc, char* argv[]) {
             frame->pitch,
             frame->timestamp_us);
 
-        // Send each encoded packet to the active client
+        uint32_t client_id  = active_client_id;
+        uint8_t  monitor_id = active_monitor_id;
+        uint32_t frame_no   = frame_number;
+        if (!packets.empty()) frame_number++;  // number only frames actually sent
+        lock.unlock();
+
+        // Send each encoded packet to the active client (outside the lock)
         for (const auto& pkt : packets) {
             server->send_video_packet(
-                active_client_id,
-                active_monitor_id,
-                frame_number,
+                client_id,
+                monitor_id,
+                frame_no,
                 pkt.data.data(),
                 static_cast<uint32_t>(pkt.data.size()));
         }
-
-        frame_number++;
     }
 
     // --- Shutdown ---

@@ -37,10 +37,8 @@ public:
         frame_count_  = 0;
         force_keyframe_ = true;  // MJPEG frames are always independently decodable
 
-        // JPEG quality: scale from bitrate hint (clamp 40–95)
-        // Heuristic: 20000 kbps ~> quality 90
-        // Forzar calidad baja para MJPEG
-        quality_ = 35;
+        quality_ = static_cast<int>(
+            std::max(10u, std::min(95u, config_.jpeg_quality)));
 
         std::cout << "[MjpegEncoder] Initialized: "
                   << config_.width << "x" << config_.height

@@ -32,6 +32,7 @@ struct EncoderConfig {
     uint32_t     bitrate_kbps  = 20000;  // 20 Mbps default
     VideoCodec   codec         = VideoCodec::H264;
     uint32_t     gop_size      = 60;     // keyframe interval
+    uint32_t     jpeg_quality  = 35;     // MJPEG quality (10-95)
 };
 
 /// An encoded video packet

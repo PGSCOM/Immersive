@@ -53,6 +53,9 @@ var screen_panels: Array = []
 ## Network client (lazy-created).
 var network_client: Node = null
 
+## Audio receiver (created when the host announces audio).
+var audio_receiver: Node = null
+
 ## UI overlay (lazy-created).
 var ui_overlay: Node = null
 
@@ -123,6 +126,8 @@ func _init_network() -> void:
 	network_client.stream_started.connect(_on_stream_started)
 	network_client.video_frame_received.connect(_on_video_frame)
 	network_client.latency_response_received.connect(_on_latency_response)
+	network_client.audio_stream_started.connect(_on_audio_stream_started)
+	network_client.audio_stream_stopped.connect(_on_audio_stream_stopped)
 
 func connect_to_host() -> void:
 	if current_state != State.DISCONNECTED:
@@ -137,6 +142,8 @@ func disconnect_from_host() -> void:
 	_should_reconnect = false
 	if network_client:
 		network_client.disconnect_from_server()
+	if audio_receiver:
+		audio_receiver.stop()
 	current_state = State.DISCONNECTED
 	_update_overlay_state()
 	_clear_all_screens()
@@ -331,6 +338,8 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	current_state = State.DISCONNECTED
 	_update_overlay_state()
+	if audio_receiver:
+		audio_receiver.stop()
 	print("[Immersive-2] Disconnected from host")
 
 func _on_monitor_list(monitors: Array) -> void:
@@ -355,13 +364,21 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 	_update_overlay_state()
 	print("[Immersive-2] Streaming monitor %d (%dx%d) codec=%d" % [monitor_id, width, height, codec])
 
-	# Assign to slot 0 by default; subsequent calls go to slot 1, 2
-	var slot := 0
+	# Reuse the panel already showing this monitor; otherwise take the first
+	# free slot (or the last slot if everything is occupied).
+	var slot := -1
 	for i in range(screen_panels.size()):
-		if not is_instance_valid(screen_panels[i]):
+		if is_instance_valid(screen_panels[i]) and \
+				int(screen_panels[i].get_meta("monitor_id", -1)) == monitor_id:
 			slot = i
 			break
-		slot = i + 1
+	if slot < 0:
+		for i in range(MAX_SCREENS):
+			if i >= screen_panels.size() or not is_instance_valid(screen_panels[i]):
+				slot = i
+				break
+	if slot < 0:
+		slot = MAX_SCREENS - 1
 
 	var panel := _ensure_panel(min(slot, MAX_SCREENS - 1))
 	if panel and panel.has_method("set_resolution"):
@@ -377,13 +394,30 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 
 	_mark_workspace_restored_if_complete()
 
-func _on_video_frame(frame_data: PackedByteArray, width: int, height: int) -> void:
-	# Deliver frame to the matching panel (by monitor_id stored in meta)
-	# For now, deliver to the first active panel
+func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, height: int) -> void:
+	# Deliver frame to the panel showing this monitor
+	var fallback: MeshInstance3D = null
 	for panel in screen_panels:
-		if is_instance_valid(panel) and panel.has_method("update_texture"):
+		if not is_instance_valid(panel) or not panel.has_method("update_texture"):
+			continue
+		if int(panel.get_meta("monitor_id", -1)) == monitor_id:
 			panel.update_texture(frame_data, width, height)
-			break
+			return
+		if fallback == null:
+			fallback = panel
+	if fallback:
+		fallback.update_texture(frame_data, width, height)
+
+func _on_audio_stream_started(_sample_rate: int, _channels: int, audio_port: int) -> void:
+	if audio_receiver == null:
+		audio_receiver = preload("res://scripts/audio_receiver.gd").new()
+		audio_receiver.name = "AudioReceiver"
+		add_child(audio_receiver)
+	audio_receiver.start(host_ip, audio_port)
+
+func _on_audio_stream_stopped() -> void:
+	if audio_receiver:
+		audio_receiver.stop()
 
 func _on_latency_response(probe_id: int, _client_ts: int) -> void:
 	if probe_id != _probe_id:

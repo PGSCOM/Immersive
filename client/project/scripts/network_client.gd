@@ -13,10 +13,16 @@ signal disconnected_from_host
 signal monitor_list_received(monitors: Array)
 ## Emitted when streaming starts.
 signal stream_started(monitor_id: int, width: int, height: int, codec: int)
+## Emitted when streaming stops.
+signal stream_stopped
 ## Emitted when a complete video frame is received.
-signal video_frame_received(frame_data: PackedByteArray, width: int, height: int)
+signal video_frame_received(monitor_id: int, frame_data: PackedByteArray, width: int, height: int)
 ## Emitted when a latency response is received from the host.
 signal latency_response_received(probe_id: int, client_timestamp: int)
+## Emitted when the host announces its audio stream.
+signal audio_stream_started(sample_rate: int, channels: int, audio_port: int)
+## Emitted when the host stops its audio stream.
+signal audio_stream_stopped
 
 # --- Constants (matching protocol.h) ---
 
@@ -26,6 +32,8 @@ const MSG_MONITOR_LIST: int          = 0x03
 const MSG_MONITOR_SELECT: int        = 0x04
 const MSG_STREAM_START: int          = 0x05
 const MSG_STREAM_STOP: int           = 0x06
+const MSG_AUDIO_START: int           = 0x07
+const MSG_AUDIO_STOP: int            = 0x08
 const MSG_INPUT_MOUSE: int           = 0x10
 const MSG_INPUT_KEYBOARD: int        = 0x11
 const MSG_INPUT_POINTER: int         = 0x12
@@ -109,7 +117,9 @@ func _on_tcp_connected() -> void:
 	print("[Network] TCP connected, sending HELLO")
 
 	# Bind UDP for receiving video
-	udp_client.bind(_udp_port)
+	var bind_err := udp_client.bind(_udp_port)
+	if bind_err != OK:
+		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 
 	# Send HELLO message
 	var hello := PackedByteArray()
@@ -233,6 +243,22 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 
 		MSG_STREAM_STOP:
 			print("[Network] STREAM_STOP")
+			_frame_buffer.clear()
+			stream_stopped.emit()
+
+		MSG_AUDIO_START:
+			# payload: sample_rate (u16) + channels (u8) + audio_port (u16)
+			if payload.size() >= 5:
+				var sample_rate: int = payload.decode_u16(0)
+				var channels: int = payload[2]
+				var audio_port: int = payload.decode_u16(3)
+				print("[Network] AUDIO_START: %d Hz, %d ch, UDP:%d" %
+					[sample_rate, channels, audio_port])
+				audio_stream_started.emit(sample_rate, channels, audio_port)
+
+		MSG_AUDIO_STOP:
+			print("[Network] AUDIO_STOP")
+			audio_stream_stopped.emit()
 
 		MSG_LATENCY_RESPONSE:
 			# payload: probe_id (8B) + client_timestamp (8B) + server_timestamp (8B)
@@ -260,13 +286,15 @@ func _read_udp_packets() -> void:
 		var chunk_cnt: int = packet.decode_u16(7)
 		var chunk_data: PackedByteArray = packet.slice(VIDEO_HEADER_SIZE)
 
-		# Store chunk in frame buffer
-		var frame_key: int = frame_num
+		# Store chunk in frame buffer (key combines monitor and frame number
+		# so simultaneous monitor streams cannot collide)
+		var frame_key: int = (monitor_id << 32) | frame_num
 		if not _frame_buffer.has(frame_key):
 			_frame_buffer[frame_key] = {
 				"chunks": {},
 				"total": chunk_cnt,
-				"monitor_id": monitor_id
+				"monitor_id": monitor_id,
+				"frame_num": frame_num
 			}
 
 		_frame_buffer[frame_key]["chunks"][chunk_idx] = chunk_data
@@ -276,11 +304,13 @@ func _read_udp_packets() -> void:
 			_assemble_frame(frame_key)
 
 			# Clean up old frames
-			_cleanup_old_frames(frame_num)
+			_cleanup_old_frames(monitor_id, frame_num)
 
 func _assemble_frame(frame_key: int) -> void:
 	var frame_info: Dictionary = _frame_buffer[frame_key]
 	var total: int = frame_info["total"]
+	var monitor_id: int = frame_info["monitor_id"]
+	var frame_num: int = frame_info["frame_num"]
 
 	# Concatenate chunks in order
 	var frame_data := PackedByteArray()
@@ -288,14 +318,18 @@ func _assemble_frame(frame_key: int) -> void:
 		if frame_info["chunks"].has(i):
 			frame_data.append_array(frame_info["chunks"][i])
 
-	video_frame_received.emit(frame_data, _stream_width, _stream_height)
+	video_frame_received.emit(monitor_id, frame_data, _stream_width, _stream_height)
 	_frame_buffer.erase(frame_key)
 
-func _cleanup_old_frames(current_frame: int) -> void:
-	# Remove frames older than 10 frames ago
+	# Acknowledge so the host's flow control can drop frames when we lag
+	send_frame_ack(monitor_id, frame_num)
+
+func _cleanup_old_frames(monitor_id: int, current_frame: int) -> void:
+	# Remove incomplete frames of this monitor older than 10 frames ago
 	var keys_to_remove: Array = []
 	for key in _frame_buffer.keys():
-		if key < current_frame - 10:
+		if _frame_buffer[key]["monitor_id"] == monitor_id and \
+				_frame_buffer[key]["frame_num"] < current_frame - 10:
 			keys_to_remove.append(key)
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)

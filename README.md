@@ -148,6 +148,19 @@ cmake --build build
 
 The host listens on TCP :19800 (control) and UDP :19801 (video).
 
+Useful host options:
+
+| Option | Description |
+| --- | --- |
+| `--codec mjpeg\|h264` | Video codec. `mjpeg` (default) works with every client. `h264` uses the GPU encoder (NVENC/AMF/QSV via Media Foundation) but requires an H.264 decoder on the client — experimental. |
+| `--jpeg-quality N` | MJPEG quality 10–95 (default 35; raise it on fast networks). |
+| `--no-audio` | Disable audio streaming. |
+| `--max-clients N` | Maximum simultaneous VR clients (default 4). |
+
+> Note: if you run the Godot client on the **same machine** as the host, the
+> client cannot bind UDP :19801 while the host is using it. Test from a second
+> device, or change the video port on both sides.
+
 ### 2. Run the VR Client
 
 **Desktop testing:**
