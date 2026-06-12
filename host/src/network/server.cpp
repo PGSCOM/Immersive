@@ -318,6 +318,14 @@ public:
         on_monitor_select_ = std::move(cb);
     }
 
+    void set_on_multi_monitor_select(MultiMonitorSelectCallback cb) override {
+        on_multi_monitor_select_ = std::move(cb);
+    }
+
+    void set_on_stream_config(StreamConfigCallback cb) override {
+        on_stream_config_ = std::move(cb);
+    }
+
     void set_on_input_mouse(InputMouseCallback cb) override {
         on_input_mouse_ = std::move(cb);
     }
@@ -450,11 +458,37 @@ private:
                     std::cout << "[Server] Client " << client_id
                               << " selected " << (int)sel.monitor_count
                               << " monitor(s)\n";
-                    // Forward each selected monitor via existing callback
+
+                    std::vector<uint8_t> ids;
                     for (uint8_t i = 0; i < sel.monitor_count && i < 3; ++i) {
-                        if (sel.monitor_ids[i] != 0xFF && on_monitor_select_) {
-                            on_monitor_select_(client_id, sel.monitor_ids[i]);
+                        if (sel.monitor_ids[i] != 0xFF) {
+                            ids.push_back(sel.monitor_ids[i]);
                         }
+                    }
+
+                    if (on_multi_monitor_select_) {
+                        on_multi_monitor_select_(client_id, ids);
+                    } else if (on_monitor_select_) {
+                        // Legacy fallback: forward each id individually
+                        for (uint8_t id : ids) {
+                            on_monitor_select_(client_id, id);
+                        }
+                    }
+                }
+                break;
+            }
+            case protocol::MessageType::STREAM_CONFIG: {
+                if (payload.size() >= sizeof(protocol::StreamConfig)) {
+                    protocol::StreamConfig cfg;
+                    std::memcpy(&cfg, payload.data(), sizeof(cfg));
+                    std::cout << "[Server] Client " << client_id
+                              << " stream config: codec=" << (int)cfg.codec
+                              << " bitrate=" << cfg.bitrate_kbps
+                              << " jpegq=" << (int)cfg.jpeg_quality
+                              << " max_width=" << cfg.max_width
+                              << " max_fps=" << (int)cfg.max_fps << "\n";
+                    if (on_stream_config_) {
+                        on_stream_config_(client_id, cfg);
                     }
                 }
                 break;
@@ -560,11 +594,13 @@ private:
     mutable std::mutex clients_mutex_;
     std::unordered_map<uint32_t, ClientState> clients_;
 
-    ClientConnectedCallback     on_connected_;
-    ClientDisconnectedCallback  on_disconnected_;
-    MonitorSelectCallback       on_monitor_select_;
-    InputMouseCallback          on_input_mouse_;
-    InputKeyboardCallback       on_input_keyboard_;
+    ClientConnectedCallback      on_connected_;
+    ClientDisconnectedCallback   on_disconnected_;
+    MonitorSelectCallback        on_monitor_select_;
+    MultiMonitorSelectCallback   on_multi_monitor_select_;
+    StreamConfigCallback         on_stream_config_;
+    InputMouseCallback           on_input_mouse_;
+    InputKeyboardCallback        on_input_keyboard_;
 };
 
 std::unique_ptr<INetworkServer> create_network_server() {

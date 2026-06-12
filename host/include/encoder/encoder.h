@@ -22,6 +22,7 @@ enum class EncoderBackend {
 enum class VideoCodec {
     H264,
     H265,
+    AV1,
 };
 
 /// Encoder configuration

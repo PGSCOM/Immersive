@@ -152,10 +152,17 @@ Useful host options:
 
 | Option | Description |
 | --- | --- |
-| `--codec mjpeg\|h264` | Video codec. `mjpeg` (default) works with every client. `h264` uses the GPU encoder (NVENC/AMF/QSV via Media Foundation) but requires an H.264 decoder on the client — experimental. |
+| `--codec mjpeg\|h264\|h265\|av1` | Video codec. `mjpeg` (default) works with every client. The others use the GPU encoder (NVENC/AMF/QSV via Media Foundation); on the client they need the MediaCodec plugin (`client/android-plugin`) — without it the client auto-falls back to MJPEG. If the GPU lacks the codec the host falls back (→ H.264 → MJPEG). |
 | `--jpeg-quality N` | MJPEG quality 10–95 (default 35; raise it on fast networks). |
 | `--no-audio` | Disable audio streaming. |
 | `--max-clients N` | Maximum simultaneous VR clients (default 4). |
+
+These are only defaults: the VR client can override codec, bitrate, JPEG
+quality, stream resolution and FPS at runtime from the overlay's
+**Stream quality** section (STREAM_CONFIG message). The "✨ Auto" resolution
+mode computes the ideal stream width/FPS from the panel size, its distance to
+the headset and the headset's pixels-per-degree, so no bandwidth is wasted on
+detail the headset cannot resolve.
 
 > Note: if you run the Godot client on the **same machine** as the host, the
 > client cannot bind UDP :19801 while the host is using it. Test from a second
@@ -168,6 +175,17 @@ Useful host options:
 2. Press **F5** to run
 3. Press **O** to open the UI overlay
 4. Enter the host IP and click Connect
+
+**Export an APK (Quest / Pico):**
+
+The Android preset uses gradle builds and bundles the MediaCodec decoder
+plugin (`addons/im2_decoder/bin/*.aar`, built from `client/android-plugin`).
+With the Android SDK + JDK 17 configured in the Godot editor settings:
+
+```powershell
+godot --headless --path client/project --export-debug "Android" client/dist/immersive2-debug.apk
+adb install -r client/dist/immersive2-debug.apk
+```
 
 **Quest / Pico:**
 1. Export via **Project → Export → Android**

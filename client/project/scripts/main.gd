@@ -45,7 +45,18 @@ var foveation_enabled: bool = false
 var foveation_strength: float = 0.55
 var passthrough_enabled: bool = false
 
+# Stream quality settings (sent to the host via STREAM_CONFIG).
+var stream_codec: int = 0xFF        ## 0xFF = host default, 0 = H.264, 2 = MJPEG
+var stream_bitrate_kbps: int = 20000
+var stream_jpeg_quality: int = 35
+var stream_res_percent: int = 100   ## 100/75/50, -1 = auto (ideal)
+var stream_max_width: int = 0       ## computed target width; 0 = native
+var stream_fps: int = 0             ## 0 = auto
+
 var available_monitors: Array = []
+
+## Monitors currently selected for streaming (up to MAX_SCREENS).
+var active_monitor_ids: Array = []
 
 ## Active screen panels (up to MAX_SCREENS).
 var screen_panels: Array = []
@@ -55,6 +66,12 @@ var network_client: Node = null
 
 ## Audio receiver (created when the host announces audio).
 var audio_receiver: Node = null
+
+## Hardware video decoders per monitor (H.264/HEVC/AV1 via MediaCodec).
+var _decoders: Dictionary = {}
+
+## Whether we already auto-fell back to MJPEG this session (avoids loops).
+var _codec_fallback_sent: bool = false
 
 ## UI overlay (lazy-created).
 var ui_overlay: Node = null
@@ -124,6 +141,7 @@ func _init_network() -> void:
 	network_client.disconnected_from_host.connect(_on_disconnected)
 	network_client.monitor_list_received.connect(_on_monitor_list)
 	network_client.stream_started.connect(_on_stream_started)
+	network_client.stream_stopped.connect(_on_stream_stopped)
 	network_client.video_frame_received.connect(_on_video_frame)
 	network_client.latency_response_received.connect(_on_latency_response)
 	network_client.audio_stream_started.connect(_on_audio_stream_started)
@@ -145,14 +163,38 @@ func disconnect_from_host() -> void:
 	if audio_receiver:
 		audio_receiver.stop()
 	current_state = State.DISCONNECTED
+	active_monitor_ids.clear()
 	_update_overlay_state()
+	_update_overlay_monitors()
 	_clear_all_screens()
 
-func select_monitor(monitor_id: int, slot: int = 0) -> void:
+## Toggle a monitor: selecting a new one adds a screen (up to MAX_SCREENS),
+## selecting an active one removes its screen. The full selection is sent to
+## the host, which reconciles its per-monitor streams.
+func select_monitor(monitor_id: int, _slot: int = 0) -> void:
 	if current_state != State.CONNECTED and current_state != State.STREAMING:
 		return
-	print("[Immersive-2] Selecting monitor %d for slot %d" % [monitor_id, slot])
-	network_client.select_monitor(monitor_id)
+
+	if active_monitor_ids.has(monitor_id):
+		if active_monitor_ids.size() <= 1:
+			return  # keep at least one active stream
+		active_monitor_ids.erase(monitor_id)
+	else:
+		if active_monitor_ids.size() >= MAX_SCREENS:
+			active_monitor_ids.pop_front()  # replace the oldest selection
+		active_monitor_ids.append(monitor_id)
+
+	_send_monitor_selection()
+	_update_overlay_monitors()
+
+func _send_monitor_selection() -> void:
+	if not network_client or active_monitor_ids.is_empty():
+		return
+	print("[Immersive-2] Requesting monitors: %s" % [active_monitor_ids])
+	if active_monitor_ids.size() == 1:
+		network_client.select_monitor(active_monitor_ids[0])
+	else:
+		network_client.select_monitors(active_monitor_ids)
 
 # ---------------------------------------------------------------------------
 # Screen panels
@@ -180,6 +222,7 @@ func _create_screen_panel(slot: int) -> MeshInstance3D:
 	return panel
 
 func _clear_all_screens() -> void:
+	_close_all_decoders()
 	for panel in screen_panels:
 		if is_instance_valid(panel):
 			panel.queue_free()
@@ -280,6 +323,10 @@ func _init_ui_overlay() -> void:
 		ui_overlay.workspace_save_requested.connect(_on_overlay_workspace_save_requested)
 	if ui_overlay.has_signal("workspace_restore_requested"):
 		ui_overlay.workspace_restore_requested.connect(_on_overlay_workspace_restore_requested)
+	if ui_overlay.has_signal("stream_settings_changed"):
+		ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
+	if ui_overlay.has_signal("auto_quality_requested"):
+		ui_overlay.auto_quality_requested.connect(_on_overlay_auto_quality_requested)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -287,10 +334,137 @@ func _init_ui_overlay() -> void:
 		ui_overlay.set_foveation_settings(foveation_enabled, foveation_strength)
 	if ui_overlay.has_method("set_passthrough_settings"):
 		ui_overlay.set_passthrough_settings(passthrough_enabled, _is_passthrough_supported())
+	if ui_overlay.has_method("set_stream_settings"):
+		ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_res_percent, stream_fps)
 
 func _update_overlay_state() -> void:
 	if ui_overlay and ui_overlay.has_method("set_state"):
 		ui_overlay.set_state(current_state as int)
+
+# ---------------------------------------------------------------------------
+# Stream quality
+# ---------------------------------------------------------------------------
+
+func _send_stream_config() -> void:
+	if network_client and network_client.has_method("send_stream_config"):
+		network_client.send_stream_config(stream_codec, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_max_width, stream_fps)
+
+## Native width of the monitor shown on the first active panel (or first
+## available monitor) — reference for percentage-based downscaling.
+func _reference_monitor() -> Dictionary:
+	var mon_id := -1
+	for panel in screen_panels:
+		if is_instance_valid(panel):
+			mon_id = int(panel.get_meta("monitor_id", -1))
+			break
+	if mon_id < 0 and not active_monitor_ids.is_empty():
+		mon_id = active_monitor_ids[0]
+	for m in available_monitors:
+		if m.id == mon_id:
+			return m
+	if not available_monitors.is_empty():
+		return available_monitors[0]
+	return {"id": -1, "width": 1920, "height": 1080, "refresh_rate": 60}
+
+func _recompute_stream_max_width() -> void:
+	if stream_res_percent == 100:
+		stream_max_width = 0
+	elif stream_res_percent > 0:
+		var native_w: int = _reference_monitor().get("width", 1920)
+		stream_max_width = int(native_w * stream_res_percent / 100.0)
+	elif stream_res_percent == -1:
+		var ideal := compute_ideal_stream_settings()
+		stream_max_width = ideal["width"]
+		if stream_fps == 0:
+			stream_fps = ideal["fps"]
+
+## Perceptual "ideal" stream settings: matches the stream's pixel density to
+## what the headset can actually resolve for the panel at its current size
+## and distance, and the FPS to what headset+monitor can display.
+##
+##   PPD (pixels/degree) = eye render target width / horizontal FOV
+##   panel angular size  = 2*atan(panel_width / (2*distance))
+##   ideal width (px)    = PPD * panel angle, capped to the native width
+func compute_ideal_stream_settings() -> Dictionary:
+	var panel_w_m := 1.6
+	var distance := 2.0
+	var ref_panel: MeshInstance3D = null
+	for p in screen_panels:
+		if is_instance_valid(p):
+			ref_panel = p
+			break
+	if ref_panel:
+		panel_w_m = ref_panel.panel_width
+		if xr_camera:
+			distance = (ref_panel.global_transform.origin
+				- xr_camera.global_transform.origin).length()
+
+	var mon := _reference_monitor()
+	var native_w: int = mon.get("width", 1920)
+	var native_h: int = mon.get("height", 1080)
+	var native_hz: int = mon.get("refresh_rate", 60)
+
+	# Headset pixels-per-degree from the XR eye buffer (approx. 95° hFOV)
+	var vp_w := float(get_viewport().size.x)
+	var hmd_fov_deg := 95.0
+	var ppd: float = max(8.0, vp_w / hmd_fov_deg)
+
+	var panel_angle_deg := rad_to_deg(2.0 * atan(panel_w_m / (2.0 * max(0.3, distance))))
+	var ideal_w := int(clamp(ppd * panel_angle_deg, 480.0, float(native_w)))
+	ideal_w = int(round(ideal_w / 16.0)) * 16
+	var ideal_h := int(round(float(native_h) * float(ideal_w) / float(native_w)))
+
+	# FPS: limited by both the headset and the monitor; MJPEG capped at 30
+	var hmd_hz := 72.0
+	var xr := XRServer.get_primary_interface()
+	if xr and xr.has_method("get_display_refresh_rate"):
+		var r: float = xr.get_display_refresh_rate()
+		if r > 0.0:
+			hmd_hz = r
+	var ideal_fps: int = int(min(float(native_hz), hmd_hz))
+	if stream_codec == 2 or stream_codec == 0xFF:  # MJPEG (explicit or host default)
+		ideal_fps = min(ideal_fps, 30)
+
+	return {
+		"width": ideal_w,
+		"height": ideal_h,
+		"fps": ideal_fps,
+		"ppd": ppd,
+		"angle_deg": panel_angle_deg,
+		"distance": distance,
+	}
+
+func _on_overlay_stream_settings_changed(codec: int, bitrate_kbps: int,
+		jpeg_quality: int, res_percent: int, fps: int) -> void:
+	stream_codec = codec
+	stream_bitrate_kbps = clamp(bitrate_kbps, 1000, 100000)
+	stream_jpeg_quality = clamp(jpeg_quality, 10, 95)
+	stream_res_percent = res_percent
+	stream_fps = clamp(fps, 0, 120)
+	_recompute_stream_max_width()
+	_save_config()
+	_send_stream_config()
+
+func _on_overlay_auto_quality_requested() -> void:
+	var ideal := compute_ideal_stream_settings()
+	stream_res_percent = -1
+	stream_max_width = ideal["width"]
+	stream_fps = ideal["fps"]
+	_save_config()
+	_send_stream_config()
+	if ui_overlay and ui_overlay.has_method("set_auto_quality_result"):
+		ui_overlay.set_auto_quality_result(
+			ideal["width"], ideal["height"], ideal["fps"],
+			ideal["ppd"], ideal["angle_deg"], ideal["distance"])
+	if ui_overlay and ui_overlay.has_method("set_stream_settings"):
+		ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_res_percent, stream_fps)
+
+func _update_overlay_monitors() -> void:
+	if ui_overlay and ui_overlay.has_method("set_active_monitors"):
+		ui_overlay.set_active_monitors(active_monitor_ids)
 
 # ---------------------------------------------------------------------------
 # Reconnect logic
@@ -330,7 +504,11 @@ func _send_latency_probe() -> void:
 func _on_connected() -> void:
 	current_state = State.CONNECTED
 	_reconnect_timer = 0.0
+	_codec_fallback_sent = false
 	_update_overlay_state()
+	# Send quality settings before any stream starts (TCP preserves order)
+	_recompute_stream_max_width()
+	_send_stream_config()
 	if _workspace_panel_layouts.size() > 0:
 		_pending_workspace_restore = true
 	print("[Immersive-2] Connected to host")
@@ -355,6 +533,19 @@ func _on_monitor_list(monitors: Array) -> void:
 		if _request_workspace_monitors():
 			return
 
+	# After a reconnect, re-request the monitors that were active before
+	if not active_monitor_ids.is_empty():
+		var still_available: Array = []
+		for mon_id in active_monitor_ids:
+			for m in monitors:
+				if m.id == mon_id:
+					still_available.append(mon_id)
+					break
+		active_monitor_ids = still_available
+		if not active_monitor_ids.is_empty():
+			_send_monitor_selection()
+			return
+
 	# Default monitor selection
 	if monitors.size() > 0:
 		select_monitor(monitors[0].id, 0)
@@ -363,6 +554,22 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 	current_state = State.STREAMING
 	_update_overlay_state()
 	print("[Immersive-2] Streaming monitor %d (%dx%d) codec=%d" % [monitor_id, width, height, codec])
+
+	# Keep the local selection in sync (covers workspace-restore startups)
+	if not active_monitor_ids.has(monitor_id):
+		if active_monitor_ids.size() >= MAX_SCREENS:
+			active_monitor_ids.pop_front()
+		active_monitor_ids.append(monitor_id)
+	_update_overlay_monitors()
+
+	# Set up (or tear down) the hardware decoder for this monitor's codec
+	_close_decoder(monitor_id)
+	if codec in [0, 1, 3]:  # H.264 / HEVC / AV1
+		var dec := VideoDecoder.new()
+		if dec.open(codec, width, height):
+			_decoders[monitor_id] = dec
+		else:
+			_request_codec_fallback(codec)
 
 	# Reuse the panel already showing this monitor; otherwise take the first
 	# free slot (or the last slot if everything is occupied).
@@ -394,7 +601,42 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 
 	_mark_workspace_restored_if_complete()
 
+func _on_stream_stopped(monitor_id: int) -> void:
+	if monitor_id < 0:
+		return  # unknown monitor; nothing to remove
+
+	_close_decoder(monitor_id)
+	active_monitor_ids.erase(monitor_id)
+
+	# Remove the panel showing this monitor
+	for i in range(screen_panels.size()):
+		var panel = screen_panels[i]
+		if is_instance_valid(panel) and int(panel.get_meta("monitor_id", -1)) == monitor_id:
+			panel.queue_free()
+			screen_panels[i] = null
+
+	# If nothing is streaming anymore, fall back to CONNECTED state
+	var any_active := false
+	for panel in screen_panels:
+		if is_instance_valid(panel):
+			any_active = true
+			break
+	if not any_active and current_state == State.STREAMING:
+		current_state = State.CONNECTED
+		_update_overlay_state()
+	_update_overlay_monitors()
+
 func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, height: int) -> void:
+	# H.264/HEVC/AV1: run through the hardware decoder first (output is NV12)
+	if _decoders.has(monitor_id):
+		var dec: VideoDecoder = _decoders[monitor_id]
+		dec.submit(frame_data)
+		frame_data = dec.poll_frame()
+		if frame_data.is_empty():
+			return  # decoder hasn't produced a frame yet
+		width = dec.get_width()
+		height = dec.get_height()
+
 	# Deliver frame to the panel showing this monitor
 	var fallback: MeshInstance3D = null
 	for panel in screen_panels:
@@ -407,6 +649,34 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 			fallback = panel
 	if fallback:
 		fallback.update_texture(frame_data, width, height)
+
+func _close_decoder(monitor_id: int) -> void:
+	if _decoders.has(monitor_id):
+		_decoders[monitor_id].close()
+		_decoders.erase(monitor_id)
+
+func _close_all_decoders() -> void:
+	for monitor_id in _decoders.keys():
+		_decoders[monitor_id].close()
+	_decoders.clear()
+
+## The host streams a codec we cannot decode here. Ask for the best codec we
+## CAN decode: H.264 if the MediaCodec plugin is present (e.g. AV1 stream on
+## a Pico 4 / Quest 2), MJPEG otherwise. Runtime only; the user's saved codec
+## preference is not overwritten.
+func _request_codec_fallback(codec: int) -> void:
+	if _codec_fallback_sent:
+		return
+	_codec_fallback_sent = true
+	var names := {0: "H.264", 1: "HEVC", 3: "AV1"}
+	var fallback := 2  # MJPEG
+	if codec != 0 and VideoDecoder.is_codec_supported(0):
+		fallback = 0  # H.264
+	push_warning("[Immersive-2] No decoder for %s on this device — requesting %s" %
+		[names.get(codec, str(codec)), names.get(fallback, "MJPEG")])
+	if network_client and network_client.has_method("send_stream_config"):
+		network_client.send_stream_config(fallback, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_max_width, stream_fps)
 
 func _on_audio_stream_started(_sample_rate: int, _channels: int, audio_port: int) -> void:
 	if audio_receiver == null:
@@ -633,12 +903,10 @@ func _request_workspace_monitors() -> bool:
 	if selected_ids.is_empty():
 		return false
 
-	if network_client.has_method("select_monitors") and selected_ids.size() > 1:
-		network_client.select_monitors(selected_ids)
-	else:
-		network_client.select_monitor(selected_ids[0])
+	active_monitor_ids = selected_ids.duplicate()
+	_send_monitor_selection()
 
-	print("[Immersive-2] Restoring workspace monitors: %s" % selected_ids)
+	print("[Immersive-2] Restoring workspace monitors: %s" % [selected_ids])
 	return true
 
 func _find_saved_layout_for_monitor(monitor_id: int) -> Dictionary:
@@ -713,6 +981,11 @@ func _save_config() -> void:
 	cfg.set_value("display", "foveation_enabled", foveation_enabled)
 	cfg.set_value("display", "foveation_strength", foveation_strength)
 	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
+	cfg.set_value("stream", "codec", stream_codec)
+	cfg.set_value("stream", "bitrate_kbps", stream_bitrate_kbps)
+	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
+	cfg.set_value("stream", "res_percent", stream_res_percent)
+	cfg.set_value("stream", "fps", stream_fps)
 	cfg.save(CONFIG_PATH)
 
 func _load_config() -> void:
@@ -726,3 +999,8 @@ func _load_config() -> void:
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
+		stream_codec = cfg.get_value("stream", "codec", 0xFF)
+		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
+		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 35)
+		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
+		stream_fps = cfg.get_value("stream", "fps", 0)

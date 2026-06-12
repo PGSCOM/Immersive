@@ -122,9 +122,11 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	if not is_active:
 		return
 
-	# Attempt JPEG decode first (MJPEG path)
+	# JPEG (MJPEG path) — detected by magic bytes FF D8 FF
+	var looks_jpeg: bool = frame_data.size() >= 3 \
+		and frame_data[0] == 0xFF and frame_data[1] == 0xD8 and frame_data[2] == 0xFF
 	var img := Image.new()
-	var err := img.load_jpg_from_buffer(frame_data)
+	var err: int = img.load_jpg_from_buffer(frame_data) if looks_jpeg else ERR_INVALID_DATA
 	if err == OK:
 		# load_jpg returns RGB8; convert so the texture format stays stable
 		if img.get_format() != Image.FORMAT_RGBA8:

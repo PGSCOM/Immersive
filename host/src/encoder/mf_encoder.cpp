@@ -95,6 +95,29 @@ inline HRESULT SetRatio(IMFMediaType* mt, const GUID& key,
     return mt->SetUINT64(key, (static_cast<UINT64>(numerator) << 32) | denominator);
 }
 
+/// MFVideoFormat_AV1 ('AV01') — defined locally so older SDKs also build.
+const GUID kMFVideoFormat_AV1 =
+    { 0x31305641, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
+
+/// Output subtype for a given codec.
+GUID codec_subtype(immersive::VideoCodec codec) {
+    switch (codec) {
+    case immersive::VideoCodec::H265: return MFVideoFormat_HEVC;
+    case immersive::VideoCodec::AV1:  return kMFVideoFormat_AV1;
+    case immersive::VideoCodec::H264:
+    default:                          return MFVideoFormat_H264;
+    }
+}
+
+const char* codec_name_str(immersive::VideoCodec codec) {
+    switch (codec) {
+    case immersive::VideoCodec::H265: return "HEVC";
+    case immersive::VideoCodec::AV1:  return "AV1";
+    case immersive::VideoCodec::H264:
+    default:                          return "H.264";
+    }
+}
+
 }  // anonymous namespace
 
 #endif  // _WIN32
@@ -156,7 +179,7 @@ public:
         }
         mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
-        std::cout << "[MfEncoder] Initialized: "
+        std::cout << "[MfEncoder] Initialized " << codec_name_str(cfg.codec) << ": "
                   << cfg.width << "x" << cfg.height
                   << " @ " << cfg.fps << " fps"
                   << " bitrate=" << cfg.bitrate_kbps << " kbps"
@@ -286,9 +309,11 @@ public:
 
     std::string name() const override {
 #ifdef _WIN32
-        return is_hardware_
-            ? "Media Foundation H.264 Hardware Encoder (NVENC/AMF/QSV)"
-            : "Media Foundation H.264 Software Encoder";
+        std::string n = "Media Foundation ";
+        n += codec_name_str(config_.codec);
+        n += is_hardware_ ? " Hardware Encoder (NVENC/AMF/QSV)"
+                          : " Software Encoder";
+        return n;
 #else
         return "MF Encoder (unavailable on non-Windows)";
 #endif
@@ -311,11 +336,11 @@ private:
     ComPtr<IMFMediaEventGenerator> event_gen_;
     ComPtr<ICodecAPI>              codec_api_;
 
-    /// Enumerate and activate the best available H.264 encoder MFT.
+    /// Enumerate and activate the best available encoder MFT for the codec.
     bool _create_transform() {
         MFT_REGISTER_TYPE_INFO output_type = {};
         output_type.guidMajorType = MFMediaType_Video;
-        output_type.guidSubtype   = MFVideoFormat_H264;
+        output_type.guidSubtype   = codec_subtype(config_.codec);
 
         IMFActivate** activate_array = nullptr;
         UINT32        activate_count = 0;
@@ -333,8 +358,10 @@ private:
             if (activate_array) { CoTaskMemFree(activate_array); activate_array = nullptr; }
             activate_count = 0;
 
-            // Pass 2: synchronous software MFT (Microsoft H264 Encoder)
-            std::cout << "[MfEncoder] No hardware MFT encoder found, trying software MFT\n";
+            // Pass 2: synchronous software MFT. Only H.264 ships a software
+            // encoder MFT with Windows; HEVC/AV1 are hardware-only.
+            std::cout << "[MfEncoder] No hardware " << codec_name_str(config_.codec)
+                      << " MFT found, trying software MFT\n";
             hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
                            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
                            nullptr,
@@ -344,7 +371,8 @@ private:
         }
 
         if (FAILED(hr) || activate_count == 0) {
-            std::cerr << "[MfEncoder] No MFT H.264 encoder found on this system\n";
+            std::cerr << "[MfEncoder] No MFT " << codec_name_str(config_.codec)
+                      << " encoder found on this system\n";
             if (activate_array) CoTaskMemFree(activate_array);
             return false;
         }
@@ -397,19 +425,25 @@ private:
         return true;
     }
 
-    /// Negotiate output (H.264) then input (NV12) media types.
+    /// Negotiate output (H.264/HEVC/AV1) then input (NV12) media types.
     /// Encoder MFTs require the output type to be set first.
     bool _configure_types() {
+        const GUID subtype_wanted = codec_subtype(config_.codec);
+
         // --- Output type ---
         ComPtr<IMFMediaType> out_type;
         HRESULT hr = MFCreateMediaType(&out_type);
         if (FAILED(hr)) return false;
 
         out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        out_type->SetGUID(MF_MT_SUBTYPE, subtype_wanted);
         out_type->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrate_kbps * 1000);
         out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        if (config_.codec == VideoCodec::H264) {
+            out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        } else if (config_.codec == VideoCodec::H265) {
+            out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8);
+        }
         SetRatio(out_type.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
         SetRatio(out_type.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
         SetRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -423,7 +457,7 @@ private:
                 if (FAILED(mft_->GetOutputAvailableType(0, i, &t))) break;
                 GUID subtype = {};
                 t->GetGUID(MF_MT_SUBTYPE, &subtype);
-                if (subtype != MFVideoFormat_H264) continue;
+                if (subtype != subtype_wanted) continue;
                 t->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrate_kbps * 1000);
                 t->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
                 SetRatio(t.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
@@ -435,7 +469,8 @@ private:
                 }
             }
             if (!output_set) {
-                std::cerr << "[MfEncoder] Failed to set any H.264 output type\n";
+                std::cerr << "[MfEncoder] Failed to set any "
+                          << codec_name_str(config_.codec) << " output type\n";
                 return false;
             }
         }
@@ -691,9 +726,8 @@ std::unique_ptr<IVideoEncoder> create_mf_encoder() {
     return std::make_unique<MfEncoder>();
 }
 
-bool mf_hardware_encoder_available() {
+bool mf_encoder_available(VideoCodec codec) {
 #ifdef _WIN32
-    // Quick check: can we enumerate at least one hardware H.264 MFT?
     // COM must be initialized first
     bool com_init = false;
     HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -705,27 +739,39 @@ bool mf_hardware_encoder_available() {
         return false;
     }
 
-    MFT_REGISTER_TYPE_INFO out_type = { MFMediaType_Video, MFVideoFormat_H264 };
+    MFT_REGISTER_TYPE_INFO out_type = { MFMediaType_Video, codec_subtype(codec) };
 
-    IMFActivate** activations = nullptr;
-    UINT32        count       = 0;
+    auto enumerate = [&](UINT32 flags) -> UINT32 {
+        IMFActivate** activations = nullptr;
+        UINT32        count       = 0;
+        MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                  flags | MFT_ENUM_FLAG_SORTANDFILTER,
+                  nullptr,
+                  &out_type,
+                  &activations,
+                  &count);
+        for (UINT32 i = 0; i < count; ++i) activations[i]->Release();
+        if (activations) CoTaskMemFree(activations);
+        return count;
+    };
 
-    MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-              MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-              nullptr,
-              &out_type,
-              &activations,
-              &count);
-
-    for (UINT32 i = 0; i < count; ++i) activations[i]->Release();
-    if (activations) CoTaskMemFree(activations);
+    UINT32 count = enumerate(MFT_ENUM_FLAG_HARDWARE);
+    if (count == 0 && codec == VideoCodec::H264) {
+        // Windows ships a software H.264 encoder MFT
+        count = enumerate(MFT_ENUM_FLAG_SYNCMFT);
+    }
 
     MFShutdown();
     if (com_init) CoUninitialize();
     return count > 0;
 #else
+    (void)codec;
     return false;
 #endif
+}
+
+bool mf_hardware_encoder_available() {
+    return mf_encoder_available(VideoCodec::H264);
 }
 
 }  // namespace immersive

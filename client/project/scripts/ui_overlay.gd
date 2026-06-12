@@ -19,6 +19,9 @@ signal foveation_settings_changed(enabled: bool, strength: float)
 signal passthrough_toggled(enabled: bool)
 signal workspace_save_requested
 signal workspace_restore_requested
+## codec: 0xFF auto, 0 H.264, 2 MJPEG · res_percent: 100/75/50, -1 auto · fps: 0 auto
+signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int, res_percent: int, fps: int)
+signal auto_quality_requested
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -26,7 +29,7 @@ signal workspace_restore_requested
 
 @export var panel_distance : float = 1.0   ## Metres in front of camera
 @export var panel_width    : float = 0.90  ## Panel width in metres
-@export var panel_height   : float = 0.62  ## Panel height in metres
+@export var panel_height   : float = 0.86  ## Panel height in metres
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,6 +61,14 @@ var _passthrough_supported : bool            = true
 var _last_pointer_uv       : Vector2         = Vector2(0.5, 0.5)
 var _kbd_visible           : bool            = false
 
+# Stream quality state (mirrors main.gd; applied via the Apply button)
+var _active_monitor_ids    : Array           = []
+var _stream_codec          : int             = 0xFF
+var _bitrate_kbps          : int             = 20000
+var _jpeg_quality          : int             = 35
+var _res_percent           : int             = 100
+var _fps_value             : int             = 0
+
 # ---------------------------------------------------------------------------
 # Internal node references (built procedurally)
 # ---------------------------------------------------------------------------
@@ -82,6 +93,16 @@ var _btn_workspace_save    : Button
 var _btn_workspace_restore : Button
 var _kbd_container         : VBoxContainer  ## In-viewport numeric keyboard
 
+# Stream quality controls
+var _codec_buttons         : Dictionary = {}  ## value -> Button
+var _res_buttons           : Dictionary = {}  ## value -> Button
+var _fps_buttons           : Dictionary = {}  ## value -> Button
+var _slider_bitrate        : HSlider
+var _lbl_bitrate_value     : Label
+var _slider_jpegq          : HSlider
+var _lbl_jpegq_value       : Label
+var _lbl_auto_info         : Label
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -92,8 +113,10 @@ func _ready() -> void:
 	set_process(true)
 	hide()
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_labels()
+	if _visible_overlay:
+		_smooth_follow_camera(delta)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -127,6 +150,11 @@ func set_state(state: ConnectionState) -> void:
 
 func set_monitor_list(monitors: Array) -> void:
 	_available_monitors = monitors
+	_rebuild_monitor_list()
+
+## Update which monitors are currently streaming (active indicators).
+func set_active_monitors(ids: Array) -> void:
+	_active_monitor_ids = ids.duplicate()
 	_rebuild_monitor_list()
 
 func set_latency(ms: float) -> void:
@@ -321,9 +349,9 @@ func _apply_theme(root: Control) -> void:
 # ---------------------------------------------------------------------------
 
 func _build_ui() -> void:
-	# ── SubViewport (900 × 620) ──────────────────────────────────────────
+	# ── SubViewport (900 × 880) ──────────────────────────────────────────
 	_viewport                          = SubViewport.new()
-	_viewport.size                     = Vector2i(900, 620)
+	_viewport.size                     = Vector2i(900, 880)
 	_viewport.transparent_bg           = true
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	add_child(_viewport)
@@ -494,6 +522,9 @@ func _build_ui() -> void:
 	pass_row.add_child(_chk_passthrough)
 	_update_passthrough_ui()
 
+	# ── Stream quality section ───────────────────────────────────────────
+	_build_quality_section(vbox)
+
 	# ── Monitors section ─────────────────────────────────────────────────
 	_add_section_separator(vbox, "Monitors")
 
@@ -534,6 +565,190 @@ func _build_ui() -> void:
 	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_panel_mesh.material_override = mat
 	add_child(_panel_mesh)
+
+# ---------------------------------------------------------------------------
+# Stream quality section
+# ---------------------------------------------------------------------------
+
+## Row of mutually-exclusive option buttons. `options` = [[label, value], …].
+## Returns a Dictionary value -> Button.
+func _make_segmented_row(parent: HBoxContainer, options: Array,
+		on_chosen: Callable) -> Dictionary:
+	var buttons: Dictionary = {}
+	for opt in options:
+		var b := Button.new()
+		b.text = opt[0]
+		b.toggle_mode = true
+		b.add_theme_font_size_override("font_size", 16)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var value = opt[1]
+		b.pressed.connect(func(): on_chosen.call(value))
+		parent.add_child(b)
+		buttons[value] = b
+	return buttons
+
+func _refresh_segmented(buttons: Dictionary, selected_value) -> void:
+	for value in buttons:
+		var b: Button = buttons[value]
+		b.set_pressed_no_signal(value == selected_value)
+		if value == selected_value:
+			b.add_theme_color_override("font_color", Color(0.55, 0.95, 0.65))
+		else:
+			b.remove_theme_color_override("font_color")
+
+func _quality_label(parent: HBoxContainer, text: String, min_w: int = 92) -> void:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_color_override("font_color", Color(0.68, 0.74, 0.94))
+	lbl.custom_minimum_size = Vector2(min_w, 0)
+	parent.add_child(lbl)
+
+func _build_quality_section(vbox: VBoxContainer) -> void:
+	_add_section_separator(vbox, "Stream quality")
+
+	# Codec row
+	var codec_row := HBoxContainer.new()
+	codec_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(codec_row)
+	_quality_label(codec_row, "Codec")
+	_codec_buttons = _make_segmented_row(codec_row,
+		[["Auto", 0xFF], ["MJPEG", 2], ["H.264", 0], ["H.265", 1], ["AV1", 3]],
+		_on_codec_chosen)
+
+	# Resolution row
+	var res_row := HBoxContainer.new()
+	res_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(res_row)
+	_quality_label(res_row, "Resolution")
+	_res_buttons = _make_segmented_row(res_row,
+		[["Native", 100], ["75%", 75], ["50%", 50], ["✨ Auto", -1]],
+		_on_res_chosen)
+
+	# FPS row
+	var fps_row := HBoxContainer.new()
+	fps_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(fps_row)
+	_quality_label(fps_row, "FPS")
+	_fps_buttons = _make_segmented_row(fps_row,
+		[["Auto", 0], ["24", 24], ["30", 30], ["45", 45], ["60", 60]],
+		_on_fps_chosen)
+
+	# Bitrate slider (H.264)
+	var br_row := HBoxContainer.new()
+	br_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(br_row)
+	_quality_label(br_row, "Bitrate")
+	_slider_bitrate = HSlider.new()
+	_slider_bitrate.min_value = 5
+	_slider_bitrate.max_value = 60
+	_slider_bitrate.step = 1
+	_slider_bitrate.value = _bitrate_kbps / 1000.0
+	_slider_bitrate.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_slider_bitrate.value_changed.connect(_on_bitrate_changed)
+	br_row.add_child(_slider_bitrate)
+	_lbl_bitrate_value = Label.new()
+	_lbl_bitrate_value.custom_minimum_size = Vector2(92, 0)
+	_lbl_bitrate_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	br_row.add_child(_lbl_bitrate_value)
+
+	# JPEG quality slider (MJPEG)
+	var jq_row := HBoxContainer.new()
+	jq_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(jq_row)
+	_quality_label(jq_row, "JPEG qual.")
+	_slider_jpegq = HSlider.new()
+	_slider_jpegq.min_value = 10
+	_slider_jpegq.max_value = 95
+	_slider_jpegq.step = 5
+	_slider_jpegq.value = _jpeg_quality
+	_slider_jpegq.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_slider_jpegq.value_changed.connect(_on_jpegq_changed)
+	jq_row.add_child(_slider_jpegq)
+	_lbl_jpegq_value = Label.new()
+	_lbl_jpegq_value.custom_minimum_size = Vector2(92, 0)
+	_lbl_jpegq_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	jq_row.add_child(_lbl_jpegq_value)
+
+	# Auto-quality info label
+	_lbl_auto_info = Label.new()
+	_lbl_auto_info.text = ""
+	_lbl_auto_info.add_theme_font_size_override("font_size", 15)
+	_lbl_auto_info.add_theme_color_override("font_color", Color(0.55, 0.80, 1.00))
+	_lbl_auto_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_lbl_auto_info)
+
+	# Apply button
+	var apply_btn := Button.new()
+	apply_btn.text = "✔ Apply quality settings"
+	apply_btn.pressed.connect(_on_apply_quality_pressed)
+	vbox.add_child(apply_btn)
+
+	_refresh_quality_ui()
+
+func _refresh_quality_ui() -> void:
+	_refresh_segmented(_codec_buttons, _stream_codec)
+	_refresh_segmented(_res_buttons, _res_percent)
+	_refresh_segmented(_fps_buttons, _fps_value)
+	if _slider_bitrate:
+		_slider_bitrate.set_value_no_signal(_bitrate_kbps / 1000.0)
+	if _lbl_bitrate_value:
+		_lbl_bitrate_value.text = "%d Mbps" % int(_bitrate_kbps / 1000.0)
+	if _slider_jpegq:
+		_slider_jpegq.set_value_no_signal(_jpeg_quality)
+	if _lbl_jpegq_value:
+		_lbl_jpegq_value.text = "%d" % _jpeg_quality
+	# Highlight the slider that matters for the chosen codec
+	# (bitrate → H.264/HEVC/AV1; JPEG quality → MJPEG/Auto)
+	if _slider_bitrate:
+		_slider_bitrate.editable = _stream_codec in [0, 1, 3]
+	if _slider_jpegq:
+		_slider_jpegq.editable = _stream_codec == 2 or _stream_codec == 0xFF
+
+func _on_codec_chosen(value: int) -> void:
+	_stream_codec = value
+	_refresh_quality_ui()
+
+func _on_res_chosen(value: int) -> void:
+	_res_percent = value
+	if value == -1:
+		# Auto resolution also recomputes on the spot
+		auto_quality_requested.emit()
+	_refresh_quality_ui()
+
+func _on_fps_chosen(value: int) -> void:
+	_fps_value = value
+	_refresh_quality_ui()
+
+func _on_bitrate_changed(value: float) -> void:
+	_bitrate_kbps = int(value) * 1000
+	if _lbl_bitrate_value:
+		_lbl_bitrate_value.text = "%d Mbps" % int(value)
+
+func _on_jpegq_changed(value: float) -> void:
+	_jpeg_quality = int(value)
+	if _lbl_jpegq_value:
+		_lbl_jpegq_value.text = "%d" % int(value)
+
+func _on_apply_quality_pressed() -> void:
+	stream_settings_changed.emit(_stream_codec, _bitrate_kbps, _jpeg_quality,
+		_res_percent, _fps_value)
+
+## Sync controls from main.gd (initial load and after auto-compute).
+func set_stream_settings(codec: int, bitrate_kbps: int, jpeg_quality: int,
+		res_percent: int, fps: int) -> void:
+	_stream_codec = codec
+	_bitrate_kbps = bitrate_kbps
+	_jpeg_quality = jpeg_quality
+	_res_percent = res_percent
+	_fps_value = fps  # if no button matches, none is highlighted — that's fine
+	_refresh_quality_ui()
+
+## Show the result of the perceptual auto-quality computation.
+func set_auto_quality_result(width: int, height: int, fps: int,
+		ppd: float, angle_deg: float, distance: float) -> void:
+	if _lbl_auto_info:
+		_lbl_auto_info.text = "Auto: %dx%d @ %d fps — panel covers %.0f° at %.1f m (headset ≈ %.0f px/°)" % [
+			width, height, fps, angle_deg, distance, ppd]
 
 # ---------------------------------------------------------------------------
 # Section separator helper
@@ -640,19 +855,33 @@ func _on_ip_kbd_key(code: String) -> void:
 # ---------------------------------------------------------------------------
 
 func _rebuild_monitor_list() -> void:
+	if not _monitor_list:
+		return
 	for child in _monitor_list.get_children():
 		child.queue_free()
 	for mon in _available_monitors:
+		var mid: int = mon.get("id", 0)
+		var is_active: bool = _active_monitor_ids.has(mid)
 		var btn := Button.new()
-		btn.text = "[%d]  %s  —  %dx%d @ %d Hz" % [
-			mon.get("id", 0),
+
+		var status := "●  " if is_active else "○  "
+		var hint := "   (tap to remove)" if is_active else "   (tap to add)"
+		btn.text = "%s[%d]  %s  —  %dx%d @ %d Hz%s" % [
+			status,
+			mid,
 			mon.get("name", "Monitor"),
 			mon.get("width", 0),
 			mon.get("height", 0),
-			mon.get("refresh_rate", 60)
+			mon.get("refresh_rate", 60),
+			hint
 		]
 		btn.add_theme_font_size_override("font_size", 17)
-		var mid: int = mon.get("id", 0)
+		if is_active:
+			btn.add_theme_color_override("font_color", Color(0.45, 0.95, 0.60))
+			btn.add_theme_stylebox_override("normal",
+				_flat(Color(0.08, 0.22, 0.14), Color(0.25, 0.65, 0.40)))
+			btn.add_theme_stylebox_override("hover",
+				_flat(Color(0.12, 0.30, 0.18), Color(0.35, 0.80, 0.50)))
 		btn.pressed.connect(func(): _on_monitor_selected(mid))
 		_monitor_list.add_child(btn)
 
@@ -732,9 +961,9 @@ func _on_connect_pressed() -> void:
 		connect_requested.emit("", 0, 0)
 
 func _on_monitor_selected(monitor_id: int) -> void:
+	# Keep the overlay open: selection toggles screens on/off, and the list
+	# refreshes via set_active_monitors() to show the new state.
 	monitor_selected.emit(monitor_id)
-	hide()
-	_visible_overlay = false
 
 func _on_curved_toggled(enabled: bool) -> void:
 	_curved_enabled = enabled

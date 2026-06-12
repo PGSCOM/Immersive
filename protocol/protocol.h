@@ -31,8 +31,9 @@ constexpr uint16_t MAX_UDP_PAYLOAD = 1400;
 /// Video codecs
 enum class VideoCodec : uint8_t {
     H264  = 0,
-    H265  = 1,
+    H265  = 1,  ///< HEVC (hardware MFT only)
     MJPEG = 2,  ///< Software MJPEG encoder (stb_image_write)
+    AV1   = 3,  ///< AV1 (hardware MFT only, recent GPUs)
 };
 
 /// Control message types
@@ -49,6 +50,7 @@ enum class MessageType : uint8_t {
     INPUT_KEYBOARD       = 0x11,
     INPUT_POINTER        = 0x12,
     MULTI_MONITOR_SELECT = 0x20, ///< Select multiple monitors simultaneously
+    STREAM_CONFIG        = 0x21, ///< Client requests stream quality settings
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
     LATENCY_RESPONSE     = 0x41, ///< Server echoes LATENCY_PROBE back
@@ -104,6 +106,22 @@ struct StreamStart {
     uint16_t width;
     uint16_t height;
     uint8_t  codec;  ///< VideoCodec enum value
+};
+
+/// Sent by the server when a monitor stream ends (e.g. it was deselected).
+struct StreamStop {
+    uint8_t monitor_id;
+};
+
+/// Stream quality settings requested by the client (applies to all streams).
+/// Zero / 0xFF fields mean "keep the host default". The host restarts the
+/// active streams when this message is received.
+struct StreamConfig {
+    uint8_t  codec;         ///< VideoCodec value; 0xFF = host default
+    uint32_t bitrate_kbps;  ///< H.264 bitrate; 0 = default
+    uint8_t  jpeg_quality;  ///< MJPEG quality 10-95; 0 = default
+    uint16_t max_width;     ///< Downscale to this width (aspect kept); 0 = native
+    uint8_t  max_fps;       ///< FPS cap; 0 = auto
 };
 
 struct InputMouse {

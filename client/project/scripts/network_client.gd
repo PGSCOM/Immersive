@@ -13,8 +13,8 @@ signal disconnected_from_host
 signal monitor_list_received(monitors: Array)
 ## Emitted when streaming starts.
 signal stream_started(monitor_id: int, width: int, height: int, codec: int)
-## Emitted when streaming stops.
-signal stream_stopped
+## Emitted when a monitor stream stops (monitor_id = -1 if unknown).
+signal stream_stopped(monitor_id: int)
 ## Emitted when a complete video frame is received.
 signal video_frame_received(monitor_id: int, frame_data: PackedByteArray, width: int, height: int)
 ## Emitted when a latency response is received from the host.
@@ -38,6 +38,7 @@ const MSG_INPUT_MOUSE: int           = 0x10
 const MSG_INPUT_KEYBOARD: int        = 0x11
 const MSG_INPUT_POINTER: int         = 0x12
 const MSG_MULTI_MONITOR_SELECT: int  = 0x20
+const MSG_STREAM_CONFIG: int         = 0x21
 const MSG_FRAME_ACK: int             = 0x30
 const MSG_LATENCY_PROBE: int         = 0x40
 const MSG_LATENCY_RESPONSE: int      = 0x41
@@ -242,9 +243,13 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				stream_started.emit(monitor_id, _stream_width, _stream_height, codec)
 
 		MSG_STREAM_STOP:
-			print("[Network] STREAM_STOP")
-			_frame_buffer.clear()
-			stream_stopped.emit()
+			var stopped_monitor: int = payload[0] if payload.size() >= 1 else -1
+			print("[Network] STREAM_STOP monitor=%d" % stopped_monitor)
+			# Drop pending chunks of that monitor (or all if unknown)
+			for key in _frame_buffer.keys():
+				if stopped_monitor < 0 or _frame_buffer[key]["monitor_id"] == stopped_monitor:
+					_frame_buffer.erase(key)
+			stream_stopped.emit(stopped_monitor)
 
 		MSG_AUDIO_START:
 			# payload: sample_rate (u16) + channels (u8) + audio_port (u16)
@@ -346,6 +351,21 @@ func select_monitors(monitor_ids: Array) -> void:
 		payload[1 + i] = 0xFF
 	payload[4] = 0  # reserved
 	_send_control_message(MSG_MULTI_MONITOR_SELECT, payload)
+
+## Send stream quality settings. The host restarts active streams to apply.
+## codec: 0 = H.264, 2 = MJPEG, 0xFF = host default. Zero values = default.
+func send_stream_config(codec: int, bitrate_kbps: int, jpeg_quality: int,
+		max_width: int, max_fps: int) -> void:
+	var payload := PackedByteArray()
+	payload.resize(9)
+	payload[0] = codec & 0xFF
+	payload.encode_u32(1, max(0, bitrate_kbps))
+	payload[5] = clamp(jpeg_quality, 0, 95)
+	payload.encode_u16(6, max(0, max_width))
+	payload[8] = clamp(max_fps, 0, 120)
+	_send_control_message(MSG_STREAM_CONFIG, payload)
+	print("[Network] STREAM_CONFIG: codec=%d bitrate=%d jpegq=%d max_w=%d fps=%d" %
+		[codec, bitrate_kbps, jpeg_quality, max_width, max_fps])
 
 ## Send a frame acknowledgement.
 func send_frame_ack(monitor_id: int, frame_number: int) -> void:

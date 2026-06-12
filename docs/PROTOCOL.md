@@ -126,15 +126,20 @@ Confirms stream is starting for a monitor.
 | monitor_id | uint8 | Monitor being streamed |
 | width | uint16 LE | Frame width |
 | height | uint16 LE | Frame height |
-| codec | uint8 | 0=H.264, 1=H.265, 2=MJPEG |
+| codec | uint8 | 0=H.264, 1=H.265/HEVC, 2=MJPEG, 3=AV1 |
 
 ---
 
 ### `0x06` STREAM_STOP — Host → Client
 
-Notifies client that streaming has stopped.
+Notifies the client that the stream of a specific monitor has stopped
+(e.g. the monitor was deselected via MONITOR_SELECT / MULTI_MONITOR_SELECT).
 
-Empty payload.
+| Field | Type | Description |
+|-------|------|-------------|
+| monitor_id | uint8 | Monitor whose stream ended |
+
+Clients should treat an empty payload (legacy) as "all streams stopped".
 
 ---
 
@@ -192,9 +197,34 @@ Select up to 3 monitors simultaneously.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| monitor_count | uint8 | Number of valid IDs (1–3) |
+| monitor_count | uint8 | Number of valid IDs (0–3) |
 | monitor_ids[3] | uint8[3] | Monitor IDs; unused slots = 0xFF |
 | _reserved | uint8 | Reserved, must be 0 |
+
+The host reconciles its active streams with the full selection: monitors not
+listed are stopped (each acknowledged with STREAM_STOP), new ones are started
+(STREAM_START), already-streaming ones continue untouched. `monitor_count = 0`
+stops all streams.
+
+---
+
+### `0x21` STREAM_CONFIG — Client → Host
+
+Stream quality settings. Applies to all streams; the host restarts the active
+streams in place (new STREAM_START per monitor, no STREAM_STOP) so the change
+takes effect immediately.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| codec | uint8 | 0 = H.264, 1 = H.265/HEVC, 2 = MJPEG, 3 = AV1, 0xFF = host default. If the host cannot encode the requested codec it falls back (→ H.264 → MJPEG) and announces the actual codec in STREAM_START. |
+| bitrate_kbps | uint32 LE | H.264 bitrate; 0 = host default |
+| jpeg_quality | uint8 | MJPEG quality 10–95; 0 = host default |
+| max_width | uint16 LE | Downscale streams to this width (aspect preserved, host clamps to native); 0 = native resolution |
+| max_fps | uint8 | FPS cap; 0 = auto (display refresh for H.264, 24 for MJPEG) |
+
+When a stream is downscaled the host announces the scaled dimensions in
+STREAM_START and maps incoming INPUT_MOUSE coordinates (which are in stream
+pixels) back to native monitor pixels.
 
 ---
 

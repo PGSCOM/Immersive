@@ -23,6 +23,14 @@ using ClientDisconnectedCallback = std::function<void(uint32_t client_id)>;
 /// Callback for when a client requests a monitor
 using MonitorSelectCallback = std::function<void(uint32_t client_id, uint8_t monitor_id)>;
 
+/// Callback for when a client requests a set of monitors (multi-monitor)
+using MultiMonitorSelectCallback =
+    std::function<void(uint32_t client_id, const std::vector<uint8_t>& monitor_ids)>;
+
+/// Callback for when a client requests stream quality settings
+using StreamConfigCallback =
+    std::function<void(uint32_t client_id, const protocol::StreamConfig& config)>;
+
 /// Callback for incoming input events
 using InputMouseCallback = std::function<void(uint32_t client_id, const protocol::InputMouse& input)>;
 using InputKeyboardCallback = std::function<void(uint32_t client_id, const protocol::InputKeyboard& input)>;
@@ -75,6 +83,8 @@ public:
     virtual void set_on_client_connected(ClientConnectedCallback cb) = 0;
     virtual void set_on_client_disconnected(ClientDisconnectedCallback cb) = 0;
     virtual void set_on_monitor_select(MonitorSelectCallback cb) = 0;
+    virtual void set_on_multi_monitor_select(MultiMonitorSelectCallback cb) = 0;
+    virtual void set_on_stream_config(StreamConfigCallback cb) = 0;
     virtual void set_on_input_mouse(InputMouseCallback cb) = 0;
     virtual void set_on_input_keyboard(InputKeyboardCallback cb) = 0;
 
