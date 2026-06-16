@@ -483,7 +483,7 @@ int main(int argc, char* argv[]) {
 
     // Restart the active streams in place (no STREAM_STOP notifications) so
     // a new stream configuration takes effect without dropping panels.
-    auto restart_streams = [&]() {
+	auto restart_streams = [&]() {
         std::vector<uint8_t> ids;
         uint32_t client_id;
         {
@@ -495,6 +495,13 @@ int main(int argc, char* argv[]) {
                 if (ctx->worker.joinable()) ctx->worker.join();
             }
             active_streams.clear();
+        }
+        for (uint8_t id : ids) {
+            immersive::protocol::StreamStop stop_msg = { id };
+            server->send_control_message(
+                client_id,
+                immersive::protocol::MessageType::STREAM_STOP,
+                &stop_msg, sizeof(stop_msg));
         }
         if (!ids.empty()) {
             apply_selection(client_id, ids);

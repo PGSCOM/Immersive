@@ -674,6 +674,8 @@ func _request_codec_fallback(codec: int) -> void:
 		fallback = 0  # H.264
 	push_warning("[Immersive-2] No decoder for %s on this device — requesting %s" %
 		[names.get(codec, str(codec)), names.get(fallback, "MJPEG")])
+	stream_codec = fallback
+	_save_config()
 	if network_client and network_client.has_method("send_stream_config"):
 		network_client.send_stream_config(fallback, stream_bitrate_kbps,
 			stream_jpeg_quality, stream_max_width, stream_fps)

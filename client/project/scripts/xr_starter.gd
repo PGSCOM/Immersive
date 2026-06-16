@@ -53,8 +53,8 @@ func _on_openxr_session_begun() -> void:
 	print("OpenXR: Session begun")
 
 func _on_openxr_visible_state() -> void:
-	print("OpenXR: XR ended (visible_state)")
-	xr_ended.emit()
+	print("OpenXR: Session visible (unfocused — menu open)")
+	# No emitir xr_ended: la sesión sigue activa, solo perdió el foco
 
 func _on_openxr_focused_state() -> void:
 	print("OpenXR: XR started (focused_state)")

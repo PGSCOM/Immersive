@@ -151,6 +151,7 @@ public:
     }
 
     void stop_capture() override {
+        if (!capturing_) return;
         capturing_ = false;
 
 #ifdef _WIN32
