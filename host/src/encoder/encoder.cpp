@@ -57,17 +57,17 @@ public:
 
         // Frame pacing is handled by the stream worker (configurable FPS cap).
 
-        // stb_image_write JPEG only supports 1 or 3 channels (not RGBA).
-        // Convert BGRA → RGB into a temporary buffer.
-        std::vector<uint8_t> rgb(width * height * 3);
+        // stb_image_write expects RGB or RGBA (not BGRA).
+        // Convert BGRA → RGBA in-place into a temporary buffer.
+        std::vector<uint8_t> rgba(width * height * 4);
         for (uint32_t y = 0; y < height; ++y) {
             const uint8_t* src_row = bgra_data + static_cast<size_t>(y) * pitch;
-            uint8_t*       dst_row = rgb.data() + static_cast<size_t>(y) * width * 3;
+            uint8_t*       dst_row = rgba.data() + static_cast<size_t>(y) * width * 4;
             for (uint32_t x = 0; x < width; ++x) {
-                dst_row[x * 3 + 0] = src_row[x * 4 + 2]; // R ← B
-                dst_row[x * 3 + 1] = src_row[x * 4 + 1]; // G ← G
-                dst_row[x * 3 + 2] = src_row[x * 4 + 0]; // B ← R
-                // Alpha is discarded — JPEG has no alpha channel
+                dst_row[x * 4 + 0] = src_row[x * 4 + 2]; // R ← B
+                dst_row[x * 4 + 1] = src_row[x * 4 + 1]; // G ← G
+                dst_row[x * 4 + 2] = src_row[x * 4 + 0]; // B ← R
+                dst_row[x * 4 + 3] = src_row[x * 4 + 3]; // A ← A
             }
         }
 
@@ -86,8 +86,8 @@ public:
             &jpeg_data,
             static_cast<int>(width),
             static_cast<int>(height),
-            3,                  // channels (RGB) — JPEG does not support RGBA
-            rgb.data(),
+            4,                  // channels (RGBA — JPEG ignores alpha internally)
+            rgba.data(),
             quality_);
 
         if (!ok || jpeg_data.empty()) {
