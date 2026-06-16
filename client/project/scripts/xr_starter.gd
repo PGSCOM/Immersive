@@ -29,6 +29,13 @@ func _setup_for_openxr() -> bool:
 			xr_failed_to_initialize.emit()
 			return false
 
+	# Supersample slightly to fight aliasing ("dientes de sierra"). MSAA can't be
+	# used here: it breaks stereo (gray right eye) in the gl_compatibility
+	# renderer. Instead OpenXR renders at a higher resolution and downsamples to
+	# the headset swapchain, which also sharpens the streamed desktop texture.
+	if "render_target_size_multiplier" in xr_interface:
+		xr_interface.render_target_size_multiplier = 1.3
+
 	# Connect the OpenXR events
 	xr_interface.connect("session_begun", _on_openxr_session_begun)
 	xr_interface.connect("session_visible", _on_openxr_visible_state)
