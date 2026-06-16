@@ -180,8 +180,13 @@ jobs:
           # Ensure CI uses the Gradle path required by OpenXR and SDK overrides.
           sed -i 's/^gradle_build\/use_gradle_build=.*/gradle_build\/use_gradle_build=true/' "${CI_PROJECT_DIR}/export_presets.cfg"
 
-          # XR init can crash on GitHub runners without a real runtime/device.
-          sed -i 's/openxr\/enabled=true/openxr\/enabled=false/g' "${CI_PROJECT_DIR}/project.godot"
+          # NOTE: do NOT disable xr/openxr/enabled in project.godot here — that
+          # setting is baked into the exported APK, and turning it off makes the
+          # app launch as a flat 2D window on the headset (no OpenXR interface is
+          # created at runtime, so use_xr is never enabled). The --xr-mode off
+          # flag below already keeps OpenXR from initializing in the *export
+          # tool* on the runtime-less CI runner, which is all we need to avoid a
+          # crash during export — the main scene is not run while exporting.
 
           GODOT_COMMON_ARGS=(
             --verbose
