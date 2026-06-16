@@ -117,8 +117,12 @@ func _process(_delta: float) -> void:
 func _on_tcp_connected() -> void:
 	print("[Network] TCP connected, sending HELLO")
 
-	# Bind UDP for receiving video
-	var bind_err := udp_client.bind(_udp_port)
+	# Bind UDP for receiving video. A large receive buffer (2 MB, matching the
+	# host's send buffer) keeps a burst of chunks for one frame from being
+	# dropped by the OS/Godot ring buffer on a busy WiFi link — losing a single
+	# chunk makes the whole frame fail to reassemble, which looks like stutter
+	# or a frozen/black screen.
+	var bind_err := udp_client.bind(_udp_port, "*", 2 * 1024 * 1024)
 	if bind_err != OK:
 		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 

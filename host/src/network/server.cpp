@@ -120,14 +120,23 @@ public:
         int sndbuf = 2 * 1024 * 1024;
         setsockopt(udp_socket_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
 
+        // The UDP socket is SEND-ONLY: the host transmits video to
+        // <client>:udp_port and audio to <client>:audio_port, and never
+        // recvfrom()s on it. Binding it to the fixed udp_port is therefore
+        // unnecessary and actively harmful — when the host and the VR client
+        // run on the same machine (local testing) the host would squat
+        // udp_port, leaving the client unable to bind it to RECEIVE video.
+        // Audio keeps working because it uses a different port, producing the
+        // exact "audio plays but the screen stays black" symptom. Bind to an
+        // ephemeral port (0) so the client always owns udp_port for receiving.
         struct sockaddr_in udp_addr = {};
         udp_addr.sin_family = AF_INET;
         udp_addr.sin_addr.s_addr = INADDR_ANY;
-        udp_addr.sin_port = htons(config_.udp_port);
+        udp_addr.sin_port = htons(0);
 
         if (bind(udp_socket_, reinterpret_cast<struct sockaddr*>(&udp_addr),
                  sizeof(udp_addr)) < 0) {
-            std::cerr << "[Server] UDP bind failed on port " << config_.udp_port << "\n";
+            std::cerr << "[Server] UDP bind failed\n";
             closesocket(tcp_socket_);
             closesocket(udp_socket_);
             return false;
