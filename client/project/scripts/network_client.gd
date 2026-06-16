@@ -291,6 +291,10 @@ func _read_udp_packets() -> void:
 		var chunk_cnt: int = packet.decode_u16(7)
 		var chunk_data: PackedByteArray = packet.slice(VIDEO_HEADER_SIZE)
 
+		# Validate chunk index to avoid corrupting the frame buffer
+		if frame_num < 0 or chunk_idx < 0 or chunk_idx >= chunk_cnt:
+			continue
+
 		# Store chunk in frame buffer (key combines monitor and frame number
 		# so simultaneous monitor streams cannot collide)
 		var frame_key: int = (monitor_id << 32) | frame_num
@@ -308,7 +312,7 @@ func _read_udp_packets() -> void:
 		if _frame_buffer[frame_key]["chunks"].size() == chunk_cnt:
 			_assemble_frame(frame_key)
 
-			# Clean up old frames
+			# Clean up old frames periodically
 			_cleanup_old_frames(monitor_id, frame_num)
 
 func _assemble_frame(frame_key: int) -> void:
@@ -330,11 +334,12 @@ func _assemble_frame(frame_key: int) -> void:
 	send_frame_ack(monitor_id, frame_num)
 
 func _cleanup_old_frames(monitor_id: int, current_frame: int) -> void:
-	# Remove incomplete frames of this monitor older than 10 frames ago
+	# Remove incomplete frames of this monitor older than 30 frames ago
+	# (increased from 10 to reduce chance of dropping late-arriving chunks)
 	var keys_to_remove: Array = []
 	for key in _frame_buffer.keys():
 		if _frame_buffer[key]["monitor_id"] == monitor_id and \
-				_frame_buffer[key]["frame_num"] < current_frame - 10:
+				_frame_buffer[key]["frame_num"] < current_frame - 30:
 			keys_to_remove.append(key)
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)

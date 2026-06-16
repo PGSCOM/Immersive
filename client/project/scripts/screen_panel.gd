@@ -135,6 +135,9 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		if material_override is ShaderMaterial:
 			(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
 	else:
+		# Log decode errors to help diagnose black-screen issues
+		if looks_jpeg:
+			print("[ScreenPanel] JPEG decode error (", err, ") for ", frame_data.size(), " bytes")
 		# Fallback: treat as raw RGBA or YUV NV12 bytes
 		if frame_data.size() == int(width * height * 1.5):
 			# YUV NV12 (from MediaCodec) -> shader handles YUV decode
