@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure CMake
         run: |
@@ -25,7 +25,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: immersive2_host_windows
           path: host/build/Release/*
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure CMake
         run: |
@@ -47,7 +47,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact (Linux)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: immersive2_host_linux
           path: |
@@ -60,7 +60,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure CMake
         run: |
@@ -71,7 +71,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact (macOS)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: immersive2_host_macos
           path: |
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -209,14 +209,14 @@ jobs:
           test -f "${CLIENT_DIR}/export/android/Immersive2.apk"
 
       - name: Upload Client Windows Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: immersive2_client_windows
           path: client/export/windows/*
           if-no-files-found: warn
 
       - name: Upload Client Android Artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: immersive2_client_android
           path: client/export/android/*
