@@ -81,7 +81,7 @@ var _fps_value             : int             = 0
 # ---------------------------------------------------------------------------
 
 var _viewport              : SubViewport
-var _reticle               : Control          ## Pointer reticle drawn on top
+var _reticle               : Node2D           ## Pointer reticle drawn on top (non-interactive)
 var _panel_mesh            : MeshInstance3D
 var _canvas                : CanvasLayer
 var _lbl_status            : Label
@@ -402,11 +402,10 @@ func _build_ui() -> void:
 	_apply_theme(root)
 	_canvas.add_child(root)
 
-	# Pointer reticle — drawn last so it sits on top of every control.
-	_reticle = Control.new()
-	_reticle.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_reticle.visible      = false
+	# Pointer reticle — a Node2D (not a Control) so it draws on top of the UI
+	# but never takes part in GUI input picking: it can't ever eat clicks.
+	_reticle = Node2D.new()
+	_reticle.visible = false
 	_reticle.draw.connect(_on_reticle_draw)
 	_canvas.add_child(_reticle)
 
