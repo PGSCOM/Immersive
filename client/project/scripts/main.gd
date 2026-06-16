@@ -1001,10 +1001,10 @@ func _load_config() -> void:
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
-	stream_codec = cfg.get_value("stream", "codec", 0xFF)
-	if stream_codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(stream_codec):
-		stream_codec = 2  # este dispositivo no tiene plugin MediaCodec, usar MJPEG
-	stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
+		stream_codec = cfg.get_value("stream", "codec", 0xFF)
+		if stream_codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(stream_codec):
+			stream_codec = 2  # este dispositivo no tiene plugin MediaCodec, usar MJPEG
+		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 35)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
