@@ -48,7 +48,7 @@ var passthrough_enabled: bool = false
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 var stream_codec: int = 0xFF        ## 0xFF = host default, 0 = H.264, 2 = MJPEG
 var stream_bitrate_kbps: int = 20000
-var stream_jpeg_quality: int = 35
+var stream_jpeg_quality: int = 70
 var stream_res_percent: int = 100   ## 100/75/50, -1 = auto (ideal)
 var stream_max_width: int = 0       ## computed target width; 0 = native
 var stream_fps: int = 0             ## 0 = auto
@@ -208,9 +208,10 @@ func _create_screen_panel(slot: int) -> MeshInstance3D:
 	var panel := MeshInstance3D.new()
 	panel.script = panel_script
 
-	# Spread panels horizontally: center, left, right
-	var x_offsets := [0.0, -1.8, 1.8]
-	var position := Vector3(x_offsets[slot], 1.6, -2.0)
+	# Spread panels horizontally: center, left, right.
+	# Placed at a real-monitor-like distance (~1.1 m) and eye height (1.6 m).
+	var x_offsets := [0.0, -1.25, 1.25]
+	var position := Vector3(x_offsets[slot], 1.6, -1.1)
 	panel.transform.origin = position
 
 	var plane := PlaneMesh.new()
@@ -296,6 +297,15 @@ func send_ui_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT
 func send_ui_pointer_scroll(delta_y: float) -> void:
 	if ui_overlay and ui_overlay.has_method("inject_pointer_scroll"):
 		ui_overlay.inject_pointer_scroll(delta_y)
+
+## Grab/release the overlay so it can be repositioned with the grip.
+func start_ui_drag(controller: Node3D) -> void:
+	if ui_overlay and ui_overlay.has_method("start_drag"):
+		ui_overlay.start_drag(controller)
+
+func stop_ui_drag() -> void:
+	if ui_overlay and ui_overlay.has_method("stop_drag"):
+		ui_overlay.stop_drag()
 
 # ---------------------------------------------------------------------------
 # UI Overlay
@@ -1005,6 +1015,6 @@ func _load_config() -> void:
 		if stream_codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(stream_codec):
 			stream_codec = 2  # este dispositivo no tiene plugin MediaCodec, usar MJPEG
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
-		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 35)
+		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)

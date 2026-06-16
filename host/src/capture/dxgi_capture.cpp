@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <cstring>
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -187,6 +188,12 @@ public:
             return nullptr;
         }
 
+        // Track the hardware cursor so we can composite it onto the frame.
+        // DXGI Desktop Duplication delivers the desktop *without* the cursor;
+        // the pointer position/shape arrive separately and only when they
+        // change, so we cache them between frames.
+        update_cursor_state(frame_info);
+
         // Map the desktop texture to CPU-accessible memory
         ComPtr<ID3D11Texture2D> desktop_texture;
         desktop_resource.As(&desktop_texture);
@@ -222,6 +229,9 @@ public:
         uint32_t data_size = mapped.RowPitch * tex_desc.Height;
         frame->pixels.resize(data_size);
         std::memcpy(frame->pixels.data(), mapped.pData, data_size);
+
+        // Draw the cached cursor on top of the captured desktop.
+        composite_cursor(*frame);
 
         auto now = std::chrono::steady_clock::now();
         frame->timestamp_us = static_cast<uint64_t>(
@@ -259,6 +269,115 @@ private:
     ComPtr<ID3D11Device>          d3d_device_;
     ComPtr<ID3D11DeviceContext>   d3d_context_;
     ComPtr<IDXGIOutputDuplication> duplication_;
+
+    // Cached hardware-cursor state (Desktop Duplication reports it separately
+    // from the desktop image and only when it changes).
+    POINT                            cursor_pos_ = {0, 0};
+    bool                             cursor_visible_ = false;
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO  cursor_info_ = {};
+    std::vector<uint8_t>             cursor_shape_;
+
+    /// Refresh the cached cursor position/visibility and shape from the frame
+    /// info returned by AcquireNextFrame. Must be called while the frame is held.
+    void update_cursor_state(const DXGI_OUTDUPL_FRAME_INFO& frame_info) {
+        if (frame_info.LastMouseUpdateTime.QuadPart != 0) {
+            cursor_visible_ = frame_info.PointerPosition.Visible != FALSE;
+            cursor_pos_     = frame_info.PointerPosition.Position;
+        }
+
+        if (frame_info.PointerShapeBufferSize != 0) {
+            cursor_shape_.resize(frame_info.PointerShapeBufferSize);
+            UINT required = 0;
+            HRESULT hr = duplication_->GetFramePointerShape(
+                static_cast<UINT>(cursor_shape_.size()),
+                cursor_shape_.data(), &required, &cursor_info_);
+            if (FAILED(hr)) {
+                cursor_shape_.clear();
+            }
+        }
+    }
+
+    /// Alpha-blend / mask the cached cursor onto a captured BGRA frame.
+    void composite_cursor(CapturedFrame& frame) {
+        if (!cursor_visible_ || cursor_shape_.empty())
+            return;
+
+        const int dst_w = static_cast<int>(frame.width);
+        const int dst_h = static_cast<int>(frame.height);
+        const int cur_w = static_cast<int>(cursor_info_.Width);
+        const int cur_h = static_cast<int>(cursor_info_.Height);
+        const int ox    = cursor_pos_.x;
+        const int oy    = cursor_pos_.y;
+        uint8_t* dst    = frame.pixels.data();
+        const uint32_t pitch = frame.pitch;
+
+        if (cursor_info_.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR) {
+            for (int cy = 0; cy < cur_h; ++cy) {
+                const int sy = oy + cy;
+                if (sy < 0 || sy >= dst_h) continue;
+                const uint8_t* src_row = cursor_shape_.data() + cy * cursor_info_.Pitch;
+                for (int cx = 0; cx < cur_w; ++cx) {
+                    const int sx = ox + cx;
+                    if (sx < 0 || sx >= dst_w) continue;
+                    const uint8_t* s = src_row + cx * 4;  // BGRA
+                    const int a = s[3];
+                    if (a == 0) continue;
+                    uint8_t* d = dst + sy * pitch + sx * 4;
+                    d[0] = static_cast<uint8_t>((s[0] * a + d[0] * (255 - a)) / 255);
+                    d[1] = static_cast<uint8_t>((s[1] * a + d[1] * (255 - a)) / 255);
+                    d[2] = static_cast<uint8_t>((s[2] * a + d[2] * (255 - a)) / 255);
+                    d[3] = 255;
+                }
+            }
+        } else if (cursor_info_.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR) {
+            // 32-bit pixels; alpha byte selects copy (0x00) vs XOR with screen (0xFF).
+            for (int cy = 0; cy < cur_h; ++cy) {
+                const int sy = oy + cy;
+                if (sy < 0 || sy >= dst_h) continue;
+                const uint8_t* src_row = cursor_shape_.data() + cy * cursor_info_.Pitch;
+                for (int cx = 0; cx < cur_w; ++cx) {
+                    const int sx = ox + cx;
+                    if (sx < 0 || sx >= dst_w) continue;
+                    const uint8_t* s = src_row + cx * 4;
+                    uint8_t* d = dst + sy * pitch + sx * 4;
+                    if (s[3] == 0) {
+                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+                    } else {
+                        d[0] ^= s[0]; d[1] ^= s[1]; d[2] ^= s[2]; d[3] = 255;
+                    }
+                }
+            }
+        } else if (cursor_info_.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
+            // Two stacked 1-bpp masks: top = AND, bottom = XOR. Real height is half.
+            const int real_h = cur_h / 2;
+            const uint32_t mask_pitch = cursor_info_.Pitch;
+            const uint8_t* and_mask = cursor_shape_.data();
+            const uint8_t* xor_mask = cursor_shape_.data() + real_h * mask_pitch;
+            for (int cy = 0; cy < real_h; ++cy) {
+                const int sy = oy + cy;
+                if (sy < 0 || sy >= dst_h) continue;
+                for (int cx = 0; cx < cur_w; ++cx) {
+                    const int sx = ox + cx;
+                    if (sx < 0 || sx >= dst_w) continue;
+                    const uint8_t and_bit =
+                        (and_mask[cy * mask_pitch + (cx / 8)] >> (7 - (cx % 8))) & 1;
+                    const uint8_t xor_bit =
+                        (xor_mask[cy * mask_pitch + (cx / 8)] >> (7 - (cx % 8))) & 1;
+                    uint8_t* d = dst + sy * pitch + sx * 4;
+                    if (and_bit == 0) {
+                        const uint8_t c = xor_bit ? 255 : 0;  // white / black
+                        d[0] = c; d[1] = c; d[2] = c; d[3] = 255;
+                    } else if (xor_bit) {
+                        d[0] = static_cast<uint8_t>(~d[0]);
+                        d[1] = static_cast<uint8_t>(~d[1]);
+                        d[2] = static_cast<uint8_t>(~d[2]);
+                        d[3] = 255;
+                    }
+                    // and_bit==1 && xor_bit==0 -> transparent (leave dst)
+                }
+            }
+        }
+    }
 #endif
     uint32_t capture_width_ = 0;
     uint32_t capture_height_ = 0;

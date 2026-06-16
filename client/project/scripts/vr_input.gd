@@ -26,6 +26,7 @@ var _scale_mode: bool = false
 var _tracking_state_known: bool = false
 var _last_tracking_active: bool = false
 var _ui_hovered: bool = false
+var _ui_dragging: bool = false
 
 func _is_trigger_action(name: String) -> bool:
 	return name == "trigger_click" or name == "trigger_value" or name == "trigger" or name == "select" or name == "select_click" or name == "select_value"
@@ -167,11 +168,18 @@ func _set_grip_state(pressed: bool) -> void:
 	_grip_pressed = pressed
 	print("[VRInput] Grip %s" % ["DOWN" if pressed else "UP"])
 	if pressed:
-		if _active_panel and _active_panel.has_method("start_drag"):
+		if _ui_hovered and main_scene and main_scene.has_method("start_ui_drag"):
+			# Grab the overlay (it is otherwise static) instead of right-clicking.
+			_ui_dragging = true
+			main_scene.start_ui_drag(controller)
+		elif _active_panel and _active_panel.has_method("start_drag"):
 			_active_panel.start_drag(controller)
 		elif not _scale_mode:
 			_send_click(0x02)
 	else:
+		if _ui_dragging and main_scene and main_scene.has_method("stop_ui_drag"):
+			main_scene.stop_ui_drag()
+			_ui_dragging = false
 		if _active_panel and _active_panel.has_method("stop_drag"):
 			_active_panel.stop_drag()
 		_scale_mode = false

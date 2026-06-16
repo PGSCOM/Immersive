@@ -36,8 +36,6 @@ signal auto_quality_requested
 # ---------------------------------------------------------------------------
 
 const CONFIG_PATH  := "user://immersive2_config.cfg"
-## Smooth-follow speed: higher = snappier, lower = more floaty
-const FOLLOW_SPEED := 2.5
 
 # ---------------------------------------------------------------------------
 # State
@@ -61,11 +59,20 @@ var _passthrough_supported : bool            = true
 var _last_pointer_uv       : Vector2         = Vector2(0.5, 0.5)
 var _kbd_visible           : bool            = false
 
+# Grab-to-move state (the overlay stays static until grabbed with the grip).
+var _is_dragging           : bool            = false
+var _drag_controller       : Node3D          = null
+var _drag_offset           : Transform3D
+
+# Pointer reticle state (shown only while pointing at the overlay).
+var _pointer_px            : Vector2         = Vector2(450, 440)
+var _reticle_idle_frames   : int             = 999
+
 # Stream quality state (mirrors main.gd; applied via the Apply button)
 var _active_monitor_ids    : Array           = []
 var _stream_codec          : int             = 0xFF
 var _bitrate_kbps          : int             = 20000
-var _jpeg_quality          : int             = 35
+var _jpeg_quality          : int             = 70
 var _res_percent           : int             = 100
 var _fps_value             : int             = 0
 
@@ -74,6 +81,7 @@ var _fps_value             : int             = 0
 # ---------------------------------------------------------------------------
 
 var _viewport              : SubViewport
+var _reticle               : Control          ## Pointer reticle drawn on top
 var _panel_mesh            : MeshInstance3D
 var _canvas                : CanvasLayer
 var _lbl_status            : Label
@@ -113,10 +121,12 @@ func _ready() -> void:
 	set_process(true)
 	hide()
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	_update_labels()
-	if _visible_overlay:
-		_smooth_follow_camera(delta)
+	# The overlay stays where it was opened; it only moves while being grabbed.
+	if _is_dragging and is_instance_valid(_drag_controller):
+		_follow_controller()
+	_update_reticle()
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -206,6 +216,9 @@ func inject_pointer_move(uv: Vector2) -> void:
 		return
 	_last_pointer_uv = uv
 	var px := Vector2(uv.x * _viewport.size.x, uv.y * _viewport.size.y)
+	# Track the reticle so the user can clearly see where the controller points.
+	_pointer_px          = px
+	_reticle_idle_frames = 0
 	var ev := InputEventMouseMotion.new()
 	ev.position        = px
 	ev.global_position = px
@@ -238,29 +251,53 @@ func inject_pointer_scroll(delta_y: float) -> void:
 	_viewport.push_input(ev)
 
 # ---------------------------------------------------------------------------
-# Camera follow  (Issue #1 fix)
+# Grab-to-move  (overlay is static; grip drags it like a screen panel)
 # ---------------------------------------------------------------------------
 
-## Each frame while visible: smoothly interpolate the panel transform
-## towards the target position in front of the camera.
-## Using Transform3D.interpolate_with() is the standard pattern in
-## godot-xr-tools and the Godot VR editor PR #67736.
-func _smooth_follow_camera(delta: float) -> void:
-	var camera := get_viewport().get_camera_3d()
-	if not camera:
+## Begin dragging the overlay with the given controller (called from main.gd
+## when the grip is pressed while the pointer hovers the overlay).
+func start_drag(controller: Node3D) -> void:
+	if not controller:
 		return
-	var fwd := -camera.global_transform.basis.z
-	fwd.y = 0.0
-	if fwd.length_squared() < 0.0001:
-		fwd = Vector3(0.0, 0.0, -1.0)
-	else:
-		fwd = fwd.normalized()
-	var right         := fwd.cross(Vector3.UP).normalized()
-	var target_origin := camera.global_transform.origin \
-		+ fwd * panel_distance + Vector3(0.0, -0.08, 0.0)
-	var target_t      := Transform3D(Basis(right, Vector3.UP, -fwd), target_origin)
-	global_transform  = global_transform.interpolate_with(
-		target_t, minf(delta * FOLLOW_SPEED, 1.0))
+	_is_dragging     = true
+	_drag_controller = controller
+	# Record the overlay pose relative to the controller at grab time.
+	_drag_offset = controller.global_transform.affine_inverse() * global_transform
+
+func stop_drag() -> void:
+	_is_dragging     = false
+	_drag_controller = null
+
+func _follow_controller() -> void:
+	global_transform = _drag_controller.global_transform * _drag_offset
+
+# ---------------------------------------------------------------------------
+# Pointer reticle  (clear cursor over the overlay only)
+# ---------------------------------------------------------------------------
+
+## Show the reticle only while the pointer is actively hovering the overlay
+## (a few frames of grace so it doesn't flicker between input events).
+func _update_reticle() -> void:
+	if not _reticle:
+		return
+	_reticle_idle_frames += 1
+	var should_show := _visible_overlay and _reticle_idle_frames < 6
+	if _reticle.visible != should_show:
+		_reticle.visible = should_show
+	if should_show:
+		_reticle.queue_redraw()
+
+func _on_reticle_draw() -> void:
+	var c := _pointer_px
+	var accent := Color(0.45, 0.85, 1.0, 0.95)
+	# Dark halo first for contrast against light/dark UI alike.
+	_reticle.draw_arc(c, 15.0, 0.0, TAU, 48, Color(0.0, 0.0, 0.0, 0.6), 5.0, true)
+	_reticle.draw_arc(c, 15.0, 0.0, TAU, 48, accent, 2.5, true)
+	_reticle.draw_circle(c, 3.0, accent)
+
+# ---------------------------------------------------------------------------
+# Camera placement
+# ---------------------------------------------------------------------------
 
 ## Instant snap used on first show.
 func _reposition_in_front_of_camera() -> void:
@@ -364,6 +401,14 @@ func _build_ui() -> void:
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_apply_theme(root)
 	_canvas.add_child(root)
+
+	# Pointer reticle — drawn last so it sits on top of every control.
+	_reticle = Control.new()
+	_reticle.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_reticle.visible      = false
+	_reticle.draw.connect(_on_reticle_draw)
+	_canvas.add_child(_reticle)
 
 	var vbox := VBoxContainer.new()
 	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)

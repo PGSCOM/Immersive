@@ -21,6 +21,9 @@ const DEFAULT_FOVEATION_STRENGTH := 0.55
 var screen_texture: ImageTexture
 ## Current screen image.
 var screen_image: Image
+## Whether the active texture was created with mipmaps (used to decide between
+## an in-place update() and a full recreate).
+var _texture_has_mipmaps: bool = false
 
 ## Screen dimensions.
 var screen_width: int  = 1920
@@ -131,6 +134,8 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		# load_jpg returns RGB8; convert so the texture format stays stable
 		if img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGBA8)
+		# Mipmaps let the anisotropic sampler resolve fine text without shimmer.
+		img.generate_mipmaps()
 		screen_image = img
 		if material_override is ShaderMaterial:
 			(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
@@ -148,6 +153,7 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		elif frame_data.size() >= width * height * 4:
 			# RAW RGBA
 			screen_image = Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, frame_data)
+			screen_image.generate_mipmaps()
 			if material_override is ShaderMaterial:
 				(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
 		else:
@@ -158,10 +164,12 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	if screen_texture \
 			and screen_texture.get_width() == screen_image.get_width() \
 			and screen_texture.get_height() == screen_image.get_height() \
-			and screen_texture.get_format() == screen_image.get_format():
+			and screen_texture.get_format() == screen_image.get_format() \
+			and _texture_has_mipmaps == screen_image.has_mipmaps():
 		screen_texture.update(screen_image)
 	else:
 		screen_texture = ImageTexture.create_from_image(screen_image)
+		_texture_has_mipmaps = screen_image.has_mipmaps()
 		_apply_texture()
 
 	if _placeholder_label and _placeholder_label.visible:

@@ -5,7 +5,9 @@ shader_type spatial;
 render_mode unshaded, cull_disabled;
 
 // The streamed screen content texture.
-uniform sampler2D screen_texture : source_color, filter_linear;
+// Mipmaps + anisotropic filtering greatly reduce the shimmering/aliasing of
+// fine desktop text when the panel is minified or viewed at an angle.
+uniform sampler2D screen_texture : source_color, filter_linear_mipmap_anisotropic;
 
 // Screen border color.
 uniform vec4 border_color : source_color = vec4(0.2, 0.2, 0.3, 1.0);
