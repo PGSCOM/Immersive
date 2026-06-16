@@ -36,6 +36,11 @@ var panel_height: float = 0.9
 ## Whether the screen is currently receiving frames.
 var is_active: bool = false
 
+# DEBUG: instrumentación temporal para diagnosticar pantalla negra
+var _dbg_last_ms: int = 0
+var _dbg_recv: int = 0
+var _dbg_ok: int = 0
+
 ## Current latency (ms) displayed in corner.
 var _latency_ms: float = 0.0
 
@@ -125,12 +130,23 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	if not is_active:
 		return
 
+	# DEBUG: confirmar que los frames llegan al panel (una vez por segundo)
+	var _dbg_now: int = Time.get_ticks_msec()
+	if _dbg_now - _dbg_last_ms >= 1000:
+		_dbg_last_ms = _dbg_now
+		print("[DBG-PANEL] update_texture: %d bytes, %dx%d, frames_recibidos=%d, decodes_ok=%d" %
+			[frame_data.size(), width, height, _dbg_recv, _dbg_ok])
+		_dbg_recv = 0
+		_dbg_ok = 0
+	_dbg_recv += 1
+
 	# JPEG (MJPEG path) — detected by magic bytes FF D8 FF
 	var looks_jpeg: bool = frame_data.size() >= 3 \
 		and frame_data[0] == 0xFF and frame_data[1] == 0xD8 and frame_data[2] == 0xFF
 	var img := Image.new()
 	var err: int = img.load_jpg_from_buffer(frame_data) if looks_jpeg else ERR_INVALID_DATA
 	if err == OK:
+		_dbg_ok += 1
 		# load_jpg returns RGB8; convert so the texture format stays stable
 		if img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGBA8)
