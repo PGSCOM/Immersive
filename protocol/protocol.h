@@ -52,6 +52,7 @@ enum class MessageType : uint8_t {
     MULTI_MONITOR_SELECT = 0x20, ///< Select multiple monitors simultaneously
     STREAM_CONFIG        = 0x21, ///< Client requests stream quality settings
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
+    REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
     LATENCY_RESPONSE     = 0x41, ///< Server echoes LATENCY_PROBE back
     PING                 = 0xFF,
@@ -144,6 +145,13 @@ struct InputKeyboard {
 struct FrameAck {
     uint8_t  monitor_id;
     uint32_t frame_number;
+};
+
+/// Ask the host to encode a keyframe (IDR) for a monitor's stream. Used by the
+/// client to recover an inter-frame codec (H.264/HEVC/AV1) after packet loss
+/// instead of waiting for the next periodic keyframe (GOP boundary).
+struct RequestKeyframe {
+    uint8_t monitor_id;
 };
 
 /// Latency probe — sent by client with a timestamp.

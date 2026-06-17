@@ -35,6 +35,9 @@ using StreamConfigCallback =
 using InputMouseCallback = std::function<void(uint32_t client_id, const protocol::InputMouse& input)>;
 using InputKeyboardCallback = std::function<void(uint32_t client_id, const protocol::InputKeyboard& input)>;
 
+/// Callback for when a client requests a keyframe (loss recovery)
+using RequestKeyframeCallback = std::function<void(uint32_t client_id, uint8_t monitor_id)>;
+
 /// Network server configuration
 struct ServerConfig {
     uint16_t tcp_port = protocol::DEFAULT_TCP_PORT;
@@ -87,6 +90,7 @@ public:
     virtual void set_on_stream_config(StreamConfigCallback cb) = 0;
     virtual void set_on_input_mouse(InputMouseCallback cb) = 0;
     virtual void set_on_input_keyboard(InputKeyboardCallback cb) = 0;
+    virtual void set_on_request_keyframe(RequestKeyframeCallback cb) = 0;
 
     /// Check if server is running
     virtual bool is_running() const = 0;

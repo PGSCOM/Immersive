@@ -75,6 +75,9 @@ var audio_receiver: Node = null
 ## Hardware video decoders per monitor (H.264/HEVC/AV1 via MediaCodec).
 var _decoders: Dictionary = {}
 
+## Last keyframe-request time per monitor (ms), to throttle loss recovery.
+var _last_keyframe_req_ms: Dictionary = {}
+
 ## Whether we already auto-fell back to MJPEG this session (avoids loops).
 var _codec_fallback_sent: bool = false
 
@@ -151,6 +154,7 @@ func _init_network() -> void:
 	network_client.latency_response_received.connect(_on_latency_response)
 	network_client.audio_stream_started.connect(_on_audio_stream_started)
 	network_client.audio_stream_stopped.connect(_on_audio_stream_stopped)
+	network_client.frame_gap_detected.connect(_on_frame_gap)
 
 func connect_to_host() -> void:
 	if current_state != State.DISCONNECTED:
@@ -439,7 +443,7 @@ func compute_ideal_stream_settings() -> Dictionary:
 		if r > 0.0:
 			hmd_hz = r
 	var ideal_fps: int = int(min(float(native_hz), hmd_hz))
-	if stream_codec == 2 or stream_codec == 0xFF:  # MJPEG (explicit or host default)
+	if stream_codec == 2:  # only software MJPEG needs the WiFi-friendly FPS cap
 		ideal_fps = min(ideal_fps, 30)
 
 	return {
@@ -453,7 +457,7 @@ func compute_ideal_stream_settings() -> Dictionary:
 
 func _on_overlay_stream_settings_changed(codec: int, bitrate_kbps: int,
 		jpeg_quality: int, res_percent: int, fps: int) -> void:
-	stream_codec = codec
+	stream_codec = _resolve_codec(codec)
 	stream_bitrate_kbps = clamp(bitrate_kbps, 1000, 100000)
 	stream_jpeg_quality = clamp(jpeg_quality, 10, 95)
 	stream_res_percent = res_percent
@@ -461,6 +465,11 @@ func _on_overlay_stream_settings_changed(codec: int, bitrate_kbps: int,
 	_recompute_stream_max_width()
 	_save_config()
 	_send_stream_config()
+	# Reflect the resolved codec back to the UI (e.g. "Auto" → "H.264") so the
+	# highlighted button matches what is actually being streamed.
+	if stream_codec != codec and ui_overlay and ui_overlay.has_method("set_stream_settings"):
+		ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_res_percent, stream_fps)
 
 func _on_overlay_auto_quality_requested() -> void:
 	var ideal := compute_ideal_stream_settings()
@@ -664,6 +673,21 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 			fallback = panel
 	if fallback:
 		fallback.update_texture(frame_data, width, height)
+
+## A frame was lost or dropped. For hardware (inter-frame) codecs, ask the host
+## for a fresh keyframe so the decoder recovers immediately instead of showing
+## artifacts until the next periodic keyframe. Throttled per monitor. MJPEG
+## needs nothing — every frame is independently decodable.
+func _on_frame_gap(monitor_id: int) -> void:
+	if not _decoders.has(monitor_id):
+		return
+	var now := Time.get_ticks_msec()
+	var last: int = _last_keyframe_req_ms.get(monitor_id, -10000)
+	if now - last < 250:
+		return  # at most one keyframe request every 250 ms per monitor
+	_last_keyframe_req_ms[monitor_id] = now
+	if network_client and network_client.has_method("send_request_keyframe"):
+		network_client.send_request_keyframe(monitor_id)
 
 func _close_decoder(monitor_id: int) -> void:
 	if _decoders.has(monitor_id):
@@ -1015,6 +1039,17 @@ func _default_codec_for_device() -> int:
 		return 0
 	return 2  # MJPEG software fallback (no MediaCodec plugin)
 
+## Resolve a requested codec to one this device can actually use: 0xFF ("auto")
+## becomes the device's best codec (never "let the host decide", which falls
+## back to slow software MJPEG), and a hardware codec without a decoder here
+## degrades to software MJPEG.
+func _resolve_codec(codec: int) -> int:
+	if codec == 0xFF:
+		return _default_codec_for_device()
+	if codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(codec):
+		return 2
+	return codec
+
 func _load_config() -> void:
 	# Capability-based default first; a saved config value overrides it below.
 	stream_codec = _default_codec_for_device()
@@ -1029,15 +1064,7 @@ func _load_config() -> void:
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
-		stream_codec = cfg.get_value("stream", "codec", stream_codec)
-		# 0xFF ("let the host decide") makes the host fall back to software MJPEG
-		# even on a headset that can hardware-decode — resolve it to the device's
-		# best codec instead.
-		if stream_codec == 0xFF:
-			stream_codec = _default_codec_for_device()
-		# A hardware codec this device can't decode → software MJPEG.
-		if stream_codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(stream_codec):
-			stream_codec = 2
+		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)

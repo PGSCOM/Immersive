@@ -237,6 +237,7 @@ int main(int argc, char* argv[]) {
     // is held while starting/stopping workers (network-thread callbacks).
     struct ActiveStream {
         std::atomic<bool> stop{false};
+        std::atomic<bool> force_keyframe{false};  // set by REQUEST_KEYFRAME (loss recovery)
         std::thread       worker;
     };
 
@@ -402,6 +403,12 @@ int main(int argc, char* argv[]) {
                                     scaled.data(), out_w, out_h);
                 pixels = scaled.data();
                 w = out_w; h = out_h; pitch = out_w * 4;
+            }
+
+            // Honour a client keyframe request (recovery after packet loss).
+            // No-op for MJPEG (every frame is already independent).
+            if (ctx->force_keyframe.exchange(false)) {
+                stream_encoder->request_keyframe();
             }
 
             auto packets = stream_encoder->encode(
@@ -598,6 +605,17 @@ int main(int argc, char* argv[]) {
     server->set_on_input_keyboard([&](uint32_t /*client_id*/,
                                       const immersive::protocol::InputKeyboard& input) {
         input_injector->inject_keyboard(input);
+    });
+
+    // Client lost a frame and asks for an IDR so its inter-frame decoder can
+    // recover immediately (instead of waiting for the next periodic keyframe).
+    server->set_on_request_keyframe([&](uint32_t client_id, uint8_t monitor_id) {
+        std::lock_guard<std::mutex> lock(streams_mutex);
+        if (client_id != streams_client_id) return;
+        auto it = active_streams.find(monitor_id);
+        if (it != active_streams.end()) {
+            it->second->force_keyframe = true;
+        }
     });
 
     // Start the network server with configured options

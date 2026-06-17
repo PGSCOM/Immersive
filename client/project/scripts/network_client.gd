@@ -23,6 +23,9 @@ signal latency_response_received(probe_id: int, client_timestamp: int)
 signal audio_stream_started(sample_rate: int, channels: int, audio_port: int)
 ## Emitted when the host stops its audio stream.
 signal audio_stream_stopped
+## Emitted when a gap in completed frame numbers is detected (frame lost or
+## dropped). For inter-frame codecs this breaks the decode chain.
+signal frame_gap_detected(monitor_id: int)
 
 # --- Constants (matching protocol.h) ---
 
@@ -40,6 +43,7 @@ const MSG_INPUT_POINTER: int         = 0x12
 const MSG_MULTI_MONITOR_SELECT: int  = 0x20
 const MSG_STREAM_CONFIG: int         = 0x21
 const MSG_FRAME_ACK: int             = 0x30
+const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
 const MSG_LATENCY_RESPONSE: int      = 0x41
 const MSG_PING: int                  = 0xFF
@@ -63,6 +67,9 @@ var _frame_buffer: Dictionary = {}
 var _stream_width: int = 0
 var _stream_height: int = 0
 
+## Highest completed frame number per monitor, for loss/gap detection.
+var _last_completed_frame: Dictionary = {}
+
 var _tcp_buffer := PackedByteArray()
 
 func _ready() -> void:
@@ -76,6 +83,7 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
 	_tcp_buffer.clear()
 	_connected = false
 	_frame_buffer.clear()
+	_last_completed_frame.clear()
 
 	_host_ip = ip
 	_tcp_port = tcp_port
@@ -244,6 +252,9 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var codec: int = payload[5]
 				print("[Network] STREAM_START: monitor=%d %dx%d codec=%d" %
 					[monitor_id, _stream_width, _stream_height, codec])
+				# Fresh stream: frame numbers restart at 0, so forget the old
+				# high-water mark to avoid a false gap on the first frame.
+				_last_completed_frame.erase(monitor_id)
 				stream_started.emit(monitor_id, _stream_width, _stream_height, codec)
 
 		MSG_STREAM_STOP:
@@ -253,6 +264,10 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 			for key in _frame_buffer.keys():
 				if stopped_monitor < 0 or _frame_buffer[key]["monitor_id"] == stopped_monitor:
 					_frame_buffer.erase(key)
+			if stopped_monitor < 0:
+				_last_completed_frame.clear()
+			else:
+				_last_completed_frame.erase(stopped_monitor)
 			stream_stopped.emit(stopped_monitor)
 
 		MSG_AUDIO_START:
@@ -325,6 +340,18 @@ func _assemble_frame(frame_key: int) -> void:
 	var monitor_id: int = frame_info["monitor_id"]
 	var frame_num: int = frame_info["frame_num"]
 
+	# Detect a gap in completed frame numbers (a frame was lost or the host
+	# dropped it). For inter-frame codecs this breaks the decode chain, so we
+	# signal it; main.gd asks for a keyframe when a hardware decoder is active.
+	if _last_completed_frame.has(monitor_id):
+		var prev: int = _last_completed_frame[monitor_id]
+		if frame_num > prev + 1:
+			frame_gap_detected.emit(monitor_id)
+		if frame_num > prev:
+			_last_completed_frame[monitor_id] = frame_num
+	else:
+		_last_completed_frame[monitor_id] = frame_num
+
 	# Concatenate chunks in order
 	var frame_data := PackedByteArray()
 	for i in range(total):
@@ -384,6 +411,13 @@ func send_frame_ack(monitor_id: int, frame_number: int) -> void:
 	payload.encode_u32(1, frame_number)
 	_send_control_message(MSG_FRAME_ACK, payload)
 
+## Ask the host to emit a keyframe (IDR) for a monitor — recovery after loss.
+func send_request_keyframe(monitor_id: int) -> void:
+	var payload := PackedByteArray()
+	payload.resize(1)
+	payload[0] = monitor_id
+	_send_control_message(MSG_REQUEST_KEYFRAME, payload)
+
 ## Send a latency probe (probe_id + client_timestamp, each 8 bytes LE).
 func send_latency_probe(probe_id: int, client_timestamp_us: int) -> void:
 	var payload := PackedByteArray()
@@ -396,6 +430,7 @@ func disconnect_from_server() -> void:
 	_connected = false
 	_tcp_buffer.clear()
 	_frame_buffer.clear()
+	_last_completed_frame.clear()
 	tcp_client.disconnect_from_host()
 	udp_client.close()
 	set_process(false)

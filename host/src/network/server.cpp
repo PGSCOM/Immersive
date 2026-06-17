@@ -350,6 +350,10 @@ public:
         on_input_keyboard_ = std::move(cb);
     }
 
+    void set_on_request_keyframe(RequestKeyframeCallback cb) override {
+        on_request_keyframe_ = std::move(cb);
+    }
+
     bool is_running() const override { return running_; }
 
     uint32_t client_count() const override {
@@ -524,6 +528,16 @@ private:
                 }
                 break;
             }
+            case protocol::MessageType::REQUEST_KEYFRAME: {
+                if (payload.size() >= sizeof(protocol::RequestKeyframe)) {
+                    protocol::RequestKeyframe req;
+                    std::memcpy(&req, payload.data(), sizeof(req));
+                    if (on_request_keyframe_) {
+                        on_request_keyframe_(client_id, req.monitor_id);
+                    }
+                }
+                break;
+            }
             case protocol::MessageType::LATENCY_PROBE: {
                 if (payload.size() >= sizeof(protocol::LatencyProbe)) {
                     protocol::LatencyProbe probe;
@@ -617,6 +631,7 @@ private:
     StreamConfigCallback         on_stream_config_;
     InputMouseCallback           on_input_mouse_;
     InputKeyboardCallback        on_input_keyboard_;
+    RequestKeyframeCallback      on_request_keyframe_;
 };
 
 std::unique_ptr<INetworkServer> create_network_server() {
