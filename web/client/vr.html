@@ -6,23 +6,261 @@
   <title>Immersive-2 WebXR View</title>
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
   <script>
-    // An <img> fed by an MJPEG (multipart/x-mixed-replace) stream keeps
-    // refreshing in the DOM, but the WebGL texture built from it is only
-    // uploaded to the GPU once. Without flagging needsUpdate every frame the
-    // VR panel would freeze on the first frame. This component re-uploads the
-    // texture each tick so the stream stays live in the headset.
-    AFRAME.registerComponent('live-texture', {
-      tick: function () {
-        var mesh = this.el.getObject3D('mesh');
-        if (!mesh || !mesh.material || !mesh.material.map) {
-          return;
-        }
-        var image = mesh.material.map.image;
-        // Only refresh once the image actually has decoded pixels.
-        if (image && (image.naturalWidth || image.width)) {
-          mesh.material.map.needsUpdate = true;
+    'use strict';
+
+    // -------------------------------------------------------------------------
+    // Desktop video panel.
+    //
+    // The standalone VR browsers (Quest / Pico) are Chromium-based. Feeding a
+    // panel from an MJPEG <img> (multipart/x-mixed-replace) means decoding a
+    // full JPEG on the main thread and re-uploading the texture every frame,
+    // which collapses to ~1 fps on the headset SoC. Instead we pull the host's
+    // H.264 Annex-B stream over a binary HTTP body and decode it with WebCodecs
+    // (hardware VideoDecoder), drawing each VideoFrame to a canvas that backs
+    // the panel texture. The texture is only re-uploaded when a frame actually
+    // decodes — no per-tick work. If WebCodecs is unavailable we fall back to
+    // the old MJPEG path so the panel still shows something.
+    // -------------------------------------------------------------------------
+
+    // Build an "avc1.PPCCLL" codec string from the SPS (profile_idc,
+    // constraint flags, level_idc) so VideoDecoder.configure() matches the
+    // exact stream the host produced.
+    function avcCodecFromAnnexB(data) {
+      for (let i = 0; i + 6 < data.length; i += 1) {
+        if (data[i] === 0x00 && data[i + 1] === 0x00 && data[i + 2] === 0x01) {
+          const nalType = data[i + 3] & 0x1f;
+          if (nalType === 7) {
+            const hex = (b) => b.toString(16).padStart(2, '0');
+            return 'avc1.' + hex(data[i + 4]) + hex(data[i + 5]) + hex(data[i + 6]);
+          }
         }
       }
+      return null;
+    }
+
+    AFRAME.registerComponent('desktop-stream', {
+      schema: {
+        h264: { default: '/stream.h264' },
+        mjpeg: { default: '/stream.mjpg' },
+        // Seconds to wait for the first decoded frame before falling back.
+        fallbackTimeout: { default: 5 },
+      },
+
+      init: function () {
+        const THREE = AFRAME.THREE;
+        this.THREE = THREE;
+        this.baseWidth = this.el.getAttribute('width') || 2.4;
+
+        this.canvas = document.createElement('canvas');
+        this.canvas.width = 16;
+        this.canvas.height = 9;
+        this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
+        this.ctx.fillStyle = '#0a141f';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        this.texture = new THREE.CanvasTexture(this.canvas);
+        this.texture.colorSpace = THREE.SRGBColorSpace;
+        this.texture.minFilter = THREE.LinearFilter;
+        this.texture.magFilter = THREE.LinearFilter;
+        this.texture.generateMipmaps = false;
+        this._applyTexture();
+
+        this.lastFrameAt = 0;
+        this.configured = false;
+        this.tsCounter = 0;
+        this.decoder = null;
+        this.reader = null;
+        this.usingMjpeg = false;
+
+        if (window.VideoDecoder && window.EncodedVideoChunk) {
+          this._startH264();
+          // Watchdog: if H.264 never produces a frame (host can't encode it,
+          // decode error, etc.), drop back to MJPEG.
+          this.fallbackTimer = setTimeout(() => {
+            if (!this.lastFrameAt && !this.usingMjpeg) {
+              console.warn('[desktop-stream] No H.264 frames decoded; falling back to MJPEG');
+              this._stopH264();
+              this._startMjpeg();
+            }
+          }, this.data.fallbackTimeout * 1000);
+        } else {
+          console.warn('[desktop-stream] WebCodecs unavailable; using MJPEG fallback');
+          this._startMjpeg();
+        }
+      },
+
+      _applyTexture: function () {
+        const mesh = this.el.getObject3D('mesh');
+        if (mesh && mesh.material) {
+          if (mesh.material.color) mesh.material.color.set('#ffffff');
+          mesh.material.map = this.texture;
+          mesh.material.needsUpdate = true;
+        } else {
+          this.el.addEventListener('object3dset', () => this._applyTexture(), { once: true });
+        }
+      },
+
+      _resizePanel: function (w, h) {
+        if (!w || !h) return;
+        const height = (this.baseWidth * h / w);
+        this.el.setAttribute('height', height.toFixed(3));
+      },
+
+      _drawSource: function (source, w, h) {
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+          this.canvas.width = w;
+          this.canvas.height = h;
+          this._resizePanel(w, h);
+        }
+        this.ctx.drawImage(source, 0, 0, w, h);
+        this.texture.needsUpdate = true;
+        this.lastFrameAt = performance.now();
+      },
+
+      // --- H.264 / WebCodecs path -------------------------------------------
+
+      _startH264: function () {
+        const self = this;
+        this.decoder = new VideoDecoder({
+          output: function (frame) {
+            try {
+              self._drawSource(
+                frame,
+                frame.displayWidth || frame.codedWidth,
+                frame.displayHeight || frame.codedHeight
+              );
+            } finally {
+              frame.close();
+            }
+          },
+          error: function (e) {
+            console.error('[desktop-stream] VideoDecoder error', e);
+          },
+        });
+        this._readH264Stream();
+      },
+
+      _stopH264: function () {
+        try { if (this.reader) this.reader.cancel(); } catch (_) { /* ignore */ }
+        try {
+          if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
+        } catch (_) { /* ignore */ }
+        this.reader = null;
+        this.decoder = null;
+      },
+
+      _readH264Stream: async function () {
+        let res;
+        try {
+          res = await fetch(this.data.h264, { cache: 'no-store' });
+        } catch (e) {
+          console.error('[desktop-stream] /stream.h264 fetch failed', e);
+          return;
+        }
+        if (!res.ok || !res.body) {
+          console.error('[desktop-stream] /stream.h264 unavailable', res.status);
+          return;
+        }
+
+        this.reader = res.body.getReader();
+        let buf = new Uint8Array(0);
+
+        while (true) {
+          let chunk;
+          try {
+            chunk = await this.reader.read();
+          } catch (_) {
+            break;
+          }
+          if (chunk.done) break;
+
+          const merged = new Uint8Array(buf.length + chunk.value.length);
+          merged.set(buf, 0);
+          merged.set(chunk.value, buf.length);
+          buf = merged;
+
+          // Parse [uint32 LE length][uint8 flags][payload] records.
+          let off = 0;
+          while (buf.length - off >= 5) {
+            const len = (buf[off] | (buf[off + 1] << 8) |
+                         (buf[off + 2] << 16) | (buf[off + 3] << 24)) >>> 0;
+            const flags = buf[off + 4];
+            if (buf.length - off - 5 < len) break;
+            const payload = buf.subarray(off + 5, off + 5 + len);
+            off += 5 + len;
+            this._feedDecoder(payload, (flags & 1) === 1);
+          }
+          buf = buf.slice(off);
+        }
+      },
+
+      _feedDecoder: function (data, isKey) {
+        const decoder = this.decoder;
+        if (!decoder) return;
+
+        if (!this.configured) {
+          // Can only start at a keyframe (the SPS/PPS + IDR access unit).
+          if (!isKey) return;
+          const codec = avcCodecFromAnnexB(data) || 'avc1.4d0028';
+          try {
+            decoder.configure({
+              codec: codec,
+              optimizedForLatency: true,
+              hardwareAcceleration: 'prefer-hardware',
+            });
+          } catch (e) {
+            console.error('[desktop-stream] configure failed for', codec, e);
+            return;
+          }
+          this.configured = true;
+        }
+
+        if (decoder.state !== 'configured') return;
+
+        // Don't let the queue build up latency: under backpressure, skip delta
+        // frames and wait for the next keyframe to resync.
+        if (decoder.decodeQueueSize > 4 && !isKey) return;
+
+        try {
+          decoder.decode(new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: (this.tsCounter += 1000),
+            data: data,
+          }));
+        } catch (e) {
+          console.error('[desktop-stream] decode failed', e);
+        }
+      },
+
+      // --- MJPEG fallback ----------------------------------------------------
+
+      _startMjpeg: function () {
+        this.usingMjpeg = true;
+        const img = document.createElement('img');
+        img.crossOrigin = 'anonymous';
+        img.src = this.data.mjpeg + '?ts=' + Date.now();
+        this.mjpegImg = img;
+
+        const self = this;
+        const draw = function () {
+          if (!self.mjpegImg) return;
+          if (img.naturalWidth) {
+            self._drawSource(img, img.naturalWidth, img.naturalHeight);
+          }
+          // ~20 fps is plenty for the fallback and avoids hammering the CPU.
+          self.mjpegTimer = setTimeout(function () {
+            requestAnimationFrame(draw);
+          }, 50);
+        };
+        draw();
+      },
+
+      remove: function () {
+        if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+        if (this.mjpegTimer) clearTimeout(this.mjpegTimer);
+        this.mjpegImg = null;
+        this._stopH264();
+      },
     });
   </script>
   <style>
@@ -56,7 +294,7 @@
 <body>
   <div class="hud">
     <strong>Immersive-2 WebXR</strong> - Use the browser Enter VR button.
-    Stream source: /stream.mjpg (bridge must be connected).
+    Stream: H.264 via WebCodecs (/stream.h264), MJPEG fallback. Bridge must be connected.
   </div>
 
   <a-scene
@@ -65,10 +303,6 @@
     vr-mode-ui="enabled: true"
     webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor,hand-tracking"
   >
-    <a-assets>
-      <img id="desktopStream" src="/stream.mjpg" crossorigin="anonymous" />
-    </a-assets>
-
     <a-entity position="0 1.6 0">
       <a-camera wasd-controls-enabled="true"></a-camera>
     </a-entity>
@@ -77,12 +311,11 @@
     <a-entity light="type: directional; color: #ffffff; intensity: 0.45" position="-1 2 1"></a-entity>
 
     <a-plane
-      live-texture
-      src="#desktopStream"
+      desktop-stream
       width="2.4"
       height="1.35"
       position="0 1.6 -2.4"
-      material="shader: flat"
+      material="shader: flat; side: double"
     ></a-plane>
 
     <a-sky color="#050e18"></a-sky>

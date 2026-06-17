@@ -13,8 +13,14 @@ const MSG_HELLO = 0x01;
 const MSG_MONITOR_LIST = 0x03;
 const MSG_MONITOR_SELECT = 0x04;
 const MSG_STREAM_START = 0x05;
+const MSG_STREAM_CONFIG = 0x21;
+const MSG_REQUEST_KEYFRAME = 0x31;
 
 const VIDEO_HEADER_SIZE = 9;
+
+// VideoCodec enum (protocol/protocol.h)
+const CODEC_H264 = 0;
+const CODEC_MJPEG = 2;
 
 const DEFAULT_BRIDGE_PORT = 19810;
 const DEFAULT_HOST = '127.0.0.1';
@@ -40,6 +46,10 @@ const state = {
   latestFrame: null,
   latestFrameSeq: 0,
   lastError: null,
+  // Last codec we asked the host to use via STREAM_CONFIG. The host streams a
+  // single codec at a time, so we switch it depending on which kind of client
+  // is connected (H.264 for VR/WebCodecs readers, MJPEG for the 2D preview).
+  lastRequestedCodec: null,
 };
 
 let tcpSocket = null;
@@ -48,6 +58,9 @@ let udpSocket = null;
 let reconnectTimer = null;
 const frameBuffer = new Map();
 const mjpegClients = new Set();
+// Binary H.264 readers (the WebXR/WebCodecs client). Each gets reassembled
+// Annex-B access units framed as [uint32 LE length][uint8 flags][payload].
+const videoClients = new Set();
 
 function parseArgs(argv) {
   const options = {
@@ -124,6 +137,7 @@ function connectHost() {
   tcpSocket.on('connect', () => {
     state.connected = true;
     state.lastError = null;
+    state.lastRequestedCodec = null;
     tcpRxBuffer = Buffer.alloc(0);
     log(`Connected to host ${state.host}:${state.tcpPort}`);
     sendHello();
@@ -175,6 +189,7 @@ function disconnectHost(logMessage = true) {
 
   frameBuffer.clear();
   state.stream = { monitorId: null, width: 0, height: 0, codec: null };
+  state.lastRequestedCodec = null;
 
   if (logMessage) {
     log('Disconnected from host');
@@ -209,6 +224,49 @@ function sendMonitorSelect(monitorId) {
   const payload = Buffer.from([monitorId & 0xff]);
   sendControlMessage(MSG_MONITOR_SELECT, payload);
   log(`Selecting monitor ${monitorId}`);
+}
+
+// Ask the host for a codec. Layout mirrors protocol::StreamConfig (packed):
+// codec u8, bitrate_kbps u32, jpeg_quality u8, max_width u16, max_fps u8.
+// Zero fields mean "keep the host default" — we only override the codec.
+function sendStreamConfig(codec) {
+  const payload = Buffer.alloc(9);
+  payload.writeUInt8(codec, 0);
+  payload.writeUInt32LE(0, 1); // bitrate_kbps (host default = 20 Mbps)
+  payload.writeUInt8(0, 5);    // jpeg_quality
+  payload.writeUInt16LE(0, 6); // max_width (native)
+  payload.writeUInt8(0, 8);    // max_fps (auto)
+  sendControlMessage(MSG_STREAM_CONFIG, payload);
+}
+
+// protocol::RequestKeyframe { uint8 monitor_id } — ask for an IDR so a freshly
+// connected H.264 reader can start decoding without waiting for the GOP boundary.
+function sendRequestKeyframe(monitorId) {
+  sendControlMessage(MSG_REQUEST_KEYFRAME, Buffer.from([monitorId & 0xff]));
+}
+
+// The host streams one codec at a time. Prefer H.264 whenever a VR/WebCodecs
+// reader is attached; otherwise serve MJPEG for the 2D preview. Only sends a
+// STREAM_CONFIG when the desired codec actually changes (each one restarts the
+// host's active streams).
+function negotiateCodec() {
+  let desired = null;
+  if (videoClients.size > 0) {
+    desired = CODEC_H264;
+  } else if (mjpegClients.size > 0) {
+    desired = CODEC_MJPEG;
+  }
+
+  if (desired === null || !state.connected) {
+    return;
+  }
+  if (state.lastRequestedCodec === desired) {
+    return;
+  }
+
+  state.lastRequestedCodec = desired;
+  log(`Requesting codec ${desired === CODEC_H264 ? 'H.264' : 'MJPEG'} from host`);
+  sendStreamConfig(desired);
 }
 
 function processTcpMessages() {
@@ -281,6 +339,10 @@ function parseMonitorList(payload) {
   state.monitors = monitors;
   log(`Received monitor list (${monitors.length})`);
 
+  // Set the codec before selecting a monitor so the very first stream starts
+  // with the right encoder (the host snapshots stream config at start time).
+  negotiateCodec();
+
   const selected = monitors.find((m) => m.id === state.monitorId);
   if (selected) {
     sendMonitorSelect(selected.id);
@@ -324,13 +386,32 @@ function onUdpPacket(packet) {
     frameBuffer.delete(frameNum);
 
     if (isJpegFrame(fullFrame)) {
+      // MJPEG: feeds the 2D preview (<img>/multipart) and /frame.jpg.
       state.latestFrame = fullFrame;
       state.latestFrameSeq = frameNum;
       pushFrameToMjpegClients(fullFrame);
+    } else {
+      // Encoded video (H.264 Annex-B): goes to the WebCodecs/VR readers.
+      pushFrameToVideoClients(fullFrame, isAnnexBKeyframe(fullFrame) ? 1 : 0);
     }
 
     cleanupFrameBuffer(frameNum);
   }
+}
+
+// Scan an H.264 Annex-B access unit for an IDR (NAL type 5) or SPS (type 7),
+// either of which marks a point a decoder can start from.
+function isAnnexBKeyframe(buffer) {
+  for (let i = 0; i + 4 < buffer.length; i += 1) {
+    if (buffer[i] === 0x00 && buffer[i + 1] === 0x00 && buffer[i + 2] === 0x01) {
+      const nalType = buffer[i + 3] & 0x1f;
+      if (nalType === 5 || nalType === 7) {
+        return true;
+      }
+      i += 2;
+    }
+  }
+  return false;
 }
 
 function cleanupFrameBuffer(currentFrame) {
@@ -367,6 +448,27 @@ function pushFrameToMjpegClients(frameBufferData) {
       res.write('\r\n');
     } catch (_) {
       mjpegClients.delete(res);
+    }
+  }
+}
+
+// Frame the Annex-B access unit for the binary /stream.h264 readers as
+// [uint32 LE payload length][uint8 flags][payload]. flags bit0 = keyframe.
+function pushFrameToVideoClients(frame, flags) {
+  if (videoClients.size === 0) {
+    return;
+  }
+
+  const header = Buffer.allocUnsafe(5);
+  header.writeUInt32LE(frame.length, 0);
+  header.writeUInt8(flags, 4);
+
+  for (const res of videoClients) {
+    try {
+      res.write(header);
+      res.write(frame);
+    } catch (_) {
+      videoClients.delete(res);
     }
   }
 }
@@ -412,6 +514,9 @@ function getPublicStatus() {
     latestFrameSeq: state.latestFrameSeq,
     hasFrame: Boolean(state.latestFrame),
     lastError: state.lastError,
+    requestedCodec: state.lastRequestedCodec,
+    videoClients: videoClients.size,
+    mjpegClients: mjpegClients.size,
   };
 }
 
@@ -512,6 +617,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && parsed.pathname === '/stream.h264') {
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      Pragma: 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // Low latency: flush each frame immediately rather than coalescing.
+    if (res.socket) {
+      res.socket.setNoDelay(true);
+    }
+
+    videoClients.add(res);
+    // Switch the host to H.264 and ask for an IDR so this reader can start
+    // decoding right away instead of waiting for the next GOP boundary.
+    negotiateCodec();
+    sendRequestKeyframe(state.monitorId);
+
+    req.on('close', () => {
+      videoClients.delete(res);
+      // No more H.264 readers — fall back to MJPEG for the 2D preview.
+      negotiateCodec();
+    });
+    return;
+  }
+
   if (req.method === 'GET' && parsed.pathname === '/stream.mjpg') {
     res.writeHead(200, {
       'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
@@ -521,6 +653,7 @@ const server = http.createServer(async (req, res) => {
     });
 
     mjpegClients.add(res);
+    negotiateCodec();
 
     if (state.latestFrame) {
       pushFrameToMjpegClients(state.latestFrame);
