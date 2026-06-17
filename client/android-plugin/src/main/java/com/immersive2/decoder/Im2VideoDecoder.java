@@ -50,10 +50,32 @@ public class Im2VideoDecoder extends GodotPlugin {
         volatile boolean attached;
         final float[] transform = new float[16];
 
+        // --- diagnostics ---
+        int submitCount;
+        int outputCount;
+        long lastTexTimestamp = -1;
+        int texUpdateCount;
+
         StreamDecoder() {
             // Identity transform until the first updateTexImage().
             transform[0] = 1f; transform[5] = 1f; transform[10] = 1f; transform[15] = 1f;
         }
+    }
+
+    /** List the H.264 Annex-B NAL unit types present in an access unit (diagnostics). */
+    private static String nalTypes(byte[] d) {
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (int i = 0; i + 4 < d.length; i++) {
+            if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+                int t = d[i + 3] & 0x1f;
+                if (!first) sb.append(',');
+                sb.append(t);
+                first = false;
+                i += 2;
+            }
+        }
+        return sb.append(']').toString();
     }
 
     private final ConcurrentHashMap<Integer, StreamDecoder> streams = new ConcurrentHashMap<>();
@@ -116,6 +138,11 @@ public class Im2VideoDecoder extends GodotPlugin {
         StreamDecoder sd = streams.get(streamId);
         if (sd == null || sd.codec == null || data == null || data.length == 0) return false;
         try {
+            if (sd.submitCount < 12) {
+                Log.i(TAG, "submit AU #" + sd.submitCount + " size=" + data.length
+                        + " nals=" + nalTypes(data));
+            }
+            sd.submitCount++;
             int idx = sd.codec.dequeueInputBuffer(10_000);
             if (idx >= 0) {
                 ByteBuffer in = sd.codec.getInputBuffer(idx);
@@ -124,6 +151,8 @@ public class Im2VideoDecoder extends GodotPlugin {
                     in.put(data);
                     sd.codec.queueInputBuffer(idx, 0, data.length, System.nanoTime() / 1000, 0);
                 }
+            } else {
+                Log.w(TAG, "no input buffer available (decoder stalled?) AU #" + sd.submitCount);
             }
             drainToSurface(sd);
             return idx >= 0;
@@ -163,6 +192,14 @@ public class Im2VideoDecoder extends GodotPlugin {
         try {
             sd.surfaceTexture.updateTexImage();
             sd.surfaceTexture.getTransformMatrix(sd.transform);
+            long ts = sd.surfaceTexture.getTimestamp();
+            if (ts != sd.lastTexTimestamp) {
+                sd.lastTexTimestamp = ts;
+                sd.texUpdateCount++;
+                if (sd.texUpdateCount <= 5 || sd.texUpdateCount % 60 == 0) {
+                    Log.i(TAG, "updateTexImage new frame #" + sd.texUpdateCount + " ts=" + ts);
+                }
+            }
         } catch (Exception e) {
             Log.w(TAG, "updateTexImage failed: " + e);
         }
@@ -204,6 +241,10 @@ public class Im2VideoDecoder extends GodotPlugin {
             if (out < 0) break;
             // render == true → hand the frame to the Surface (SurfaceTexture).
             sd.codec.releaseOutputBuffer(out, true);
+            sd.outputCount++;
+            if (sd.outputCount <= 5 || sd.outputCount % 60 == 0) {
+                Log.i(TAG, "decoder output frame #" + sd.outputCount);
+            }
         }
     }
 
