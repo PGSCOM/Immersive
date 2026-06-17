@@ -4,10 +4,18 @@
 shader_type spatial;
 render_mode unshaded, cull_disabled;
 
-// The streamed screen content texture.
+// The streamed screen content texture (RGBA / MJPEG path).
 // Mipmaps + anisotropic filtering greatly reduce the shimmering/aliasing of
 // fine desktop text when the panel is minified or viewed at an angle.
 uniform sampler2D screen_texture : source_color, filter_linear_mipmap_anisotropic;
+
+// Same texture, point-sampled, for the NV12 (hardware decoder) path. NV12 is
+// a tightly packed L8 image whose Y/U/V bytes are unpacked manually below, so
+// it MUST be read with exact texels: linear filtering blends the packed planes
+// together (wrong colors) and, because the NV12 texture has no mipmaps, a
+// mipmap filter leaves it "incomplete" and returns black on GLES/Compatibility.
+// screen_panel.gd binds this to the same ImageTexture as screen_texture.
+uniform sampler2D screen_texture_nv12 : source_color, filter_nearest;
 
 // Screen border color.
 uniform vec4 border_color : source_color = vec4(0.2, 0.2, 0.3, 1.0);
@@ -39,19 +47,19 @@ vec4 sample_screen_color(vec2 sample_uv) {
         // NV12 packed into an L8 texture of size (w, h*1.5):
         //   rows [0, h)      → Y plane
         //   rows [h, 1.5h)   → interleaved UV pairs (u at even col, v at odd)
-        vec2 tex_size = vec2(textureSize(screen_texture, 0));
+        vec2 tex_size = vec2(textureSize(screen_texture_nv12, 0));
         float texel_x = 1.0 / tex_size.x;
 
         // Y: top 2/3 of the texture
-        float y = texture(screen_texture, vec2(sample_uv.x, sample_uv.y * (2.0 / 3.0))).r;
+        float y = texture(screen_texture_nv12, vec2(sample_uv.x, sample_uv.y * (2.0 / 3.0))).r;
 
         // UV: bottom 1/3. One (u,v) byte pair covers 2 luma columns, so the
         // pair for luma column px starts at texel floor(px/2)*2.
         float px = sample_uv.x * tex_size.x;
         float pair_x = (floor(px * 0.5) * 2.0 + 0.5) * texel_x;
         float uv_y = (2.0 / 3.0) + (sample_uv.y / 3.0);
-        float u = texture(screen_texture, vec2(pair_x, uv_y)).r - 0.5;
-        float v = texture(screen_texture, vec2(pair_x + texel_x, uv_y)).r - 0.5;
+        float u = texture(screen_texture_nv12, vec2(pair_x, uv_y)).r - 0.5;
+        float v = texture(screen_texture_nv12, vec2(pair_x + texel_x, uv_y)).r - 0.5;
 
         // BT.601 limited range
         y = 1.1643835 * (y - 0.0625);

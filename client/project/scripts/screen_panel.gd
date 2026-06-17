@@ -329,6 +329,8 @@ func _apply_texture() -> void:
 	var mat := material_override
 	if mat is ShaderMaterial:
 		(mat as ShaderMaterial).set_shader_parameter("screen_texture", screen_texture)
+		# NV12 path samples the same texture through a point-sampled uniform.
+		(mat as ShaderMaterial).set_shader_parameter("screen_texture_nv12", screen_texture)
 	else:
 		# Create shader-based material so curved mode can be toggled at runtime.
 		var shader := load(SCREEN_SHADER_PATH) as Shader
@@ -336,6 +338,7 @@ func _apply_texture() -> void:
 		if shader:
 			new_mat.shader = shader
 		new_mat.set_shader_parameter("screen_texture", screen_texture)
+		new_mat.set_shader_parameter("screen_texture_nv12", screen_texture)
 		new_mat.set_shader_parameter("is_yuv", 0)
 		material_override = new_mat
 
