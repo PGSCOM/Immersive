@@ -175,6 +175,12 @@ jobs:
           cp -R "${CLIENT_DIR}/project/scenes" "${CI_PROJECT_DIR}/scenes"
           cp -R "${CLIENT_DIR}/project/scripts" "${CI_PROJECT_DIR}/scripts"
           cp -R "${CLIENT_DIR}/project/shaders" "${CI_PROJECT_DIR}/shaders"
+          # MUST copy addons/: this holds the im2_decoder editor export plugin
+          # and its MediaCodec AAR. Without it the EditorExportPlugin never runs,
+          # the AAR is not bundled, and the APK ships with NO hardware decoder
+          # (the panel then has nothing to decode H.264 with). project.godot
+          # references res://addons/im2_decoder/plugin.cfg in editor_plugins.
+          cp -R "${CLIENT_DIR}/project/addons" "${CI_PROJECT_DIR}/addons"
 
           # Godot 4.6.3 expects gradle_build/use_gradle_build for Android Gradle exports.
           # Ensure CI uses the Gradle path required by OpenXR and SDK overrides.
