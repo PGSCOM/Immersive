@@ -5,6 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Immersive-2 WebXR View</title>
   <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <script>
+    // An <img> fed by an MJPEG (multipart/x-mixed-replace) stream keeps
+    // refreshing in the DOM, but the WebGL texture built from it is only
+    // uploaded to the GPU once. Without flagging needsUpdate every frame the
+    // VR panel would freeze on the first frame. This component re-uploads the
+    // texture each tick so the stream stays live in the headset.
+    AFRAME.registerComponent('live-texture', {
+      tick: function () {
+        var mesh = this.el.getObject3D('mesh');
+        if (!mesh || !mesh.material || !mesh.material.map) {
+          return;
+        }
+        var image = mesh.material.map.image;
+        // Only refresh once the image actually has decoded pixels.
+        if (image && (image.naturalWidth || image.width)) {
+          mesh.material.map.needsUpdate = true;
+        }
+      }
+    });
+  </script>
   <style>
     html, body {
       margin: 0;
@@ -57,6 +77,7 @@
     <a-entity light="type: directional; color: #ffffff; intensity: 0.45" position="-1 2 1"></a-entity>
 
     <a-plane
+      live-texture
       src="#desktopStream"
       width="2.4"
       height="1.35"
