@@ -226,17 +226,24 @@ public:
                 ? (frame_number - flow.last_ack)
                 : 0;
             if (backlog > kMaxInFlightFrames) {
+                // The client has fallen behind (slow decode or Wi-Fi chunk
+                // loss). Do NOT stop sending: catching up requires frames we'd
+                // be refusing to send, so a `return` here deadlocks the stream
+                // into a permanent black screen (the client can never ACK, so
+                // last_ack stays frozen and every future frame is dropped).
+                // Instead resync the flow window to the present and keep
+                // streaming the freshest frame — live video degrades to fewer
+                // frames under loss rather than freezing.
                 auto now = std::chrono::steady_clock::now();
                 if (flow.last_log.time_since_epoch().count() == 0 ||
                     std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
-                    std::cout << "[Server] Dropping frame " << frame_number
-                              << " for client " << client_id
+                    std::cout << "[Server] Client " << client_id
                               << " monitor " << static_cast<int>(monitor_id)
-                              << " (backlog " << backlog << " > "
-                              << kMaxInFlightFrames << ")\n";
+                              << " lagging (backlog " << backlog << " > "
+                              << kMaxInFlightFrames << "), resyncing flow window\n";
                     flow.last_log = now;
                 }
-                return;
+                flow.last_ack = frame_number;
             }
         }
 

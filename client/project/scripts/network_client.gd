@@ -65,13 +65,6 @@ var _stream_height: int = 0
 
 var _tcp_buffer := PackedByteArray()
 
-# --- DEBUG: instrumentación temporal para diagnosticar pantalla negra ---
-var _dbg_packets: int = 0
-var _dbg_frames: int = 0
-var _dbg_dropped: int = 0
-var _dbg_last_bytes: int = 0
-var _dbg_last_report_ms: int = 0
-
 func _ready() -> void:
 	set_process(false)
 
@@ -290,21 +283,10 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 # --- Internal UDP handling ---
 
 func _read_udp_packets() -> void:
-	# DEBUG: reporte una vez por segundo
-	var now_ms: int = Time.get_ticks_msec()
-	if now_ms - _dbg_last_report_ms >= 1000:
-		_dbg_last_report_ms = now_ms
-		print("[DBG-NET] udp_pkts/s=%d frames/s=%d dropped_incompletos/s=%d ultimo_frame_bytes=%d buffer_pendiente=%d" %
-			[_dbg_packets, _dbg_frames, _dbg_dropped, _dbg_last_bytes, _frame_buffer.size()])
-		_dbg_packets = 0
-		_dbg_frames = 0
-		_dbg_dropped = 0
-
 	while udp_client.get_available_packet_count() > 0:
 		var packet: PackedByteArray = udp_client.get_packet()
 		if packet.size() < VIDEO_HEADER_SIZE:
 			continue
-		_dbg_packets += 1
 
 		# Parse video packet header
 		var monitor_id: int = packet[0]
@@ -349,8 +331,6 @@ func _assemble_frame(frame_key: int) -> void:
 		if frame_info["chunks"].has(i):
 			frame_data.append_array(frame_info["chunks"][i])
 
-	_dbg_frames += 1
-	_dbg_last_bytes = frame_data.size()
 	video_frame_received.emit(monitor_id, frame_data, _stream_width, _stream_height)
 	_frame_buffer.erase(frame_key)
 
@@ -366,7 +346,6 @@ func _cleanup_old_frames(monitor_id: int, current_frame: int) -> void:
 				_frame_buffer[key]["frame_num"] < current_frame - 30:
 			keys_to_remove.append(key)
 	for key in keys_to_remove:
-		_dbg_dropped += 1
 		_frame_buffer.erase(key)
 
 ## Send a multi-monitor select (up to 3 monitors simultaneously).
