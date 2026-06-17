@@ -120,6 +120,23 @@ func _process(delta: float) -> void:
 	_handle_reconnect(delta)
 	_handle_latency_probe(delta)
 	_update_foveation_focus()
+	_update_decoders()
+
+## Drive each hardware decoder's per-frame GL work (attach + updateTexImage runs
+## on the render thread) and keep the panel's sample transform in sync.
+func _update_decoders() -> void:
+	for monitor_id in _decoders:
+		var dec: VideoDecoder = _decoders[monitor_id]
+		dec.render_update()
+		var panel := _find_panel_for_monitor(monitor_id)
+		if panel:
+			panel.set_texture_transform(dec.get_transform())
+
+func _find_panel_for_monitor(monitor_id: int) -> MeshInstance3D:
+	for panel in screen_panels:
+		if is_instance_valid(panel) and int(panel.get_meta("monitor_id", -1)) == monitor_id:
+			return panel
+	return null
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -588,11 +605,13 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 
 	# Set up (or tear down) the hardware decoder for this monitor's codec
 	_close_decoder(monitor_id)
+	var dec: VideoDecoder = null
 	if codec in [0, 1, 3]:  # H.264 / HEVC / AV1
-		var dec := VideoDecoder.new()
+		dec = VideoDecoder.new()
 		if dec.open(codec, width, height):
 			_decoders[monitor_id] = dec
 		else:
+			dec = null
 			_request_codec_fallback(codec)
 
 	# Reuse the panel already showing this monitor; otherwise take the first
@@ -616,6 +635,10 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 		panel.set_resolution(width, height, codec)
 		_apply_panel_visual_settings(panel)
 		panel.set_meta("monitor_id", monitor_id)
+
+		# Bind the decoder's external texture so the panel samples it directly.
+		if dec and panel.has_method("attach_external_texture"):
+			panel.attach_external_texture(dec.get_texture(), width, height)
 
 		var saved_layout := _find_saved_layout_for_monitor(monitor_id)
 		if saved_layout.is_empty():
@@ -650,29 +673,13 @@ func _on_stream_stopped(monitor_id: int) -> void:
 		_update_overlay_state()
 	_update_overlay_monitors()
 
-func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, height: int) -> void:
-	# H.264/HEVC/AV1: run through the hardware decoder first (output is NV12)
-	if _decoders.has(monitor_id):
-		var dec: VideoDecoder = _decoders[monitor_id]
+func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, _width: int, _height: int) -> void:
+	# Hardware path: hand the encoded access unit to the decoder, which renders
+	# straight into its ExternalTexture (already bound to the panel). The panel
+	# samples that texture on the GPU — nothing is pushed per frame here.
+	var dec: VideoDecoder = _decoders.get(monitor_id)
+	if dec:
 		dec.submit(frame_data)
-		frame_data = dec.poll_frame()
-		if frame_data.is_empty():
-			return  # decoder hasn't produced a frame yet
-		width = dec.get_width()
-		height = dec.get_height()
-
-	# Deliver frame to the panel showing this monitor
-	var fallback: MeshInstance3D = null
-	for panel in screen_panels:
-		if not is_instance_valid(panel) or not panel.has_method("update_texture"):
-			continue
-		if int(panel.get_meta("monitor_id", -1)) == monitor_id:
-			panel.update_texture(frame_data, width, height)
-			return
-		if fallback == null:
-			fallback = panel
-	if fallback:
-		fallback.update_texture(frame_data, width, height)
 
 ## A frame was lost or dropped. For hardware (inter-frame) codecs, ask the host
 ## for a fresh keyframe so the decoder recovers immediately instead of showing
@@ -699,25 +706,24 @@ func _close_all_decoders() -> void:
 		_decoders[monitor_id].close()
 	_decoders.clear()
 
-## The host streams a codec we cannot decode here. Ask for the best codec we
-## CAN decode: H.264 if the MediaCodec plugin is present (e.g. AV1 stream on
-## a Pico 4 / Quest 2), MJPEG otherwise. Runtime only; the user's saved codec
-## preference is not overwritten.
+## The host streams a codec we cannot hardware-decode here. There is no software
+## (MJPEG) fallback any more, so the best we can do is ask for H.264, which every
+## VR headset decodes and the host always supports. If we are already on H.264
+## and it failed, the device simply cannot play the stream.
 func _request_codec_fallback(codec: int) -> void:
 	if _codec_fallback_sent:
 		return
 	_codec_fallback_sent = true
-	var names := {0: "H.264", 1: "HEVC", 3: "AV1"}
-	var fallback := 2  # MJPEG
 	if codec != 0 and VideoDecoder.is_codec_supported(0):
-		fallback = 0  # H.264
-	push_warning("[Immersive-2] No decoder for %s on this device — requesting %s" %
-		[names.get(codec, str(codec)), names.get(fallback, "MJPEG")])
-	stream_codec = fallback
-	_save_config()
-	if network_client and network_client.has_method("send_stream_config"):
-		network_client.send_stream_config(fallback, stream_bitrate_kbps,
-			stream_jpeg_quality, stream_max_width, stream_fps)
+		push_warning("[Immersive-2] No hardware decoder for codec %d — requesting H.264" % codec)
+		stream_codec = 0
+		_save_config()
+		if network_client and network_client.has_method("send_stream_config"):
+			network_client.send_stream_config(0, stream_bitrate_kbps,
+				stream_jpeg_quality, stream_max_width, stream_fps)
+	else:
+		push_error("[Immersive-2] No hardware video decoder on this device (codec %d). " % codec +
+			"The MJPEG software path has been removed; install an APK with the MediaCodec plugin.")
 
 func _on_audio_stream_started(_sample_rate: int, _channels: int, audio_port: int) -> void:
 	if audio_receiver == null:
@@ -1029,25 +1035,21 @@ func _save_config() -> void:
 	cfg.set_value("stream", "fps", stream_fps)
 	cfg.save(CONFIG_PATH)
 
-## Best codec this device can actually decode, preferring hardware.
-## Like every production VR desktop streamer (Virtual Desktop, Steam Link,
-## Moonlight), we use a hardware-decoded codec when one is available; software
-## MJPEG is only a fallback for desktop/clients without the MediaCodec plugin,
-## where a single CPU thread cannot keep up at full desktop resolution.
+## Hardware-only client (like Virtual Desktop / Steam Link / Moonlight): we
+## always stream a hardware-decoded codec. H.264 is the most robust choice and
+## is always available on the host, so it is the default. The MJPEG software
+## path has been removed — a mobile CPU cannot sustain it at desktop resolution.
 func _default_codec_for_device() -> int:
-	if VideoDecoder.is_codec_supported(0):  # H.264: most robust, lowest setup latency
-		return 0
-	return 2  # MJPEG software fallback (no MediaCodec plugin)
+	return 0  # H.264
 
-## Resolve a requested codec to one this device can actually use: 0xFF ("auto")
-## becomes the device's best codec (never "let the host decide", which falls
-## back to slow software MJPEG), and a hardware codec without a decoder here
-## degrades to software MJPEG.
+## Resolve a requested codec to a hardware codec. MJPEG (2) and any inter-frame
+## codec without a decoder on this device collapse to H.264; "auto" (0xFF) does
+## the same. We never request MJPEG.
 func _resolve_codec(codec: int) -> int:
 	if codec == 0xFF:
 		return _default_codec_for_device()
-	if codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(codec):
-		return 2
+	if codec == 2 or (codec in [1, 3] and not VideoDecoder.is_codec_supported(codec)):
+		return 0
 	return codec
 
 func _load_config() -> void:

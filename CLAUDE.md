@@ -57,7 +57,7 @@ adb install -r client/dist/immersive2-debug.apk
 godot --headless --path client/project --export-debug "Windows Desktop" client/dist/immersive2-debug.exe
 ```
 
-The Android export bundles the MediaCodec decoder plugin from `addons/im2_decoder/bin/*.aar`, built separately from `client/android-plugin/` (`gradle assembleRelease`, requires Android SDK/NDK; see `client/android-plugin/README.md`). Without that plugin the client still works — it auto-falls back to MJPEG decoding.
+The Android export bundles the MediaCodec decoder plugin from `addons/im2_decoder/bin/*.aar`, built separately from `client/android-plugin/` (`gradle assembleRelease`, requires Android SDK/NDK; see `client/android-plugin/README.md`). The client is **hardware-decode only** (H.264/HEVC/AV1 via MediaCodec); the old software-MJPEG fallback has been removed. Without the plugin (desktop, or an APK exported without the AAR) the panel just shows a placeholder. The plugin must register under the Godot 4.2+ **`org.godotengine.plugin.v2`** manifest prefix — a `v1` prefix is silently ignored and was the cause of a hard fall to MJPEG (≈1 fps).
 
 ### Web client (WebXR)
 
@@ -93,9 +93,9 @@ On non-Windows (`IMMERSIVE_PORTABLE_HOST`), capture/input/IDD/audio backends are
 
 ### VR Client (Godot)
 
-`client/project/scripts/main.gd` is the scene controller (multi-monitor slots, auto-reconnect, workspace persistence). `network_client.gd` owns the TCP control connection + UDP video/audio sockets and latency probing. `screen_panel.gd` is a draggable/resizable 3D panel that owns a `video_decoder.gd` instance per monitor stream. `video_decoder.gd` wraps the `Im2VideoDecoder` Android plugin (MediaCodec) — `VideoDecoder.is_codec_supported()` returns false on any platform without the plugin (desktop, or an APK exported without the AAR), and callers fall back to decoding MJPEG frames directly via `Image.load_jpg_from_buffer`. `vr_input.gd` / `hand_input.gd` handle controller and hand-tracking pointer input; `ui_overlay.gd` is the in-VR settings/connect UI; `virtual_keyboard.gd` is the VR QWERTY keyboard; `audio_receiver.gd` decodes the UDP PCM audio stream into an `AudioStreamGenerator`.
+`client/project/scripts/main.gd` is the scene controller (multi-monitor slots, auto-reconnect, workspace persistence). `network_client.gd` owns the TCP control connection + UDP video/audio sockets and latency probing. `screen_panel.gd` is a draggable/resizable 3D panel; `main.gd` owns one `video_decoder.gd` per monitor stream. `video_decoder.gd` wraps the `Im2VideoDecoder` Android plugin (MediaCodec) in a **zero-copy** path: MediaCodec decodes straight into a Godot `ExternalTexture` (a `GL_TEXTURE_EXTERNAL_OES` object) via a `SurfaceTexture`, and the panel's `screen_external.gdshader` samples it through `samplerExternalOES` — no CPU readback, no YUV unpacking. `SurfaceTexture.attachToGLContext`/`updateTexImage` must run on Godot's render thread, so they are scheduled via `RenderingServer.call_on_render_thread()` (driven each frame from `main.gd._update_decoders`). `VideoDecoder.is_codec_supported()` returns false without the plugin (desktop), where the panel shows a placeholder (no software fallback). `vr_input.gd` / `hand_input.gd` handle controller and hand-tracking pointer input; `ui_overlay.gd` is the in-VR settings/connect UI; `virtual_keyboard.gd` is the VR QWERTY keyboard; `audio_receiver.gd` decodes the UDP PCM audio stream into an `AudioStreamGenerator`.
 
-The Android decoder plugin is a separate Gradle/Kotlin project at `client/android-plugin/` (not part of the Godot project tree) producing an AAR consumed via the `addons/im2_decoder` GDExtension-style export plugin.
+The Android decoder plugin is a separate Gradle/Java project at `client/android-plugin/` (not part of the Godot project tree) producing an AAR consumed via the `addons/im2_decoder` export plugin (an `EditorExportPlugin` that adds the AAR via `_get_android_libraries`).
 
 ### Protocol
 

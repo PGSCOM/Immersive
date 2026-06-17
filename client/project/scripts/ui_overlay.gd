@@ -655,8 +655,9 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	codec_row.add_theme_constant_override("separation", 6)
 	vbox.add_child(codec_row)
 	_quality_label(codec_row, "Codec")
+	# Hardware-decoded codecs only — the MJPEG software path has been removed.
 	_codec_buttons = _make_segmented_row(codec_row,
-		[["Auto", 0xFF], ["MJPEG", 2], ["H.264", 0], ["H.265", 1], ["AV1", 3]],
+		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3]],
 		_on_codec_chosen)
 
 	# Resolution row
