@@ -46,7 +46,12 @@ var foveation_strength: float = 0.55
 var passthrough_enabled: bool = false
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
-var stream_codec: int = 0xFF        ## 0xFF = host default, 0 = H.264, 2 = MJPEG
+## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
+## Resolved from the device's decode capability in _load_config(); see
+## _default_codec_for_device(). We never send 0xFF ("let the host decide")
+## from a headset — the host would pick software MJPEG, which a mobile CPU
+## cannot sustain at desktop resolution.
+var stream_codec: int = 0
 var stream_bitrate_kbps: int = 20000
 var stream_jpeg_quality: int = 70
 var stream_res_percent: int = 100   ## 100/75/50, -1 = auto (ideal)
@@ -1000,7 +1005,20 @@ func _save_config() -> void:
 	cfg.set_value("stream", "fps", stream_fps)
 	cfg.save(CONFIG_PATH)
 
+## Best codec this device can actually decode, preferring hardware.
+## Like every production VR desktop streamer (Virtual Desktop, Steam Link,
+## Moonlight), we use a hardware-decoded codec when one is available; software
+## MJPEG is only a fallback for desktop/clients without the MediaCodec plugin,
+## where a single CPU thread cannot keep up at full desktop resolution.
+func _default_codec_for_device() -> int:
+	if VideoDecoder.is_codec_supported(0):  # H.264: most robust, lowest setup latency
+		return 0
+	return 2  # MJPEG software fallback (no MediaCodec plugin)
+
 func _load_config() -> void:
+	# Capability-based default first; a saved config value overrides it below.
+	stream_codec = _default_codec_for_device()
+
 	var cfg := ConfigFile.new()
 	if cfg.load(CONFIG_PATH) == OK:
 		host_ip       = cfg.get_value("network", "host_ip", "192.168.1.100")
@@ -1011,9 +1029,15 @@ func _load_config() -> void:
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
-		stream_codec = cfg.get_value("stream", "codec", 0xFF)
+		stream_codec = cfg.get_value("stream", "codec", stream_codec)
+		# 0xFF ("let the host decide") makes the host fall back to software MJPEG
+		# even on a headset that can hardware-decode — resolve it to the device's
+		# best codec instead.
+		if stream_codec == 0xFF:
+			stream_codec = _default_codec_for_device()
+		# A hardware codec this device can't decode → software MJPEG.
 		if stream_codec in [0, 1, 3] and not VideoDecoder.is_codec_supported(stream_codec):
-			stream_codec = 2  # este dispositivo no tiene plugin MediaCodec, usar MJPEG
+			stream_codec = 2
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
