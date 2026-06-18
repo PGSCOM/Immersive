@@ -189,6 +189,7 @@ public:
         initialized_         = true;
         frame_count_         = 0;
         need_input_credits_  = 0;
+        force_keyframe_      = true;  // first delivered frame must be a keyframe
         return true;
 #else
         (void)cfg;
@@ -330,6 +331,13 @@ private:
     uint32_t              frame_count_     = 0;
     int                   need_input_credits_ = 0;
     std::vector<uint8_t>  nv12_buf_;
+
+    // Cached SPS/PPS (Annex-B) pulled from MF_MT_MPEG_SEQUENCE_HEADER. The MF
+    // encoder keeps the parameter sets out-of-band (in the media type), so we
+    // re-insert them in-band on every access unit that lacks an SPS. Over a
+    // lossy UDP stream any frame may be a client's first; without in-band
+    // SPS/PPS the hardware decoder cannot configure and renders black.
+    std::vector<uint8_t>  header_annexb_;
 
 #ifdef _WIN32
     ComPtr<IMFTransform>           mft_;
@@ -511,10 +519,15 @@ private:
             std::cerr << "[MfEncoder] Failed to set NV12 input type\n";
             return false;
         }
+
+        // Grab SPS/PPS now if the encoder already exposes them (some only
+        // populate the sequence header after the first frame — handled lazily
+        // in _process_output_once too).
+        _capture_sequence_header();
         return true;
     }
 
-    /// Best-effort encoder tuning: CBR + low latency.
+    /// Best-effort encoder tuning: CBR, no B-frames, fixed-interval IDR GOPs.
     void _apply_codec_api_tuning() {
         if (FAILED(mft_.As(&codec_api_)) || !codec_api_) return;
 
@@ -529,13 +542,48 @@ private:
         v.ulVal = config_.bitrate_kbps * 1000;
         codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
-        v.vt = VT_BOOL;
-        v.boolVal = VARIANT_TRUE;
-        codec_api_->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+        // No B-frames: keeps one access unit == one in-order displayable frame
+        // (our wire protocol assumes no reordering) and minimises latency. This
+        // replaces CODECAPI_AVLowLatencyMode, which on several hardware MFTs
+        // silently switches to rolling intra-refresh — emitting recovery-point
+        // SEI instead of true IDR keyframes — so a client that joins mid-stream
+        // or loses the first frame never receives a full intra and stays black.
+        v.vt = VT_UI4;
+        v.ulVal = 0;
+        codec_api_->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &v);
 
+        // Fixed IDR interval: a real keyframe at least every gop_size frames so
+        // a fresh/recovering client gets a full picture without an explicit
+        // REQUEST_KEYFRAME (which still forces one immediately).
         v.vt = VT_UI4;
         v.ulVal = config_.gop_size;
         codec_api_->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
+    }
+
+    /// Pull the SPS/PPS (Annex-B) out of the current output media type so they
+    /// can be re-inserted in-band. Safe to call repeatedly (e.g. after a
+    /// stream-change renegotiation).
+    void _capture_sequence_header() {
+        ComPtr<IMFMediaType> cur;
+        if (FAILED(mft_->GetOutputCurrentType(0, &cur)) || !cur) return;
+        UINT32 sz = 0;
+        if (FAILED(cur->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &sz)) || sz == 0) return;
+        std::vector<uint8_t> blob(sz);
+        if (SUCCEEDED(cur->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, blob.data(), sz, nullptr))) {
+            header_annexb_ = std::move(blob);
+            std::cout << "[MfEncoder] Cached in-band SPS/PPS header (" << sz << " bytes)\n";
+        }
+    }
+
+    /// True if the access unit already contains an SPS NAL (type 7) near its
+    /// start, so we don't insert a duplicate. Scans Annex-B start codes.
+    static bool _au_has_sps(const std::vector<uint8_t>& d) {
+        for (size_t i = 0; i + 4 < d.size() && i < 96; ++i) {
+            if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+                if ((d[i + 3] & 0x1f) == 7) return true;
+            }
+        }
+        return false;
     }
 
     void _force_keyframe_now() {
@@ -648,6 +696,7 @@ private:
             if (SUCCEEDED(mft_->GetOutputAvailableType(0, 0, &new_type))) {
                 mft_->SetOutputType(0, new_type.Get(), 0);
             }
+            _capture_sequence_header();  // parameter sets may have changed
             return true;
         }
         if (FAILED(hr)) {
@@ -690,6 +739,15 @@ private:
         }
 
         if (!pkt.data.empty()) {
+            // Lazy header capture: some encoders only expose the sequence
+            // header once output is flowing.
+            if (header_annexb_.empty()) _capture_sequence_header();
+            // Re-insert SPS/PPS in-band when missing, so any frame the client
+            // happens to receive first can configure the decoder.
+            if (!header_annexb_.empty() && !_au_has_sps(pkt.data)) {
+                pkt.data.insert(pkt.data.begin(),
+                                header_annexb_.begin(), header_annexb_.end());
+            }
             frame_count_++;
             result.push_back(std::move(pkt));
         }

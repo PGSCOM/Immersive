@@ -78,8 +78,24 @@ var _decoders: Dictionary = {}
 ## Last keyframe-request time per monitor (ms), to throttle loss recovery.
 var _last_keyframe_req_ms: Dictionary = {}
 
+## Decoders awaiting their first decoded frame -> open time (ms). Used to keep
+## asking the host for a keyframe until the freshly-opened decoder catches a
+## clean intra (cold-start recovery for inter-frame codecs).
+var _decoder_pending_first: Dictionary = {}
+
 ## Whether we already auto-fell back to MJPEG this session (avoids loops).
 var _codec_fallback_sent: bool = false
+
+# ---------------------------------------------------------------------------
+# Test/debug harness — driven from immersive2_config.cfg [test] section or
+# --im2-host=/--im2-port=/--im2-capture command-line args (adb am ... --esa
+# command_line). Lets the client be launched + connected + visually verified
+# from adb without a headset on the user. Inert in normal use.
+# ---------------------------------------------------------------------------
+var _autoconnect_on_start: bool = false
+var _debug_capture: bool = false
+var _debug_capture_accum: float = 0.0
+var _debug_capture_count: int = 0
 
 ## UI overlay (lazy-created).
 var ui_overlay: Node = null
@@ -112,7 +128,11 @@ func _ready() -> void:
 	_init_eye_gaze_controller()
 	_init_network()
 	_init_ui_overlay()
-	if current_state == State.DISCONNECTED and ui_overlay and ui_overlay.has_method("toggle_visibility"):
+	if _autoconnect_on_start:
+		print("[Immersive-2][TEST] Autoconnect enabled -> %s:%d (capture=%s)" %
+			[host_ip, host_tcp_port, str(_debug_capture)])
+		connect_to_host()
+	elif current_state == State.DISCONNECTED and ui_overlay and ui_overlay.has_method("toggle_visibility"):
 		ui_overlay.toggle_visibility()
 	print("[Immersive-2] VR Client started — press B/Y to open overlay")
 
@@ -120,6 +140,8 @@ func _process(delta: float) -> void:
 	_handle_reconnect(delta)
 	_handle_latency_probe(delta)
 	_update_foveation_focus()
+	_handle_keyframe_retries()
+	_handle_debug_capture(delta)
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -592,6 +614,10 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 		var dec := VideoDecoder.new()
 		if dec.open(codec, width, height):
 			_decoders[monitor_id] = dec
+			# Inter-frame codec just cold-started: demand a clean intra now and
+			# keep retrying (via _handle_keyframe_retries) until it decodes.
+			_decoder_pending_first[monitor_id] = Time.get_ticks_msec()
+			_request_keyframe(monitor_id, 0)
 		else:
 			_request_codec_fallback(codec)
 
@@ -658,6 +684,8 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 		frame_data = dec.poll_frame()
 		if frame_data.is_empty():
 			return  # decoder hasn't produced a frame yet
+		# First successful decode for this stream: stop nagging for keyframes.
+		_decoder_pending_first.erase(monitor_id)
 		width = dec.get_width()
 		height = dec.get_height()
 
@@ -679,15 +707,67 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 ## artifacts until the next periodic keyframe. Throttled per monitor. MJPEG
 ## needs nothing — every frame is independently decodable.
 func _on_frame_gap(monitor_id: int) -> void:
+	_request_keyframe(monitor_id, 250)
+
+## Ask the host for a fresh keyframe (intra), throttled per monitor. The host
+## uses intra-refresh (no periodic IDR), so a decoder that opens mid-GOP — e.g.
+## right after connecting — sees only P-frames and renders coloured garbage
+## until it forces one. Returns true if a request was actually sent.
+func _request_keyframe(monitor_id: int, min_interval_ms: int = 250) -> bool:
 	if not _decoders.has(monitor_id):
-		return
+		return false
 	var now := Time.get_ticks_msec()
 	var last: int = _last_keyframe_req_ms.get(monitor_id, -10000)
-	if now - last < 250:
-		return  # at most one keyframe request every 250 ms per monitor
+	if now - last < min_interval_ms:
+		return false
 	_last_keyframe_req_ms[monitor_id] = now
 	if network_client and network_client.has_method("send_request_keyframe"):
 		network_client.send_request_keyframe(monitor_id)
+		return true
+	return false
+
+## Until a freshly-opened decoder produces its first frame, keep nudging the
+## host for a keyframe (the initial one can be lost, or arrive before the
+## decoder is listening). Gives up after a few seconds.
+func _handle_keyframe_retries() -> void:
+	if _decoder_pending_first.is_empty():
+		return
+	var now := Time.get_ticks_msec()
+	for mid in _decoder_pending_first.keys():
+		if now - int(_decoder_pending_first[mid]) > 5000:
+			_decoder_pending_first.erase(mid)
+			continue
+		_request_keyframe(mid, 400)
+
+## Test-harness frame capture: every 2 s, dump the latest decoded panel image
+## (so a screenshot can be pulled over adb `run-as` and inspected without a
+## headset). Saves to user:// = /data/data/<pkg>/files/. No-op unless enabled.
+func _handle_debug_capture(delta: float) -> void:
+	if not _debug_capture:
+		return
+	_debug_capture_accum += delta
+	if _debug_capture_accum < 2.0:
+		return
+	_debug_capture_accum = 0.0
+	_debug_capture_count += 1
+	var saved := false
+	for panel in screen_panels:
+		if is_instance_valid(panel) and panel.has_method("save_debug_png"):
+			if panel.save_debug_png("user://im2_panel_%d.png" % _debug_capture_count):
+				saved = true
+				break
+	# Also try the full rendered viewport (colour, end-to-end). May be blank in
+	# XR where rendering goes to the compositor; the panel image above is the
+	# reliable decode check.
+	var vp := get_viewport()
+	if vp:
+		var tex := vp.get_texture()
+		if tex:
+			var img := tex.get_image()
+			if img:
+				img.save_png("user://im2_view_%d.png" % _debug_capture_count)
+	print("[Immersive-2][TEST] debug capture #%d (panel=%s) state=%d decoders=%d" %
+		[_debug_capture_count, str(saved), current_state, _decoders.size()])
 
 func _close_decoder(monitor_id: int) -> void:
 	if _decoders.has(monitor_id):
@@ -1069,3 +1149,26 @@ func _load_config() -> void:
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
+		# Test harness (see _autoconnect_on_start docs). Writable over adb run-as.
+		_autoconnect_on_start = cfg.get_value("test", "autoconnect", false)
+		_debug_capture = cfg.get_value("test", "debug_capture", false)
+
+	_apply_cmdline_overrides()
+
+## Allow driving the client from adb without a headset:
+##   am start -n com.immersive2.vrclient/com.godot.game.GodotApp \
+##       --esa command_line "--im2-host=192.168.1.34,--im2-capture"
+## Recognised: --im2-host=IP, --im2-port=N, --im2-codec=N, --im2-capture.
+func _apply_cmdline_overrides() -> void:
+	var args := OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
+	for arg in args:
+		if arg.begins_with("--im2-host="):
+			host_ip = arg.get_slice("=", 1)
+			_autoconnect_on_start = true
+		elif arg.begins_with("--im2-port="):
+			host_tcp_port = int(arg.get_slice("=", 1))
+		elif arg.begins_with("--im2-codec="):
+			stream_codec = _resolve_codec(int(arg.get_slice("=", 1)))
+		elif arg == "--im2-capture":
+			_debug_capture = true

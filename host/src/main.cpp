@@ -290,6 +290,10 @@ int main(int argc, char* argv[]) {
         enc_config.fps          = (cfg.max_fps > 0)
                                       ? cfg.max_fps
                                       : static_cast<uint32_t>(display.refresh_rate);
+        // Keyframe/intra-refresh period ~0.5 s so a freshly-connected or
+        // recovering client reaches a full picture quickly (the encoder uses
+        // rolling intra-refresh, which heals over one gop_size span).
+        enc_config.gop_size     = std::max<uint32_t>(15, enc_config.fps / 2);
         enc_config.jpeg_quality = (cfg.jpeg_quality >= 10 && cfg.jpeg_quality <= 95)
                                       ? cfg.jpeg_quality : jpeg_quality;
         if (cfg.bitrate_kbps > 0) {

@@ -175,6 +175,15 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 	if _placeholder_label and _placeholder_label.visible:
 		_placeholder_label.hide()
 
+## Debug: save the latest decoded frame image to `path`. For the NV12 path this
+## is an L8 image of size (w, h*1.5) — the top 2/3 is the desktop in luma, so a
+## clean grayscale desktop means the decode is good; coloured/blocky noise means
+## it isn't. Used by the adb test harness in main.gd. Returns true on success.
+func save_debug_png(path: String) -> bool:
+	if screen_image == null:
+		return false
+	return screen_image.save_png(path) == OK
+
 ## Scale the panel up/down using thumbstick.
 ## Called from vr_input.gd when thumbstick Y is held while grip is pressed.
 func scale_panel(delta_scale: float) -> void:

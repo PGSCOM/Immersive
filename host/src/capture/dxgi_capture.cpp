@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <thread>
 #include <cstring>
 
 #ifdef _WIN32
@@ -93,47 +94,79 @@ public:
         capturing_ = true;
 
 #ifdef _WIN32
-        // Create D3D11 device
-        D3D_FEATURE_LEVEL feature_level;
-        HRESULT hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-            0, nullptr, 0, D3D11_SDK_VERSION,
-            &d3d_device_, &feature_level, &d3d_context_);
-
-        if (FAILED(hr)) {
-            std::cerr << "[DxgiCapture] Failed to create D3D11 device\n";
+        // Find the (adapter, output) pair for display_id by walking adapters
+        // exactly as enumerate_displays() does. We must NOT just use the default
+        // adapter: on machines with several GPUs or virtual display adapters
+        // (Parsec, IDD, etc.) the default D3D adapter often does not own the
+        // target monitor, and DuplicateOutput then fails with E_ACCESSDENIED
+        // (0x80070005). Creating the device on the adapter that actually owns
+        // the output is what makes duplication succeed.
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+            std::cerr << "[DxgiCapture] Failed to create DXGI factory\n";
             capturing_ = false;
             return false;
         }
 
-        // Get the DXGI output for the target display
-        ComPtr<IDXGIDevice> dxgi_device;
-        d3d_device_.As(&dxgi_device);
-
-        ComPtr<IDXGIAdapter> adapter;
-        dxgi_device->GetAdapter(&adapter);
-
-        ComPtr<IDXGIOutput> output;
-        ComPtr<IDXGIOutput1> output1;
-
+        ComPtr<IDXGIAdapter1> chosen_adapter;
+        ComPtr<IDXGIOutput>   chosen_output;
         UINT current_id = 0;
         bool found = false;
-        for (UINT i = 0; adapter->EnumOutputs(i, &output) != DXGI_ERROR_NOT_FOUND; ++i) {
-            if (current_id == display_id) {
-                output.As(&output1);
-                found = true;
-                break;
+        ComPtr<IDXGIAdapter1> adapter;
+        for (UINT ai = 0;
+             !found && factory->EnumAdapters1(ai, &adapter) != DXGI_ERROR_NOT_FOUND;
+             ++ai) {
+            ComPtr<IDXGIOutput> output;
+            for (UINT oi = 0;
+                 adapter->EnumOutputs(oi, &output) != DXGI_ERROR_NOT_FOUND;
+                 ++oi) {
+                if (current_id == display_id) {
+                    chosen_adapter = adapter;
+                    chosen_output = output;
+                    found = true;
+                    break;
+                }
+                current_id++;
             }
-            current_id++;
         }
 
-        if (!found || !output1) {
+        if (!found || !chosen_adapter || !chosen_output) {
             std::cerr << "[DxgiCapture] Display " << (int)display_id << " not found\n";
             capturing_ = false;
             return false;
         }
 
+        // Create the D3D11 device ON the owning adapter. With an explicit
+        // adapter the driver type must be D3D_DRIVER_TYPE_UNKNOWN.
+        D3D_FEATURE_LEVEL feature_level;
+        HRESULT hr = D3D11CreateDevice(
+            chosen_adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            0, nullptr, 0, D3D11_SDK_VERSION,
+            &d3d_device_, &feature_level, &d3d_context_);
+
+        if (FAILED(hr)) {
+            std::cerr << "[DxgiCapture] Failed to create D3D11 device on target adapter (0x"
+                      << std::hex << hr << ")\n";
+            capturing_ = false;
+            return false;
+        }
+
+        ComPtr<IDXGIOutput1> output1;
+        chosen_output.As(&output1);
+        if (!output1) {
+            std::cerr << "[DxgiCapture] Output does not support IDXGIOutput1\n";
+            capturing_ = false;
+            return false;
+        }
+
+        // DuplicateOutput can transiently return E_ACCESSDENIED during a display
+        // mode change, a secure/UAC desktop, or a GPU transition. Retry briefly
+        // before giving up — this is the documented, expected behaviour.
         hr = output1->DuplicateOutput(d3d_device_.Get(), &duplication_);
+        for (int attempt = 0; hr == E_ACCESSDENIED && attempt < 25; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            hr = output1->DuplicateOutput(d3d_device_.Get(), &duplication_);
+        }
         if (FAILED(hr)) {
             std::cerr << "[DxgiCapture] Failed to duplicate output (0x"
                       << std::hex << hr << ")\n";
@@ -142,7 +175,7 @@ public:
         }
 
         DXGI_OUTPUT_DESC desc;
-        output->GetDesc(&desc);
+        chosen_output->GetDesc(&desc);
         capture_width_ = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
         capture_height_ = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
 #endif
