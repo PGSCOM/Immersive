@@ -36,6 +36,24 @@ public class Im2VideoDecoder extends GodotPlugin {
         byte[] lastFrame;       // packed NV12, null when consumed
         int frameWidth;
         int frameHeight;
+        int submitCount;        // diagnostics
+        int outputCount;        // diagnostics
+    }
+
+    /** List the H.264 Annex-B NAL unit types present in an access unit (diagnostics). */
+    private static String nalTypes(byte[] d) {
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (int i = 0; i + 4 < d.length; i++) {
+            if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+                int t = d[i + 3] & 0x1f;
+                if (!first) sb.append(',');
+                sb.append(t);
+                first = false;
+                i += 2;
+            }
+        }
+        return sb.append(']').toString();
     }
 
     private final ConcurrentHashMap<Integer, StreamDecoder> streams =
@@ -87,6 +105,11 @@ public class Im2VideoDecoder extends GodotPlugin {
         StreamDecoder sd = streams.get(streamId);
         if (sd == null || data == null || data.length == 0) return false;
         try {
+            if (sd.submitCount < 12) {
+                Log.i(TAG, "submit AU #" + sd.submitCount + " size=" + data.length
+                        + " nals=" + nalTypes(data));
+            }
+            sd.submitCount++;
             int idx = sd.codec.dequeueInputBuffer(10_000);
             if (idx >= 0) {
                 ByteBuffer in = sd.codec.getInputBuffer(idx);
@@ -168,6 +191,12 @@ public class Im2VideoDecoder extends GodotPlugin {
                     byte[] nv12 = imageToNV12(img, sd);
                     synchronized (sd.frameLock) {
                         sd.lastFrame = nv12;
+                    }
+                    sd.outputCount++;
+                    if (sd.outputCount <= 5 || sd.outputCount % 60 == 0) {
+                        Log.i(TAG, "decoder output frame #" + sd.outputCount
+                                + " " + sd.frameWidth + "x" + sd.frameHeight
+                                + " bytes=" + nv12.length);
                     }
                     img.close();
                 }
