@@ -52,7 +52,7 @@ var passthrough_enabled: bool = false
 ## from a headset — the host would pick software MJPEG, which a mobile CPU
 ## cannot sustain at desktop resolution.
 var stream_codec: int = 0
-var stream_bitrate_kbps: int = 20000
+var stream_bitrate_kbps: int = 8000
 var stream_jpeg_quality: int = 70
 var stream_res_percent: int = 100   ## 100/75/50, -1 = auto (ideal)
 var stream_max_width: int = 0       ## computed target width; 0 = native
@@ -85,6 +85,9 @@ var _decoder_pending_first: Dictionary = {}
 
 ## Whether we already auto-fell back to MJPEG this session (avoids loops).
 var _codec_fallback_sent: bool = false
+
+## Monitors awaiting an IDR keyframe after a frame gap (Fase 3 recovery).
+var _awaiting_idr: Dictionary = {}
 
 # ---------------------------------------------------------------------------
 # Test/debug harness — driven from immersive2_config.cfg [test] section or
@@ -142,6 +145,7 @@ func _process(delta: float) -> void:
 	_update_foveation_focus()
 	_handle_keyframe_retries()
 	_handle_debug_capture(delta)
+	_update_decoders()
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -614,10 +618,15 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 		var dec := VideoDecoder.new()
 		if dec.open(codec, width, height):
 			_decoders[monitor_id] = dec
-			# Inter-frame codec just cold-started: demand a clean intra now and
-			# keep retrying (via _handle_keyframe_retries) until it decodes.
+			# Drop every frame until the first IDR: a fresh decoder cannot
+			# reference a P-frame with no prior I-frame context.
+			_awaiting_idr[monitor_id] = true
+			# Track that we're waiting for the first IDR. We do NOT send
+			# REQUEST_KEYFRAME: the host encoder always starts a stream with
+			# an IDR (force_keyframe_ = true on init), so the auto-GOP IDR
+			# will arrive within the first frame. Repeated requests trigger
+			# oversized forced IDRs that congest WiFi.
 			_decoder_pending_first[monitor_id] = Time.get_ticks_msec()
-			_request_keyframe(monitor_id, 0)
 		else:
 			_request_codec_fallback(codec)
 
@@ -677,19 +686,23 @@ func _on_stream_stopped(monitor_id: int) -> void:
 	_update_overlay_monitors()
 
 func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, height: int) -> void:
-	# H.264/HEVC/AV1: run through the hardware decoder first (output is NV12)
 	if _decoders.has(monitor_id):
 		var dec: VideoDecoder = _decoders[monitor_id]
+		# Fase 3: after a frame gap, skip non-IDR frames until clean intra arrives
+		if _awaiting_idr.get(monitor_id, false):
+			var is_kf := _is_keyframe(frame_data, dec._codec)
+			# Always log the result when awaiting an IDR (sparse, not every P-frame)
+			if is_kf or frame_data.size() > 50000:
+				print("[Main] awaiting_idr mon=%d size=%d is_kf=%s codec=%d" % [
+						monitor_id, frame_data.size(), str(is_kf), dec._codec])
+			if not is_kf:
+				return
+			print("[Main] IDR accepted, submitting to decoder")
+			_awaiting_idr.erase(monitor_id)
 		dec.submit(frame_data)
-		frame_data = dec.poll_frame()
-		if frame_data.is_empty():
-			return  # decoder hasn't produced a frame yet
-		# First successful decode for this stream: stop nagging for keyframes.
-		_decoder_pending_first.erase(monitor_id)
-		width = dec.get_width()
-		height = dec.get_height()
+		return
 
-	# Deliver frame to the panel showing this monitor
+	# MJPEG / RGBA path (no hardware decoder for this monitor)
 	var fallback: MeshInstance3D = null
 	for panel in screen_panels:
 		if not is_instance_valid(panel) or not panel.has_method("update_texture"):
@@ -702,12 +715,18 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 	if fallback:
 		fallback.update_texture(frame_data, width, height)
 
-## A frame was lost or dropped. For hardware (inter-frame) codecs, ask the host
-## for a fresh keyframe so the decoder recovers immediately instead of showing
-## artifacts until the next periodic keyframe. Throttled per monitor. MJPEG
-## needs nothing — every frame is independently decodable.
+## A frame was lost or dropped. For hardware (inter-frame) codecs, flush the
+## decoder and wait for the next automatic GOP keyframe from the host.
+## We do NOT send REQUEST_KEYFRAME here: the forced IDR it triggers is 4-5×
+## larger than the host's periodic auto-IDR, causing WiFi congestion that
+## makes packet loss even worse — a self-defeating feedback loop.
 func _on_frame_gap(monitor_id: int) -> void:
-	_request_keyframe(monitor_id, 250)
+	# After the first IDR is received, the hardware decoder uses error
+	# concealment for individual frame losses — setting _awaiting_idr here
+	# would drop all P-frames until the next IDR, causing visible flicker.
+	# Only flush during cold start (while still waiting for the first IDR).
+	if _decoders.has(monitor_id) and _awaiting_idr.get(monitor_id, false):
+		_decoders[monitor_id].flush()
 
 ## Ask the host for a fresh keyframe (intra), throttled per monitor. The host
 ## uses intra-refresh (no periodic IDR), so a decoder that opens mid-GOP — e.g.
@@ -726,18 +745,23 @@ func _request_keyframe(monitor_id: int, min_interval_ms: int = 250) -> bool:
 		return true
 	return false
 
-## Until a freshly-opened decoder produces its first frame, keep nudging the
-## host for a keyframe (the initial one can be lost, or arrive before the
-## decoder is listening). Gives up after a few seconds.
+## On cold-start, track freshly-opened decoders so we know an IDR is needed.
+## We send only ONE request on open; the host's auto-GOP IDR (every ~0.5 s)
+## handles recovery — repeated REQUEST_KEYFRAME triggers oversized forced IDRs
+## that congest WiFi and make everything worse. Clear the pending flag when
+## the IDR has been seen (or after a generous timeout).
 func _handle_keyframe_retries() -> void:
 	if _decoder_pending_first.is_empty():
 		return
 	var now := Time.get_ticks_msec()
 	for mid in _decoder_pending_first.keys():
-		if now - int(_decoder_pending_first[mid]) > 5000:
+		# The decoder received its first IDR once _awaiting_idr is cleared.
+		if not _awaiting_idr.has(mid):
 			_decoder_pending_first.erase(mid)
 			continue
-		_request_keyframe(mid, 400)
+		# Give up waiting after 10 s; the host's auto-GOP will supply an IDR.
+		if now - int(_decoder_pending_first[mid]) > 10000:
+			_decoder_pending_first.erase(mid)
 
 ## Test-harness frame capture: every 2 s, dump the latest decoded panel image
 ## (so a screenshot can be pulled over adb `run-as` and inspected without a
@@ -759,13 +783,15 @@ func _handle_debug_capture(delta: float) -> void:
 	# Also try the full rendered viewport (colour, end-to-end). May be blank in
 	# XR where rendering goes to the compositor; the panel image above is the
 	# reliable decode check.
-	var vp := get_viewport()
-	if vp:
-		var tex := vp.get_texture()
-		if tex:
-			var img := tex.get_image()
-			if img:
-				img.save_png("user://im2_view_%d.png" % _debug_capture_count)
+	# Viewport texture is not CPU-readable in XR/compositor mode; skip silently.
+	if not xr_interface or not xr_interface.is_initialized():
+		var vp := get_viewport()
+		if vp:
+			var tex := vp.get_texture()
+			if tex:
+				var img := tex.get_image()
+				if img:
+					img.save_png("user://im2_view_%d.png" % _debug_capture_count)
 	print("[Immersive-2][TEST] debug capture #%d (panel=%s) state=%d decoders=%d" %
 		[_debug_capture_count, str(saved), current_state, _decoders.size()])
 
@@ -773,11 +799,60 @@ func _close_decoder(monitor_id: int) -> void:
 	if _decoders.has(monitor_id):
 		_decoders[monitor_id].close()
 		_decoders.erase(monitor_id)
+	_awaiting_idr.erase(monitor_id)
 
 func _close_all_decoders() -> void:
 	for monitor_id in _decoders.keys():
 		_decoders[monitor_id].close()
 	_decoders.clear()
+	_awaiting_idr.clear()
+
+## Each frame: for every open hardware decoder that already has an ExternalTexture,
+## wire it to its panel (once) and schedule a render-thread texture update.
+func _update_decoders() -> void:
+	for monitor_id in _decoders:
+		var dec: VideoDecoder = _decoders[monitor_id]
+		if not dec.is_open():
+			continue
+		if not dec.has_external_texture():
+			continue
+		var panel := _find_panel_for_monitor(monitor_id)
+		if panel == null:
+			continue
+		if panel.has_method("is_using_external_texture") and not panel.is_using_external_texture():
+			panel.set_external_texture(dec.get_external_texture(), dec.get_width(), dec.get_height())
+		var mat := panel.material_override
+		if mat is ShaderMaterial:
+			dec.schedule_update(mat as ShaderMaterial)
+
+## Return the screen panel currently assigned to monitor_id, or null.
+func _find_panel_for_monitor(monitor_id: int) -> MeshInstance3D:
+	for panel in screen_panels:
+		if is_instance_valid(panel) and int(panel.get_meta("monitor_id", -1)) == monitor_id:
+			return panel
+	return null
+
+## Detect whether data begins with an IDR / intra NAL unit (Annex-B).
+## Used for Fase 3 gap recovery to skip inter frames until a clean intra arrives.
+func _is_keyframe(data: PackedByteArray, codec: int) -> bool:
+	var size := data.size()
+	if size < 5:
+		return false
+	var i := 0
+	while i < size - 3:
+		if data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 1:
+			var nal_byte := data[i + 3]
+			if codec == 0:  # H.264: NAL type 5 = IDR
+				if (nal_byte & 0x1f) == 5:
+					return true
+			elif codec == 1:  # HEVC: NAL types 16-23 = IDR/BLA/CRA
+				var nal_type := (nal_byte >> 1) & 0x3f
+				if nal_type >= 16 and nal_type <= 23:
+					return true
+			i += 3
+		else:
+			i += 1
+	return codec == 3  # AV1: assume keyframe (OBU detection complex)
 
 ## The host streams a codec we cannot decode here. Ask for the best codec we
 ## CAN decode: H.264 if the MediaCodec plugin is present (e.g. AV1 stream on
@@ -1145,7 +1220,7 @@ func _load_config() -> void:
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
-		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
+		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 8000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)

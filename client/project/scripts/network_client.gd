@@ -323,7 +323,8 @@ func _read_udp_packets() -> void:
 				"chunks": {},
 				"total": chunk_cnt,
 				"monitor_id": monitor_id,
-				"frame_num": frame_num
+				"frame_num": frame_num,
+				"created_ms": Time.get_ticks_msec()
 			}
 
 		_frame_buffer[frame_key]["chunks"][chunk_idx] = chunk_data
@@ -334,6 +335,8 @@ func _read_udp_packets() -> void:
 
 			# Clean up old frames periodically
 			_cleanup_old_frames(monitor_id, frame_num)
+
+var _frames_assembled: int = 0
 
 func _assemble_frame(frame_key: int) -> void:
 	var frame_info: Dictionary = _frame_buffer[frame_key]
@@ -359,20 +362,37 @@ func _assemble_frame(frame_key: int) -> void:
 		if frame_info["chunks"].has(i):
 			frame_data.append_array(frame_info["chunks"][i])
 
+	_frames_assembled += 1
+	# Log every large frame (potential IDR) and periodically for small ones.
+	if frame_data.size() > 50000:
+		print("[Net] LARGE frame assembled: mon=%d frame=%d chunks=%d size=%d" % [
+				monitor_id, frame_num, total, frame_data.size()])
+	elif _frames_assembled % 120 == 0:
+		print("[Net] frames assembled=%d last: mon=%d frame=%d size=%d buf_entries=%d" % [
+				_frames_assembled, monitor_id, frame_num, frame_data.size(), _frame_buffer.size()])
+
 	video_frame_received.emit(monitor_id, frame_data, _stream_width, _stream_height)
 	_frame_buffer.erase(frame_key)
 
 	# Acknowledge so the host's flow control can drop frames when we lag
 	send_frame_ack(monitor_id, frame_num)
 
-func _cleanup_old_frames(monitor_id: int, current_frame: int) -> void:
-	# Remove incomplete frames of this monitor older than 30 frames ago
-	# (increased from 10 to reduce chance of dropping late-arriving chunks)
+func _cleanup_old_frames(monitor_id: int, _current_frame: int) -> void:
+	# Time-based cleanup: remove partial frames older than 5 s.
+	# Avoids the old frame-count window (90 frames) from racing against a large
+	# IDR that takes ~0.5 s to transmit — a single delayed chunk would cause the
+	# 159-chunk IDR to be discarded before it finishes assembling.
+	var now := Time.get_ticks_msec()
 	var keys_to_remove: Array = []
 	for key in _frame_buffer.keys():
-		if _frame_buffer[key]["monitor_id"] == monitor_id and \
-				_frame_buffer[key]["frame_num"] < current_frame - 30:
-			keys_to_remove.append(key)
+		var entry = _frame_buffer[key]
+		if entry["monitor_id"] == monitor_id:
+			var age_ms: int = now - int(entry.get("created_ms", now))
+			if age_ms > 5000:
+				print("[Net] CLEANUP stale frame age=%dms: mon=%d frame=%d chunks=%d/%d" % [
+						age_ms, monitor_id, entry["frame_num"],
+						entry["chunks"].size(), entry["total"]])
+				keys_to_remove.append(key)
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)
 

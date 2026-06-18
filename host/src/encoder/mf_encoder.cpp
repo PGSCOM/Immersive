@@ -558,6 +558,22 @@ private:
         v.vt = VT_UI4;
         v.ulVal = config_.gop_size;
         codec_api_->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
+
+        // VBV (HRD) buffer size: limits how large a single IDR frame can be.
+        // Each IDR frame must fit in the buffer — with a small buffer, the
+        // encoder compresses the IDR more aggressively, producing fewer UDP
+        // chunks.  Fewer chunks = higher probability of the IDR arriving fully
+        // intact over a lossy WiFi link (every missing chunk => IDR discarded).
+        //
+        // Formula: 50 ms at the configured bitrate, capped at 600 kbits (75 KB
+        // = ~54 UDP chunks).  At 1% WiFi loss: (0.99)^54 ≈ 58% per IDR,
+        // meaning the client receives a usable IDR within ~0.5–1 s.
+        //
+        // Note: CODECAPI_AVEncCommonBufferSize is in bits; some MFTs silently
+        // ignore it in CBR mode (best-effort, no hard error expected).
+        v.vt  = VT_UI4;
+        v.ulVal = std::min<uint32_t>(config_.bitrate_kbps * 50u, 600000u);
+        codec_api_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
     }
 
     /// Pull the SPS/PPS (Annex-B) out of the current output media type so they

@@ -1,8 +1,8 @@
 ## Hardware video decoder wrapper for the Immersive-2 VR client.
 ##
 ## Wraps the Im2VideoDecoder Android plugin (MediaCodec) which decodes
-## H.264 / HEVC / AV1 access units to tightly packed NV12 frames that the
-## screen shader renders directly (is_yuv path).
+## H.264 / HEVC / AV1 access units and renders them zero-copy into an
+## ExternalTexture (GL_TEXTURE_EXTERNAL_OES via SurfaceTexture).
 ##
 ## On platforms without the plugin (desktop, or APK exported without the
 ## AAR) `is_codec_supported()` returns false and the caller is expected to
@@ -27,6 +27,8 @@ var _stream_id: int = -1
 var _codec: int = -1
 var _width: int = 0
 var _height: int = 0
+var _external_tex: ExternalTexture = null
+var _tex_transform: Projection = Projection.IDENTITY
 
 
 ## True when this platform could decode the given protocol codec.
@@ -36,6 +38,8 @@ static func is_codec_supported(codec: int) -> bool:
 
 
 ## Open a hardware decoder for the stream. Returns false when unsupported.
+## The plugin's create_with_surface() is called on the render thread so the
+## GL texture name is valid when it comes back; _external_tex is set there.
 func open(codec: int, width: int, height: int) -> bool:
 	close()
 	if not is_codec_supported(codec):
@@ -44,24 +48,40 @@ func open(codec: int, width: int, height: int) -> bool:
 	_plugin = Engine.get_singleton(PLUGIN_NAME)
 	_stream_id = _next_stream_id
 	_next_stream_id += 1
-
-	if not _plugin.create(_stream_id, CODEC_MIME[codec], width, height):
-		push_warning("[VideoDecoder] MediaCodec rejected %s (%dx%d)" %
-			[CODEC_MIME[codec], width, height])
-		_plugin = null
-		_stream_id = -1
-		return false
-
 	_codec = codec
 	_width = width
 	_height = height
-	print("[VideoDecoder] Opened %s decoder (%dx%d), stream id %d" %
-		[CODEC_MIME[codec], width, height, _stream_id])
+
+	var sid := _stream_id
+	var plug := _plugin
+	var mime: String = CODEC_MIME[codec]
+	RenderingServer.call_on_render_thread(func():
+		var gl_tex_id: int = plug.create_with_surface(sid, mime, width, height)
+		if gl_tex_id > 0:
+			_external_tex = ExternalTexture.new()
+			_external_tex.set_external_buffer_id(gl_tex_id)
+			_external_tex.size = Vector2(width, height)
+			print("[VideoDecoder] ExternalTexture ready: glTex=%d stream=%d" % [gl_tex_id, sid])
+		else:
+			push_warning("[VideoDecoder] create_with_surface failed for %s (%dx%d)" % [mime, width, height])
+	)
+	print("[VideoDecoder] Scheduling %s decoder (%dx%d), stream id %d" % [mime, width, height, _stream_id])
 	return true
 
 
 func is_open() -> bool:
 	return _plugin != null
+
+
+## True once the render-thread callback has created the ExternalTexture.
+func has_external_texture() -> bool:
+	return _external_tex != null
+
+func get_external_texture() -> ExternalTexture:
+	return _external_tex
+
+func get_tex_transform() -> Projection:
+	return _tex_transform
 
 
 ## Feed one encoded access unit to the decoder.
@@ -70,17 +90,33 @@ func submit(encoded: PackedByteArray) -> void:
 		_plugin.submit(_stream_id, encoded)
 
 
-## Newest decoded frame as packed NV12 (w*h*1.5 bytes), empty if none yet.
-## Frame dimensions may differ from the open() size (codec crop): query
-## get_width()/get_height() after a non-empty poll.
-func poll_frame() -> PackedByteArray:
-	if not _plugin:
-		return PackedByteArray()
-	var frame: PackedByteArray = _plugin.get_frame(_stream_id)
-	if not frame.is_empty():
-		_width = _plugin.get_frame_width(_stream_id)
-		_height = _plugin.get_frame_height(_stream_id)
-	return frame
+## Schedule a SurfaceTexture.updateTexImage() + transform matrix read on the
+## render thread, then push the updated tex_transform into the panel material.
+func schedule_update(material: ShaderMaterial) -> void:
+	if not _plugin or _stream_id < 0 or _external_tex == null:
+		return
+	var plug := _plugin
+	var sid := _stream_id
+	RenderingServer.call_on_render_thread(func():
+		if not is_instance_valid(material):
+			return
+		if plug.update_tex_image(sid):
+			var arr: PackedFloat32Array = plug.get_transform_matrix(sid)
+			if arr.size() == 16:
+				var proj := Projection(
+					Vector4(arr[0], arr[1], arr[2], arr[3]),
+					Vector4(arr[4], arr[5], arr[6], arr[7]),
+					Vector4(arr[8], arr[9], arr[10], arr[11]),
+					Vector4(arr[12], arr[13], arr[14], arr[15])
+				)
+				material.set_shader_parameter("tex_transform", proj)
+	)
+
+
+## Flush the MediaCodec input/output queues (call after a frame gap).
+func flush() -> void:
+	if _plugin and _stream_id >= 0:
+		_plugin.flush_decoder(_stream_id)
 
 
 func get_width() -> int:
@@ -97,3 +133,5 @@ func close() -> void:
 		_plugin = null
 	_stream_id = -1
 	_codec = -1
+	_external_tex = null
+	_tex_transform = Projection.IDENTITY

@@ -157,8 +157,10 @@ int main(int argc, char* argv[]) {
 
     // --- Initialize components ---
 
-    // 1. Screen capture
-    auto capture = immersive::create_dxgi_capture();
+    // 1. Screen capture — use Windows Graphics Capture (non-exclusive, works
+    //    alongside AnyDesk/GlideX/Sunshine); falls back to DXGI at runtime if
+    //    WGC is not supported (Windows < 10 1803).
+    auto capture = immersive::create_wgc_capture();
     auto displays = capture->enumerate_displays();
 
     std::cout << "[Host] Found " << displays.size() << " display(s):\n";
@@ -264,11 +266,15 @@ int main(int argc, char* argv[]) {
                              ActiveStream* ctx) {
         const uint8_t monitor_id = display.id;
 
-        auto stream_capture = immersive::create_dxgi_capture();
-        if (!stream_capture->start_capture(monitor_id)) {
-            std::cerr << "[Host] Failed to start capture on monitor "
-                      << (int)monitor_id << "\n";
-            return;
+        // WGC is non-exclusive and should never return E_ACCESSDENIED; the retry
+        // loop is a safety net for transient failures (mode changes, etc.).
+        auto stream_capture = immersive::create_wgc_capture();
+        while (!stream_capture->start_capture(monitor_id)) {
+            if (!g_running || ctx->stop) return;
+            std::cerr << "[Host] Capture unavailable on monitor " << (int)monitor_id
+                      << " — retrying in 3 s...\n";
+            for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         // --- Resolve effective settings (client config overrides CLI) ---
@@ -290,10 +296,12 @@ int main(int argc, char* argv[]) {
         enc_config.fps          = (cfg.max_fps > 0)
                                       ? cfg.max_fps
                                       : static_cast<uint32_t>(display.refresh_rate);
-        // Keyframe/intra-refresh period ~0.5 s so a freshly-connected or
-        // recovering client reaches a full picture quickly (the encoder uses
-        // rolling intra-refresh, which heals over one gop_size span).
-        enc_config.gop_size     = std::max<uint32_t>(15, enc_config.fps / 2);
+        // Shorter GOP = smaller, more frequent IDR keyframes.
+        // Each IDR is ~30-40% of the GOP bitrate budget. With WiFi packet loss,
+        // the probability of losing at least one chunk of a large IDR is very
+        // high; halving the chunk count roughly squares the success rate.
+        // fps/6 → 10 frames at 60 fps → IDR every ~170 ms (~50 chunks at 8 Mbps).
+        enc_config.gop_size     = std::max<uint32_t>(5, enc_config.fps / 6);
         enc_config.jpeg_quality = (cfg.jpeg_quality >= 10 && cfg.jpeg_quality <= 95)
                                       ? cfg.jpeg_quality : jpeg_quality;
         if (cfg.bitrate_kbps > 0) {

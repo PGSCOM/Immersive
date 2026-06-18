@@ -14,6 +14,7 @@ extends MeshInstance3D
 # ---------------------------------------------------------------------------
 
 const SCREEN_SHADER_PATH := "res://shaders/screen.gdshader"
+const SCREEN_EXTERNAL_SHADER_PATH := "res://shaders/screen_external.gdshader"
 const DEFAULT_CURVATURE := 0.18
 const DEFAULT_FOVEATION_STRENGTH := 0.55
 
@@ -35,6 +36,9 @@ var panel_height: float = 0.9
 
 ## Whether the screen is currently receiving frames.
 var is_active: bool = false
+
+## Whether this panel is in zero-copy ExternalTexture mode (Android HW decoder).
+var _using_external_texture: bool = false
 
 ## Current latency (ms) displayed in corner.
 var _latency_ms: float = 0.0
@@ -100,6 +104,40 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 		_placeholder_label.hide()
 	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m" %
 		[width, height, panel_width, panel_height])
+
+## Returns true when the panel is using the zero-copy ExternalTexture path.
+func is_using_external_texture() -> bool:
+	return _using_external_texture
+
+## Switch this panel to the zero-copy ExternalTexture path (Android HW decoder).
+## Replaces material_override with screen_external.gdshader bound to ext_tex.
+func set_external_texture(ext_tex: ExternalTexture, width: int, height: int) -> void:
+	screen_width = width
+	screen_height = height
+	var aspect := float(width) / float(height)
+	panel_height = panel_width / aspect
+	if mesh is PlaneMesh:
+		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
+	_update_latency_label_anchor()
+
+	var shader := load(SCREEN_EXTERNAL_SHADER_PATH) as Shader
+	var mat := ShaderMaterial.new()
+	if shader:
+		mat.shader = shader
+	mat.set_shader_parameter("screen_external", ext_tex)
+	mat.set_shader_parameter("tex_size", Vector2(width, height))
+	mat.set_shader_parameter("tex_transform", Projection.IDENTITY)
+	mat.set_shader_parameter("curvature", _curvature_amount if _curved_mode else 0.0)
+	mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
+	mat.set_shader_parameter("foveation_strength", _foveation_strength)
+	mat.set_shader_parameter("gaze_uv", _foveation_focus_uv)
+	material_override = mat
+
+	_using_external_texture = true
+	is_active = true
+	if _placeholder_label:
+		_placeholder_label.hide()
+	print("[ScreenPanel] External texture mode: %dx%d" % [width, height])
 
 ## Enable/disable curved mode and set curvature amount.
 func set_curvature(enabled: bool, amount: float) -> void:

@@ -54,7 +54,14 @@ public:
     virtual bool is_capturing() const = 0;
 };
 
-/// Create a DXGI Desktop Duplication capture instance
+/// Create a DXGI Desktop Duplication capture instance (exclusive, may fail
+/// with E_ACCESSDENIED if another process holds the Desktop Duplication handle).
 std::unique_ptr<IScreenCapture> create_dxgi_capture();
+
+/// Create a Windows Graphics Capture instance (Win10 1803+, non-exclusive —
+/// works alongside screen-sharing and remote-desktop tools).
+/// Returns a WgcCapture; call start_capture() which falls back to
+/// create_dxgi_capture() at runtime if WGC is not supported.
+std::unique_ptr<IScreenCapture> create_wgc_capture();
 
 }  // namespace immersive

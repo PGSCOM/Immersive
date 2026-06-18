@@ -17,6 +17,7 @@ set(PROTOCOL_DIR "${CMAKE_SOURCE_DIR}/../protocol")
 # Sources
 set(CAPTURE_SOURCES
     src/capture/dxgi_capture.cpp
+    src/capture/wgc_capture.cpp
 )
 
 set(ENCODER_SOURCES
@@ -79,6 +80,7 @@ if(WIN32)
         ole32
         avrt
         setupapi
+        windowsapp          # Windows.Graphics.Capture (WGC) WinRT API
     )
     target_compile_definitions(immersive2_host PRIVATE
         WIN32_LEAN_AND_MEAN
@@ -86,9 +88,13 @@ if(WIN32)
         UNICODE
         _UNICODE
         _CRT_SECURE_NO_WARNINGS   # Suppress fopen/sprintf deprecation (stb_image_write)
-        _WIN32_WINNT=0x0602       # Windows 8+ for MFTEnumEx, WASAPI loopback
-        WINVER=0x0602
+        _WIN32_WINNT=0x0A00       # Windows 10+ required for WGC (1803/build 17134)
+        WINVER=0x0A00
     )
+    # C++/WinRT needs /std:c++17 (already set) and the winrt/ header path.
+    # The Windows SDK ships these under Include/<ver>/cppwinrt; MSVC finds them
+    # automatically via the SDK integration — no extra include_directories needed.
+    target_compile_options(immersive2_host PRIVATE /await)
 endif()
 
 if(NOT WIN32)
