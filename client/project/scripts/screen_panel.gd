@@ -14,14 +14,8 @@ extends MeshInstance3D
 # ---------------------------------------------------------------------------
 
 const SCREEN_SHADER_PATH := "res://shaders/screen.gdshader"
-const SCREEN_EXTERNAL_SHADER_PATH := "res://shaders/screen_external.gdshader"
 const DEFAULT_CURVATURE := 0.18
 const DEFAULT_FOVEATION_STRENGTH := 0.55
-
-## Material that samples the hardware decoder's external (OES) texture. Created
-## lazily on first attach (Android only) so the samplerExternalOES shader never
-## reaches a desktop GLES3 compile.
-var _external_material: ShaderMaterial = null
 
 ## Screen texture that receives decoded frames.
 var screen_texture: ImageTexture
@@ -81,10 +75,8 @@ func _process(_delta: float) -> void:
 # Public API
 # ---------------------------------------------------------------------------
 
-## Set the resolution and update the panel aspect ratio. The live frame texture
-## is bound separately via [method attach_external_texture]; the placeholder
-## stays visible until the first decoded frame arrives.
-func set_resolution(width: int, height: int, _codec: int = 0) -> void:
+## Set the resolution and update the panel aspect ratio.
+func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	screen_width  = width
 	screen_height = height
 
@@ -97,9 +89,15 @@ func set_resolution(width: int, height: int, _codec: int = 0) -> void:
 		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
 	_update_latency_label_anchor()
 
+	# Create a properly-sized texture
+	screen_image = Image.create(width, height, false, Image.FORMAT_RGBA8)
+	screen_image.fill(Color(0.1, 0.1, 0.1, 1.0))
+	screen_texture = ImageTexture.create_from_image(screen_image)
+	_apply_texture()
+
 	is_active = true
-	if material_override is ShaderMaterial:
-		(material_override as ShaderMaterial).set_shader_parameter("tex_size", Vector2(width, height))
+	if _placeholder_label:
+		_placeholder_label.hide()
 	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m" %
 		[width, height, panel_width, panel_height])
 
@@ -119,46 +117,63 @@ func set_foveation_focus_uv(uv: Vector2) -> void:
 	if material_override is ShaderMaterial:
 		(material_override as ShaderMaterial).set_shader_parameter("gaze_uv", _foveation_focus_uv)
 
-## Bind the hardware decoder's ExternalTexture (GL_TEXTURE_EXTERNAL_OES) to the
-## panel and switch to the external-sampler material. The decoder updates the
-## texture on the render thread, so no per-frame frame data is pushed here.
-func attach_external_texture(ext_tex: Texture2D, width: int, height: int) -> void:
-	if ext_tex == null:
+## Update the screen texture with new video frame data.
+## frame_data may be:
+##   - JPEG bytes (from MJPEG software encoder): decoded via Image.load_jpg_from_buffer
+##   - Raw RGBA bytes (legacy path)
+func update_texture(frame_data: PackedByteArray, width: int, height: int) -> void:
+	if not is_active:
 		return
-	screen_width = width
-	screen_height = height
 
-	var mat := _ensure_external_material()
-	mat.set_shader_parameter("screen_external", ext_tex)
-	mat.set_shader_parameter("tex_size", Vector2(width, height))
-	material_override = mat
-	_apply_curvature_to_material()
-	_apply_foveation_to_material()
+	# JPEG (MJPEG path) — detected by magic bytes FF D8 FF
+	var looks_jpeg: bool = frame_data.size() >= 3 \
+		and frame_data[0] == 0xFF and frame_data[1] == 0xD8 and frame_data[2] == 0xFF
+	var img := Image.new()
+	var err: int = img.load_jpg_from_buffer(frame_data) if looks_jpeg else ERR_INVALID_DATA
+	if err == OK:
+		# load_jpg returns RGB8; convert so the texture format stays stable
+		if img.get_format() != Image.FORMAT_RGBA8:
+			img.convert(Image.FORMAT_RGBA8)
+		# Mipmaps let the anisotropic sampler resolve fine text without shimmer.
+		img.generate_mipmaps()
+		screen_image = img
+		if material_override is ShaderMaterial:
+			(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
+	else:
+		# Log decode errors to help diagnose black-screen issues
+		if looks_jpeg:
+			print("[ScreenPanel] JPEG decode error (", err, ") for ", frame_data.size(), " bytes")
+		# Fallback: treat as raw RGBA or YUV NV12 bytes
+		if frame_data.size() == int(width * height * 1.5):
+			# YUV NV12 (from MediaCodec) -> shader handles YUV decode
+			var yuv_height := int(height * 1.5)
+			screen_image = Image.create_from_data(width, yuv_height, false, Image.FORMAT_L8, frame_data)
+			if material_override is ShaderMaterial:
+				(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 1)
+		elif frame_data.size() >= width * height * 4:
+			# RAW RGBA
+			screen_image = Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, frame_data)
+			screen_image.generate_mipmaps()
+			if material_override is ShaderMaterial:
+				(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
+		else:
+			return
 
-	is_active = true
-	if _placeholder_label:
+	# ImageTexture.update() requires identical size and format; otherwise
+	# the texture must be recreated (e.g. resolution change, RGBA<->L8).
+	if screen_texture \
+			and screen_texture.get_width() == screen_image.get_width() \
+			and screen_texture.get_height() == screen_image.get_height() \
+			and screen_texture.get_format() == screen_image.get_format() \
+			and _texture_has_mipmaps == screen_image.has_mipmaps():
+		screen_texture.update(screen_image)
+	else:
+		screen_texture = ImageTexture.create_from_image(screen_image)
+		_texture_has_mipmaps = screen_image.has_mipmaps()
+		_apply_texture()
+
+	if _placeholder_label and _placeholder_label.visible:
 		_placeholder_label.hide()
-
-## Update the SurfaceTexture transform (column-major 4x4 from MediaCodec) the
-## external shader applies to sample coordinates (handles the GL flip + crop).
-func set_texture_transform(m: PackedFloat32Array) -> void:
-	if m.size() < 16 or not (material_override is ShaderMaterial):
-		return
-	var proj := Projection(
-		Vector4(m[0], m[1], m[2], m[3]),
-		Vector4(m[4], m[5], m[6], m[7]),
-		Vector4(m[8], m[9], m[10], m[11]),
-		Vector4(m[12], m[13], m[14], m[15]))
-	(material_override as ShaderMaterial).set_shader_parameter("tex_transform", proj)
-
-func _ensure_external_material() -> ShaderMaterial:
-	if _external_material == null:
-		_external_material = ShaderMaterial.new()
-		var shader := load(SCREEN_EXTERNAL_SHADER_PATH) as Shader
-		if shader:
-			_external_material.shader = shader
-		_external_material.set_shader_parameter("tex_transform", Projection())
-	return _external_material
 
 ## Scale the panel up/down using thumbstick.
 ## Called from vr_input.gd when thumbstick Y is held while grip is pressed.
