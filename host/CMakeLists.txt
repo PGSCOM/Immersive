@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(Immersive2Host VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Threads REQUIRED)
@@ -91,10 +91,9 @@ if(WIN32)
         _WIN32_WINNT=0x0A00       # Windows 10+ required for WGC (1803/build 17134)
         WINVER=0x0A00
     )
-    # C++/WinRT needs /std:c++17 (already set) and the winrt/ header path.
-    # The Windows SDK ships these under Include/<ver>/cppwinrt; MSVC finds them
-    # automatically via the SDK integration — no extra include_directories needed.
-    target_compile_options(immersive2_host PRIVATE /await)
+    # C++/WinRT uses standard C++20 coroutines by default.
+    # The Windows SDK ships winrt/ headers under Include/<ver>/cppwinrt; MSVC
+    # finds them automatically via SDK integration — no extra include_dirs needed.
 endif()
 
 if(NOT WIN32)
