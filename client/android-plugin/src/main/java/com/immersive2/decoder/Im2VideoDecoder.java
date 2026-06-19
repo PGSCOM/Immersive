@@ -87,32 +87,38 @@ public class Im2VideoDecoder extends GodotPlugin {
     // -----------------------------------------------------------------------
 
     /**
-     * Create a zero-copy Surface decoder for the given stream.
+     * Create a zero-copy Surface decoder for the given stream using Godot's
+     * own GL texture (obtained from ExternalTexture.get_external_buffer_id()).
      *
      * MUST be called from Godot's render thread (call_on_render_thread) because
-     * glGenTextures requires an active GL context.
+     * GL operations require an active GL context.
+     *
+     * The caller (GDScript) creates an ExternalTexture, obtains its GL texture ID
+     * via get_external_buffer_id(), and passes it here. MediaCodec then decodes
+     * directly into that texture, which Godot already knows how to render.
+     * This avoids the broken set_external_buffer_id() path where Godot cannot
+     * see a GL texture it did not create itself.
      *
      * @param streamId  arbitrary integer key used to identify this stream
+     * @param glTexId   Godot's GL_TEXTURE_EXTERNAL_OES texture name (from ExternalTexture)
      * @param mime      "video/avc", "video/hevc", or "video/av01"
      * @param width     expected frame width in pixels
      * @param height    expected frame height in pixels
-     * @return          the GL texture name (>0) to attach to an ExternalTexture,
-     *                  or 0 on failure
+     * @return          true on success, false on failure
      */
     @UsedByGodot
-    public int create_with_surface(int streamId, String mime, int width, int height) {
+    public boolean create_with_surface(int streamId, int glTexId, String mime, int width, int height) {
         release_decoder(streamId);
         try {
-            // --- Allocate OES texture ---
-            int[] textures = new int[1];
-            GLES30.glGenTextures(1, textures, 0);
-            int texName = textures[0];
-            if (texName == 0) {
-                Log.w(TAG, "glGenTextures failed for stream=" + streamId);
-                return 0;
+            if (glTexId <= 0) {
+                Log.w(TAG, "create_with_surface: invalid glTexId=" + glTexId + " for stream=" + streamId);
+                return false;
             }
 
-            GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texName);
+            // Set OES sampling parameters on Godot's texture. Godot creates the
+            // texture but does not configure these; we must set them before
+            // SurfaceTexture attaches to it.
+            GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, glTexId);
             GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
                     GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE);
             GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
@@ -123,8 +129,8 @@ public class Im2VideoDecoder extends GodotPlugin {
                     GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR);
             GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
 
-            // --- SurfaceTexture + Surface ---
-            SurfaceTexture st = new SurfaceTexture(texName);
+            // --- SurfaceTexture + Surface using Godot's GL texture ---
+            SurfaceTexture st = new SurfaceTexture(glTexId);
             st.setDefaultBufferSize(width, height);
             Surface surf = new Surface(st);
 
@@ -146,7 +152,7 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.codec = codec;
             sd.surfaceTexture = st;
             sd.surface = surf;
-            sd.glTexName = texName;
+            sd.glTexName = glTexId;
             sd.frameWidth = width;
             sd.frameHeight = height;
             sd.startTimeNs = System.nanoTime();
@@ -169,12 +175,12 @@ public class Im2VideoDecoder extends GodotPlugin {
             streams.put(streamId, sd);
             Log.i(TAG, "Surface decoder created: stream=" + streamId
                     + " mime=" + mime + " " + width + "x" + height
-                    + " glTex=" + texName);
-            return texName;
+                    + " glTex=" + glTexId + " (Godot-owned)");
+            return true;
 
         } catch (Exception e) {
             Log.w(TAG, "create_with_surface failed for stream=" + streamId + ": " + e);
-            return 0;
+            return false;
         }
     }
 
@@ -312,10 +318,8 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.callbackThread.quitSafely();
             sd.callbackThread = null;
         }
-        // The GL texture was created on the render thread; deleting it there would
-        // require a render-thread callback. Leaving it orphaned is acceptable since
-        // Godot's ExternalTexture lifecycle already manages the GL object lifetime
-        // when the panel is destroyed.
+        // The GL texture is Godot-owned (passed in via create_with_surface). Godot's
+        // ExternalTexture manages its lifetime; we must not delete it here.
         Log.i(TAG, "release_decoder: stream=" + streamId);
     }
 

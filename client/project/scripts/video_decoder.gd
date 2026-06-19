@@ -53,8 +53,10 @@ func open(codec: int, width: int, height: int) -> bool:
 	_width = width
 	_height = height
 
-	# Allocate the ExternalTexture on the main thread so _external_tex is
-	# always written and read on the same thread (avoiding GDScript race).
+	# Allocate the ExternalTexture on the main thread — Godot manages this GL
+	# texture internally. We then pass its GL ID to Java so MediaCodec decodes
+	# directly into the texture Godot already knows about (avoids the broken
+	# set_external_buffer_id path where Godot cannot see externally-created textures).
 	_external_tex = ExternalTexture.new()
 	_external_tex.size = Vector2(width, height)
 
@@ -63,10 +65,16 @@ func open(codec: int, width: int, height: int) -> bool:
 	var plug := _plugin
 	var mime: String = CODEC_MIME[codec]
 	RenderingServer.call_on_render_thread(func():
-		var gl_tex_id: int = plug.create_with_surface(sid, mime, width, height)
-		if gl_tex_id > 0:
-			ext_tex.set_external_buffer_id(gl_tex_id)
-			print("[VideoDecoder] ExternalTexture ready: glTex=%d stream=%d" % [gl_tex_id, sid])
+		# get_external_buffer_id() returns the GL texture Godot created for this
+		# ExternalTexture. We pass it to Java so SurfaceTexture decodes into it.
+		var gl_tex_id: int = ext_tex.get_external_buffer_id()
+		print("[VideoDecoder] Godot ExternalTexture glTex=%d stream=%d" % [gl_tex_id, sid])
+		if gl_tex_id <= 0:
+			push_warning("[VideoDecoder] ExternalTexture not ready (glTex=0) for stream=%d" % sid)
+			return
+		var ok: bool = plug.create_with_surface(sid, gl_tex_id, mime, width, height)
+		if ok:
+			print("[VideoDecoder] Decoder ready: glTex=%d stream=%d" % [gl_tex_id, sid])
 		else:
 			push_warning("[VideoDecoder] create_with_surface failed for %s (%dx%d)" % [mime, width, height])
 	)
