@@ -39,8 +39,8 @@ static func is_codec_supported(codec: int) -> bool:
 
 ## Open a hardware decoder for the stream. Returns false when unsupported.
 ## ExternalTexture is created on the main thread (safe for has_external_texture()
-## checks), then set_external_buffer_id() is called from the render thread once
-## the GL texture name is known (RenderingServer routes it thread-safely).
+## checks), then get_external_texture_id() is read from the render thread to obtain
+## the OES GL texture name, which is handed to MediaCodec via create_with_surface().
 func open(codec: int, width: int, height: int) -> bool:
 	close()
 	if not is_codec_supported(codec):
@@ -65,9 +65,12 @@ func open(codec: int, width: int, height: int) -> bool:
 	var plug := _plugin
 	var mime: String = CODEC_MIME[codec]
 	RenderingServer.call_on_render_thread(func():
-		# get_external_buffer_id() returns the GL texture Godot created for this
-		# ExternalTexture. We pass it to Java so SurfaceTexture decodes into it.
-		var gl_tex_id: int = ext_tex.get_external_buffer_id()
+		# get_external_texture_id() lazily allocates Godot's GL_TEXTURE_EXTERNAL_OES
+		# texture (via _ensure_created()) and returns its glGenTextures name. We pass
+		# that name to Java so SurfaceTexture decodes straight into the texture Godot
+		# samples in the shader. (NOTE: the getter is get_external_texture_id — there is
+		# NO get_external_buffer_id; set_external_buffer_id is the HardwareBuffer setter.)
+		var gl_tex_id: int = ext_tex.get_external_texture_id()
 		print("[VideoDecoder] Godot ExternalTexture glTex=%d stream=%d" % [gl_tex_id, sid])
 		if gl_tex_id <= 0:
 			push_warning("[VideoDecoder] ExternalTexture not ready (glTex=0) for stream=%d" % sid)

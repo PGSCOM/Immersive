@@ -88,13 +88,13 @@ public class Im2VideoDecoder extends GodotPlugin {
 
     /**
      * Create a zero-copy Surface decoder for the given stream using Godot's
-     * own GL texture (obtained from ExternalTexture.get_external_buffer_id()).
+     * own GL texture (obtained from ExternalTexture.get_external_texture_id()).
      *
      * MUST be called from Godot's render thread (call_on_render_thread) because
      * GL operations require an active GL context.
      *
      * The caller (GDScript) creates an ExternalTexture, obtains its GL texture ID
-     * via get_external_buffer_id(), and passes it here. MediaCodec then decodes
+     * via get_external_texture_id(), and passes it here. MediaCodec then decodes
      * directly into that texture, which Godot already knows how to render.
      * This avoids the broken set_external_buffer_id() path where Godot cannot
      * see a GL texture it did not create itself.
