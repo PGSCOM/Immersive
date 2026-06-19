@@ -101,7 +101,7 @@ jobs:
       - name: Install Godot headless and templates
         run: |
           set -euo pipefail
-          GODOT_VERSION="4.7.0"
+          GODOT_VERSION="4.7"
           GODOT_RELEASE="stable"
           GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
           GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
