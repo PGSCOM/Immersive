@@ -7,6 +7,7 @@ import android.opengl.GLES11Ext;
 import android.opengl.GLES30;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
@@ -52,12 +53,17 @@ public class Im2VideoDecoder extends GodotPlugin {
         volatile boolean frameAvailable = false;
         float[] transformMatrix = new float[16];
         long startTimeNs;
+        // Dedicated thread for onFrameAvailableListener callbacks — avoids
+        // dependency on the Android UI thread, which is blocked by the XR event
+        // loop on PicoOS and never processes main-Looper messages in time.
+        HandlerThread callbackThread;
 
         // Diagnostics
         int frameWidth;
         int frameHeight;
         int submitCount;
         int outputCount;
+        int consumeCount;
     }
 
     private final ConcurrentHashMap<Integer, StreamDecoder> streams =
@@ -145,12 +151,20 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.frameHeight = height;
             sd.startTimeNs = System.nanoTime();
 
-            // Must use a Handler tied to the main Looper: create_with_surface() runs on
-            // Godot's render thread, which has no Android Looper. Without a Handler,
-            // SurfaceTexture tries to use Looper.myLooper() which returns null there,
-            // and the callback is silently dropped — frameAvailable would never be set.
-            Handler mainHandler = new Handler(Looper.getMainLooper());
-            st.setOnFrameAvailableListener(t -> sd.frameAvailable = true, mainHandler);
+            // Use a dedicated HandlerThread rather than the Android UI thread (main
+            // Looper). On PicoOS the UI thread is occupied by the OpenXR event loop
+            // and processes very few messages per second, causing onFrameAvailable
+            // callbacks to arrive tens of frames late — or never — making
+            // frameAvailable permanently false and the decoded texture appear black.
+            HandlerThread ht = new HandlerThread("Im2FrameAvail-" + streamId);
+            ht.start();
+            sd.callbackThread = ht;
+            st.setOnFrameAvailableListener(t -> {
+                if (!sd.frameAvailable) {
+                    Log.d(TAG, "onFrameAvailable stream=" + streamId);
+                }
+                sd.frameAvailable = true;
+            }, new Handler(ht.getLooper()));
 
             streams.put(streamId, sd);
             Log.i(TAG, "Surface decoder created: stream=" + streamId
@@ -224,6 +238,10 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.frameAvailable = false;
             sd.surfaceTexture.updateTexImage();
             sd.surfaceTexture.getTransformMatrix(sd.transformMatrix);
+            sd.consumeCount++;
+            if (sd.consumeCount <= 5 || sd.consumeCount % 60 == 0) {
+                Log.i(TAG, "consumed frame #" + sd.consumeCount + " stream=" + streamId);
+            }
             return true;
         } catch (Exception e) {
             Log.w(TAG, "update_tex_image failed for stream=" + streamId + ": " + e);
@@ -290,6 +308,10 @@ public class Im2VideoDecoder extends GodotPlugin {
         try {
             if (sd.surfaceTexture != null) sd.surfaceTexture.release();
         } catch (Exception ignored) {}
+        if (sd.callbackThread != null) {
+            sd.callbackThread.quitSafely();
+            sd.callbackThread = null;
+        }
         // The GL texture was created on the render thread; deleting it there would
         // require a render-thread callback. Leaving it orphaned is acceptable since
         // Godot's ExternalTexture lifecycle already manages the GL object lifetime
