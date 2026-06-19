@@ -38,8 +38,9 @@ static func is_codec_supported(codec: int) -> bool:
 
 
 ## Open a hardware decoder for the stream. Returns false when unsupported.
-## The plugin's create_with_surface() is called on the render thread so the
-## GL texture name is valid when it comes back; _external_tex is set there.
+## ExternalTexture is created on the main thread (safe for has_external_texture()
+## checks), then set_external_buffer_id() is called from the render thread once
+## the GL texture name is known (RenderingServer routes it thread-safely).
 func open(codec: int, width: int, height: int) -> bool:
 	close()
 	if not is_codec_supported(codec):
@@ -52,15 +53,19 @@ func open(codec: int, width: int, height: int) -> bool:
 	_width = width
 	_height = height
 
+	# Allocate the ExternalTexture on the main thread so _external_tex is
+	# always written and read on the same thread (avoiding GDScript race).
+	_external_tex = ExternalTexture.new()
+	_external_tex.size = Vector2(width, height)
+
+	var ext_tex := _external_tex
 	var sid := _stream_id
 	var plug := _plugin
 	var mime: String = CODEC_MIME[codec]
 	RenderingServer.call_on_render_thread(func():
 		var gl_tex_id: int = plug.create_with_surface(sid, mime, width, height)
 		if gl_tex_id > 0:
-			_external_tex = ExternalTexture.new()
-			_external_tex.set_external_buffer_id(gl_tex_id)
-			_external_tex.size = Vector2(width, height)
+			ext_tex.set_external_buffer_id(gl_tex_id)
 			print("[VideoDecoder] ExternalTexture ready: glTex=%d stream=%d" % [gl_tex_id, sid])
 		else:
 			push_warning("[VideoDecoder] create_with_surface failed for %s (%dx%d)" % [mime, width, height])
