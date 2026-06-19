@@ -18,6 +18,17 @@ const SCREEN_EXTERNAL_SHADER_PATH := "res://shaders/screen_external.gdshader"
 const DEFAULT_CURVATURE := 0.18
 const DEFAULT_FOVEATION_STRENGTH := 0.55
 
+## Texture-orientation compensation for the zero-copy ExternalTexture (OES) path.
+## The MediaCodec→SurfaceTexture→OES frame is vertically mirrored relative to
+## Godot's top-left UV convention, so the screen_external shader samples with
+## flip_y on (and flip_x off). This is purely a TEXTURE-sampling concern: it
+## describes how the decoded pixels sit in the GL external texture, NOT where the
+## panel is in space. It is deliberately NOT applied to uv_to_pixel() — the
+## controller→mouse mapping is geometric and assumes an upright display. Tune
+## these until the panel reads upright and un-mirrored on a new device/driver.
+const DISPLAY_FLIP_X := false
+const DISPLAY_FLIP_Y := true
+
 ## Screen texture that receives decoded frames.
 var screen_texture: ImageTexture
 ## Current screen image.
@@ -127,6 +138,8 @@ func set_external_texture(ext_tex: ExternalTexture, width: int, height: int) -> 
 	mat.set_shader_parameter("screen_external", ext_tex)
 	mat.set_shader_parameter("tex_size", Vector2(width, height))
 	mat.set_shader_parameter("tex_transform", Projection.IDENTITY)
+	mat.set_shader_parameter("flip_x", 1 if DISPLAY_FLIP_X else 0)
+	mat.set_shader_parameter("flip_y", 1 if DISPLAY_FLIP_Y else 0)
 	mat.set_shader_parameter("curvature", _curvature_amount if _curved_mode else 0.0)
 	mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
 	mat.set_shader_parameter("foveation_strength", _foveation_strength)
@@ -346,7 +359,14 @@ func _local_to_uv(local_pos: Vector3) -> Vector2:
 
 	return Vector2(u, v)
 
-## Convert UV coordinates to pixel coordinates on the screen.
+## Convert panel UV coordinates to desktop pixel coordinates for mouse input.
+## This is a pure geometric mapping: the panel is set up so panel-UV (0,0) is the
+## visual top-left and the display is corrected to show the desktop upright (see
+## DISPLAY_FLIP_*), so UV maps straight to desktop pixels with (0,0)=top-left.
+## The shader's texture-flip compensation is deliberately NOT applied here — it
+## corrects how the decoded frame sits inside the OES texture, which is invisible
+## to this geometric mapping. Folding it in would send the cursor to the opposite
+## pixel from where the controller points.
 func uv_to_pixel(uv: Vector2) -> Vector2i:
 	return Vector2i(
 		int(uv.x * screen_width),

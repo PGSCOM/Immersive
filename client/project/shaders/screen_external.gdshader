@@ -15,6 +15,16 @@ uniform samplerExternalOES screen_external : source_color, filter_linear;
 // SurfaceTexture transform (handles the GL vertical flip + any crop scale).
 uniform mat4 tex_transform;
 
+// Orientation compensation for how the MediaCodec→SurfaceTexture→OES frame is
+// laid out in the external texture vs. Godot's top-left UV convention. On the
+// Pico the decoded frame is vertically mirrored, so flip_y is on by default and
+// flip_x is off. This is purely a TEXTURE-sampling concern — it is NOT mirrored
+// into the controller→mouse mapping (screen_panel.gd::uv_to_pixel), which is a
+// separate geometric mapping that assumes an upright display. 1 = flip that
+// axis, 0 = leave it. Tune until the panel reads upright and un-mirrored.
+uniform int flip_x : hint_range(0, 1) = 0;
+uniform int flip_y : hint_range(0, 1) = 1;
+
 // Stream resolution in pixels (samplerExternalOES has no textureSize()).
 uniform vec2 tex_size = vec2(1920.0, 1080.0);
 
@@ -32,7 +42,14 @@ uniform float foveation_inner_radius : hint_range(0.05, 0.5) = 0.18;
 uniform float foveation_outer_radius : hint_range(0.2, 1.0) = 0.72;
 
 vec4 sample_screen_color(vec2 sample_uv) {
-	vec2 tc = (tex_transform * vec4(sample_uv, 0.0, 1.0)).xy;
+	// Apply the orientation correction BEFORE the SurfaceTexture transform.
+	// Pre-rotating the sample UV by 180° (flip both axes) exactly cancels a
+	// 180°-rotated display regardless of what tex_transform contains, because
+	// the rotation is its own inverse.
+	vec2 oriented = vec2(
+		flip_x == 1 ? 1.0 - sample_uv.x : sample_uv.x,
+		flip_y == 1 ? 1.0 - sample_uv.y : sample_uv.y);
+	vec2 tc = (tex_transform * vec4(oriented, 0.0, 1.0)).xy;
 	return texture(screen_external, tc);
 }
 
