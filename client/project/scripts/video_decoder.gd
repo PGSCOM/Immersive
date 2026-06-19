@@ -92,14 +92,16 @@ func submit(encoded: PackedByteArray) -> void:
 
 ## Schedule a SurfaceTexture.updateTexImage() + transform matrix read on the
 ## render thread, then push the updated tex_transform into the panel material.
+## ShaderMaterial is not render-thread-safe for writes, so we use
+## RenderingServer.material_set_param() with the material's RID instead of
+## material.set_shader_parameter(), which can silently corrupt state.
 func schedule_update(material: ShaderMaterial) -> void:
 	if not _plugin or _stream_id < 0 or _external_tex == null:
 		return
 	var plug := _plugin
 	var sid := _stream_id
+	var mat_rid := material.get_rid()
 	RenderingServer.call_on_render_thread(func():
-		if not is_instance_valid(material):
-			return
 		if plug.update_tex_image(sid):
 			var arr: PackedFloat32Array = plug.get_transform_matrix(sid)
 			if arr.size() == 16:
@@ -109,7 +111,7 @@ func schedule_update(material: ShaderMaterial) -> void:
 					Vector4(arr[8], arr[9], arr[10], arr[11]),
 					Vector4(arr[12], arr[13], arr[14], arr[15])
 				)
-				material.set_shader_parameter("tex_transform", proj)
+				RenderingServer.material_set_param(mat_rid, "tex_transform", proj)
 	)
 
 

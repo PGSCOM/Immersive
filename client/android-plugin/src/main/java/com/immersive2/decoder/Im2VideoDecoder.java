@@ -6,6 +6,8 @@ import android.media.MediaFormat;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES30;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 
@@ -143,9 +145,12 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.frameHeight = height;
             sd.startTimeNs = System.nanoTime();
 
-            // Listener is called from an arbitrary MediaCodec internal thread;
-            // only sets a volatile flag — safe without a lock.
-            st.setOnFrameAvailableListener(t -> sd.frameAvailable = true);
+            // Must use a Handler tied to the main Looper: create_with_surface() runs on
+            // Godot's render thread, which has no Android Looper. Without a Handler,
+            // SurfaceTexture tries to use Looper.myLooper() which returns null there,
+            // and the callback is silently dropped — frameAvailable would never be set.
+            Handler mainHandler = new Handler(Looper.getMainLooper());
+            st.setOnFrameAvailableListener(t -> sd.frameAvailable = true, mainHandler);
 
             streams.put(streamId, sd);
             Log.i(TAG, "Surface decoder created: stream=" + streamId
@@ -184,9 +189,16 @@ public class Im2VideoDecoder extends GodotPlugin {
             if (idx >= 0) {
                 ByteBuffer in = sd.codec.getInputBuffer(idx);
                 if (in != null) {
-                    in.clear();
-                    in.put(data);
-                    sd.codec.queueInputBuffer(idx, 0, data.length, pts, 0);
+                    if (data.length <= in.capacity()) {
+                        in.clear();
+                        in.put(data);
+                        sd.codec.queueInputBuffer(idx, 0, data.length, pts, 0);
+                    } else {
+                        Log.e(TAG, "Input buffer too small for stream=" + streamId
+                                + " need=" + data.length + " cap=" + in.capacity()
+                                + " (dropping frame to avoid crash)");
+                        sd.codec.queueInputBuffer(idx, 0, 0, pts, 0);
+                    }
                 }
             }
             drain(sd);
