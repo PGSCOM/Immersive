@@ -75,6 +75,10 @@ var audio_receiver: Node = null
 ## Hardware video decoders per monitor (H.264/HEVC/AV1 via MediaCodec).
 var _decoders: Dictionary = {}
 
+## Software (CPU) MJPEG decoders per monitor, used on platforms with no hardware
+## MediaCodec plugin: PC (Windows/Linux/macOS), iOS and web. Threaded JPEG decode.
+var _sw_decoders: Dictionary = {}
+
 ## Last keyframe-request time per monitor (ms), to throttle loss recovery.
 var _last_keyframe_req_ms: Dictionary = {}
 
@@ -612,9 +616,9 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 		active_monitor_ids.append(monitor_id)
 	_update_overlay_monitors()
 
-	# Set up (or tear down) the hardware decoder for this monitor's codec
+	# Set up (or tear down) the decoder for this monitor's codec.
 	_close_decoder(monitor_id)
-	if codec in [0, 1, 3]:  # H.264 / HEVC / AV1
+	if codec in [0, 1, 3]:  # H.264 / HEVC / AV1 — hardware (MediaCodec)
 		var dec := VideoDecoder.new()
 		if dec.open(codec, width, height):
 			_decoders[monitor_id] = dec
@@ -629,6 +633,11 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 			_decoder_pending_first[monitor_id] = Time.get_ticks_msec()
 		else:
 			_request_codec_fallback(codec)
+	elif codec == 2 and SoftwareVideoDecoder.is_codec_supported(codec):
+		# MJPEG — software (CPU) decode for PC / iOS / web (no MediaCodec plugin).
+		var sw := SoftwareVideoDecoder.new()
+		if sw.open(codec, width, height):
+			_sw_decoders[monitor_id] = sw
 
 	# Reuse the panel already showing this monitor; otherwise take the first
 	# free slot (or the last slot if everything is occupied).
@@ -702,7 +711,14 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 		dec.submit(frame_data)
 		return
 
-	# MJPEG / RGBA path (no hardware decoder for this monitor)
+	# Software MJPEG path (PC / iOS / web): hand the JPEG to the threaded decoder;
+	# the decoded image is polled and uploaded each frame in _update_decoders().
+	if _sw_decoders.has(monitor_id):
+		_sw_decoders[monitor_id].submit(frame_data)
+		return
+
+	# Last-resort synchronous path (frame arrived before a decoder was ready, or
+	# a raw RGBA/NV12 frame): decode straight on the panel.
 	var fallback: MeshInstance3D = null
 	for panel in screen_panels:
 		if not is_instance_valid(panel) or not panel.has_method("update_texture"):
@@ -807,16 +823,25 @@ func _close_decoder(monitor_id: int) -> void:
 	if _decoders.has(monitor_id):
 		_decoders[monitor_id].close()
 		_decoders.erase(monitor_id)
+	if _sw_decoders.has(monitor_id):
+		_sw_decoders[monitor_id].close()
+		_sw_decoders.erase(monitor_id)
 	_awaiting_idr.erase(monitor_id)
 
 func _close_all_decoders() -> void:
 	for monitor_id in _decoders.keys():
 		_decoders[monitor_id].close()
 	_decoders.clear()
+	for monitor_id in _sw_decoders.keys():
+		_sw_decoders[monitor_id].close()
+	_sw_decoders.clear()
 	_awaiting_idr.clear()
 
-## Each frame: for every open hardware decoder that already has an ExternalTexture,
-## wire it to its panel (once) and schedule a render-thread texture update.
+## Each frame: drive both decoder kinds onto their panels.
+##   - Hardware (ExternalTexture): wire the OES texture to the panel once, then
+##     schedule the render-thread updateTexImage.
+##   - Software (MJPEG): poll the threaded decoder for a freshly decoded image and
+##     upload it to the panel.
 func _update_decoders() -> void:
 	for monitor_id in _decoders:
 		var dec: VideoDecoder = _decoders[monitor_id]
@@ -832,6 +857,17 @@ func _update_decoders() -> void:
 		var mat := panel.material_override
 		if mat is ShaderMaterial:
 			dec.schedule_update(mat as ShaderMaterial)
+
+	for monitor_id in _sw_decoders:
+		var sw: SoftwareVideoDecoder = _sw_decoders[monitor_id]
+		if not sw.is_open():
+			continue
+		var img := sw.get_decoded_image()
+		if img == null:
+			continue
+		var panel := _find_panel_for_monitor(monitor_id)
+		if panel and panel.has_method("update_decoded_image"):
+			panel.update_decoded_image(img)
 
 ## Return the screen panel currently assigned to monitor_id, or null.
 func _find_panel_for_monitor(monitor_id: int) -> MeshInstance3D:

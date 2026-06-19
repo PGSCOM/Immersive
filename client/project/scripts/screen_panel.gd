@@ -210,6 +210,23 @@ func update_texture(frame_data: PackedByteArray, width: int, height: int) -> voi
 		else:
 			return
 
+	_upload_screen_image()
+
+## Upload an already-decoded RGBA image to the panel texture. Used by the
+## SoftwareVideoDecoder path (PC / iOS / web), where the JPEG decode runs off the
+## main thread; this performs only the texture upload, which must run on the main
+## thread. Decouples decoding from the panel so it never blocks rendering.
+func update_decoded_image(img: Image) -> void:
+	if not is_active or img == null:
+		return
+	screen_image = img
+	if material_override is ShaderMaterial:
+		(material_override as ShaderMaterial).set_shader_parameter("is_yuv", 0)
+	_upload_screen_image()
+
+## Push `screen_image` into the GPU texture, recreating it when size/format/mipmap
+## state changed and updating in place otherwise.
+func _upload_screen_image() -> void:
 	# ImageTexture.update() requires identical size and format; otherwise
 	# the texture must be recreated (e.g. resolution change, RGBA<->L8).
 	if screen_texture \
