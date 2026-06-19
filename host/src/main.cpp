@@ -296,12 +296,15 @@ int main(int argc, char* argv[]) {
         enc_config.fps          = (cfg.max_fps > 0)
                                       ? cfg.max_fps
                                       : static_cast<uint32_t>(display.refresh_rate);
-        // Shorter GOP = smaller, more frequent IDR keyframes.
-        // Each IDR is ~30-40% of the GOP bitrate budget. With WiFi packet loss,
-        // the probability of losing at least one chunk of a large IDR is very
-        // high; halving the chunk count roughly squares the success rate.
-        // fps/6 → 10 frames at 60 fps → IDR every ~170 ms (~50 chunks at 8 Mbps).
-        enc_config.gop_size     = std::max<uint32_t>(5, enc_config.fps / 6);
+        // Keyframes are driven explicitly from the streaming loop below: a fixed
+        // ~1 s periodic refresh plus on-demand IDRs whenever the client reports
+        // packet loss. The encoder's own GOP is therefore only a safety ceiling.
+        // Driving IDRs in software is deterministic even on hardware MFTs that
+        // quietly ignore CODECAPI_AVEncMPVGOPSize and would otherwise emit a
+        // single IDR followed by an unbroken run of P-frames — the root cause of
+        // inter-frame artefacts (e.g. a "ghost" cursor left by a dropped delta)
+        // lingering until something else forces a refresh.
+        enc_config.gop_size     = std::max<uint32_t>(30, enc_config.fps * 4);
         enc_config.jpeg_quality = (cfg.jpeg_quality >= 10 && cfg.jpeg_quality <= 95)
                                       ? cfg.jpeg_quality : jpeg_quality;
         if (cfg.bitrate_kbps > 0) {
@@ -396,6 +399,13 @@ int main(int argc, char* argv[]) {
         uint32_t frame_number = 0;
         auto last_sent = std::chrono::steady_clock::time_point{};
 
+        // Guaranteed periodic IDR (~1 s of sent frames). Independent of whether
+        // the MFT honours its GOP, this bounds how long any inter-frame
+        // corruption can persist; the client's on-demand REQUEST_KEYFRAME clears
+        // it faster (within a round-trip) when loss is actually detected.
+        const uint32_t keyframe_interval = std::max(1u, fps_cap);
+        uint32_t frames_since_keyframe = keyframe_interval;  // force one promptly
+
         while (g_running && !ctx->stop) {
             auto frame = stream_capture->acquire_frame(16);  // ~60fps timeout
             if (!frame) continue;
@@ -417,10 +427,18 @@ int main(int argc, char* argv[]) {
                 w = out_w; h = out_h; pitch = out_w * 4;
             }
 
-            // Honour a client keyframe request (recovery after packet loss).
-            // No-op for MJPEG (every frame is already independent).
-            if (ctx->force_keyframe.exchange(false)) {
+            // Emit an IDR when the client asks (recovery after packet loss) or
+            // when the periodic refresh interval elapses. The periodic IDR caps
+            // how long a dropped P-frame can leave artefacts on screen; the
+            // on-demand request clears them within a round-trip. Both are no-ops
+            // for MJPEG (every frame is already independent).
+            bool want_keyframe = ctx->force_keyframe.exchange(false);
+            if (frames_since_keyframe >= keyframe_interval) {
+                want_keyframe = true;
+            }
+            if (want_keyframe) {
                 stream_encoder->request_keyframe();
+                frames_since_keyframe = 0;
             }
 
             auto packets = stream_encoder->encode(
@@ -437,6 +455,7 @@ int main(int argc, char* argv[]) {
             if (!packets.empty()) {
                 frame_number++;  // number only frames actually sent
                 last_sent = now;
+                frames_since_keyframe++;
             }
         }
 

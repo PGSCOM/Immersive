@@ -438,6 +438,16 @@ private:
     bool _configure_types() {
         const GUID subtype_wanted = codec_subtype(config_.codec);
 
+        // bgra_to_nv12() produces BT.601 limited-range YUV. Tag the NV12 input
+        // type with that colorimetry so the encoder writes a matching VUI into the
+        // SPS; without it many decoders (Android MediaCodec in particular) assume
+        // BT.709 for HD streams and the colours wash out or shift. Pure metadata —
+        // harmless if a given MFT ignores it.
+        auto set_colorimetry = [](IMFMediaType* mt) {
+            mt->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+            mt->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601);
+        };
+
         // --- Output type ---
         ComPtr<IMFMediaType> out_type;
         HRESULT hr = MFCreateMediaType(&out_type);
@@ -492,6 +502,7 @@ private:
             t->GetGUID(MF_MT_SUBTYPE, &subtype);
             if (subtype != MFVideoFormat_NV12) continue;
             t->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            set_colorimetry(t.Get());
             SetRatio(t.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
             SetRatio(t.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
             SetRatio(t.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -508,6 +519,7 @@ private:
                 in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
                 in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
                 in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                set_colorimetry(in_type.Get());
                 SetRatio(in_type.Get(), MF_MT_FRAME_SIZE, config_.width, config_.height);
                 SetRatio(in_type.Get(), MF_MT_FRAME_RATE, config_.fps, 1);
                 SetRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);

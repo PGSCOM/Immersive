@@ -111,6 +111,12 @@ var _slider_jpegq          : HSlider
 var _lbl_jpegq_value       : Label
 var _lbl_auto_info         : Label
 
+## Debounce timer: any quality-selector edit auto-applies a short moment later,
+## so settings always take effect without needing the Apply button. The delay
+## coalesces rapid changes (e.g. dragging a slider) into a single stream restart.
+var _apply_debounce        : Timer
+const AUTO_APPLY_DELAY      := 0.45
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -722,13 +728,24 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	_lbl_auto_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(_lbl_auto_info)
 
-	# Apply button
+	# Apply button (settings also auto-apply shortly after any change)
 	var apply_btn := Button.new()
 	apply_btn.text = "✔ Apply quality settings"
 	apply_btn.pressed.connect(_on_apply_quality_pressed)
 	vbox.add_child(apply_btn)
 
+	# Debounced auto-apply so the selectors always update without the button.
+	_apply_debounce = Timer.new()
+	_apply_debounce.one_shot = true
+	_apply_debounce.timeout.connect(_on_apply_quality_pressed)
+	add_child(_apply_debounce)
+
 	_refresh_quality_ui()
+
+## (Re)start the auto-apply countdown. Called after every selector edit.
+func _schedule_auto_apply() -> void:
+	if _apply_debounce:
+		_apply_debounce.start(AUTO_APPLY_DELAY)
 
 func _refresh_quality_ui() -> void:
 	_refresh_segmented(_codec_buttons, _stream_codec)
@@ -752,27 +769,33 @@ func _refresh_quality_ui() -> void:
 func _on_codec_chosen(value: int) -> void:
 	_stream_codec = value
 	_refresh_quality_ui()
+	_schedule_auto_apply()
 
 func _on_res_chosen(value: int) -> void:
 	_res_percent = value
-	if value == -1:
-		# Auto resolution also recomputes on the spot
-		auto_quality_requested.emit()
 	_refresh_quality_ui()
+	if value == -1:
+		# Auto resolution recomputes and applies on the spot (its own path).
+		auto_quality_requested.emit()
+	else:
+		_schedule_auto_apply()
 
 func _on_fps_chosen(value: int) -> void:
 	_fps_value = value
 	_refresh_quality_ui()
+	_schedule_auto_apply()
 
 func _on_bitrate_changed(value: float) -> void:
 	_bitrate_kbps = int(value) * 1000
 	if _lbl_bitrate_value:
 		_lbl_bitrate_value.text = "%d Mbps" % int(value)
+	_schedule_auto_apply()
 
 func _on_jpegq_changed(value: float) -> void:
 	_jpeg_quality = int(value)
 	if _lbl_jpegq_value:
 		_lbl_jpegq_value.text = "%d" % int(value)
+	_schedule_auto_apply()
 
 func _on_apply_quality_pressed() -> void:
 	stream_settings_changed.emit(_stream_codec, _bitrate_kbps, _jpeg_quality,

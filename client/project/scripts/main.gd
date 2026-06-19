@@ -715,23 +715,30 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 	if fallback:
 		fallback.update_texture(frame_data, width, height)
 
-## A frame was lost or dropped. For hardware (inter-frame) codecs, flush the
-## decoder and wait for the next automatic GOP keyframe from the host.
-## We do NOT send REQUEST_KEYFRAME here: the forced IDR it triggers is 4-5×
-## larger than the host's periodic auto-IDR, causing WiFi congestion that
-## makes packet loss even worse — a self-defeating feedback loop.
+## A frame was lost or dropped. For inter-frame codecs (H.264/HEVC/AV1) a missing
+## P-frame corrupts the decode chain — typically as artefacts that linger until a
+## clean intra arrives (e.g. a "ghost" cursor where the delta that erased the old
+## position never arrived). We recover by asking the host for a fresh IDR.
 func _on_frame_gap(monitor_id: int) -> void:
-	# After the first IDR is received, the hardware decoder uses error
-	# concealment for individual frame losses — setting _awaiting_idr here
-	# would drop all P-frames until the next IDR, causing visible flicker.
-	# Only flush during cold start (while still waiting for the first IDR).
-	if _decoders.has(monitor_id) and _awaiting_idr.get(monitor_id, false):
+	if not _decoders.has(monitor_id):
+		return
+	# Cold start: still waiting for the first IDR. Flush stale decoder buffers so
+	# they don't delay the clean intra we're about to accept; the host's periodic
+	# IDR (~1 s) supplies one without us flooding REQUEST_KEYFRAME.
+	if _awaiting_idr.get(monitor_id, false):
 		_decoders[monitor_id].flush()
+		return
+	# Steady state: request an IDR, throttled so a burst of losses can't trigger
+	# an IDR storm that congests Wi-Fi. We do NOT set _awaiting_idr (which would
+	# drop every P-frame until the IDR lands and cause a visible freeze): the
+	# decoder keeps showing concealed frames, then snaps to a clean picture when
+	# the requested IDR — or the host's periodic one — arrives.
+	_request_keyframe(monitor_id)
 
-## Ask the host for a fresh keyframe (intra), throttled per monitor. The host
-## uses intra-refresh (no periodic IDR), so a decoder that opens mid-GOP — e.g.
-## right after connecting — sees only P-frames and renders coloured garbage
-## until it forces one. Returns true if a request was actually sent.
+## Ask the host for a fresh keyframe (intra), throttled per monitor. Used to
+## recover the inter-frame decode chain after packet loss without waiting for the
+## host's periodic IDR (~1 s). The throttle bounds the extra IDR traffic so a
+## burst of losses can't congest Wi-Fi. Returns true if a request was sent.
 func _request_keyframe(monitor_id: int, min_interval_ms: int = 250) -> bool:
 	if not _decoders.has(monitor_id):
 		return false
@@ -746,10 +753,11 @@ func _request_keyframe(monitor_id: int, min_interval_ms: int = 250) -> bool:
 	return false
 
 ## On cold-start, track freshly-opened decoders so we know an IDR is needed.
-## We send only ONE request on open; the host's auto-GOP IDR (every ~0.5 s)
-## handles recovery — repeated REQUEST_KEYFRAME triggers oversized forced IDRs
-## that congest WiFi and make everything worse. Clear the pending flag when
-## the IDR has been seen (or after a generous timeout).
+## We send NO request on open; the host forces an IDR on the first frame of every
+## stream and emits a periodic one (~1 s), so a fresh decoder gets its intra
+## without us flooding REQUEST_KEYFRAME (which would trigger oversized forced IDRs
+## that congest WiFi). Clear the pending flag once the IDR has been seen (or after
+## a generous timeout).
 func _handle_keyframe_retries() -> void:
 	if _decoder_pending_first.is_empty():
 		return
