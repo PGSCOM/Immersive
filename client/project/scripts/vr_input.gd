@@ -54,6 +54,12 @@ func _update_pointer() -> void:
 	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
 		return
 
+	# When the user is tracking bare hands (no controllers), hand_input.gd owns
+	# the pointer. Bail out so an untracked controller's stale pose can't fight
+	# the hand cursor over the same monitor.
+	if _hands_active():
+		return
+
 	var source_transform: Transform3D
 	if raycast_origin:
 		source_transform = raycast_origin.global_transform
@@ -184,6 +190,17 @@ func _set_grip_state(pressed: bool) -> void:
 			_active_panel.stop_drag()
 		_scale_mode = false
 		_send_release(0x02)
+
+## True when the right hand is being *optically* tracked (bare-hand mode). Mirror
+## of hand_input.gd::_is_optical_hand_tracking — used to yield the pointer to the
+## hand-tracking path so the two never push conflicting cursor positions.
+func _hands_active() -> bool:
+	var hand := XRServer.get_tracker(&"/user/hand_tracker/right") as XRHandTracker
+	if hand == null or not hand.get_has_tracking_data():
+		return false
+	var source := hand.get_hand_tracking_source()
+	return source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
+		or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
 
 func _query_tracking_active() -> bool:
 	var xr_tracker := XRServer.get_tracker(controller.tracker)

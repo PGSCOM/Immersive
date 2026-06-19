@@ -133,6 +133,7 @@ func _ready() -> void:
 	_load_config()
 	_load_workspace_layout()
 	_init_eye_gaze_controller()
+	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
 	if _autoconnect_on_start:
@@ -165,6 +166,14 @@ func _init_eye_gaze_controller() -> void:
 	eye_gaze_controller.pose = &"eye_pose"
 	eye_gaze_controller.visible = false
 	xr_origin.add_child(eye_gaze_controller)
+
+## Bare-hand (controller-free) pointer + pinch input. Inert until the OpenXR
+## runtime reports optical hand tracking, so it's harmless on controller setups.
+## See scripts/hand_input.gd for the gesture mapping (Pico 4 / Quest / SteamVR).
+func _init_hand_input() -> void:
+	var hand_input := preload("res://scripts/hand_input.gd").new()
+	hand_input.name = "HandInput"
+	add_child(hand_input)
 
 # ---------------------------------------------------------------------------
 # Network
