@@ -6,6 +6,8 @@ import android.media.MediaFormat;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES30;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 
@@ -143,9 +145,12 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.frameHeight = height;
             sd.startTimeNs = System.nanoTime();
 
-            // Listener is called from an arbitrary MediaCodec internal thread;
-            // only sets a volatile flag — safe without a lock.
-            st.setOnFrameAvailableListener(t -> sd.frameAvailable = true);
+            // Listener must use a Handler because this runs on Godot's render
+            // thread (no Looper). Without a Handler, callbacks can be dropped.
+            st.setOnFrameAvailableListener(
+                t -> sd.frameAvailable = true,
+                new Handler(Looper.getMainLooper())
+            );
 
             streams.put(streamId, sd);
             Log.i(TAG, "Surface decoder created: stream=" + streamId
@@ -184,9 +189,16 @@ public class Im2VideoDecoder extends GodotPlugin {
             if (idx >= 0) {
                 ByteBuffer in = sd.codec.getInputBuffer(idx);
                 if (in != null) {
-                    in.clear();
-                    in.put(data);
-                    sd.codec.queueInputBuffer(idx, 0, data.length, pts, 0);
+                    if (data.length <= in.capacity()) {
+                        in.clear();
+                        in.put(data);
+                        sd.codec.queueInputBuffer(idx, 0, data.length, pts, 0);
+                    } else {
+                        Log.w(TAG, "Input buffer too small! req="
+                                + data.length + " cap=" + in.capacity()
+                                + " stream=" + streamId);
+                        sd.codec.queueInputBuffer(idx, 0, 0, pts, 0);
+                    }
                 }
             }
             drain(sd);
@@ -207,11 +219,21 @@ public class Im2VideoDecoder extends GodotPlugin {
     @UsedByGodot
     public boolean update_tex_image(int streamId) {
         StreamDecoder sd = streams.get(streamId);
-        if (sd == null || !sd.frameAvailable) return false;
+        if (sd == null) {
+            Log.w(TAG, "update_tex_image: no decoder for stream=" + streamId);
+            return false;
+        }
+        if (!sd.frameAvailable) {
+            return false;
+        }
         try {
             sd.frameAvailable = false;
             sd.surfaceTexture.updateTexImage();
             sd.surfaceTexture.getTransformMatrix(sd.transformMatrix);
+            if (sd.outputCount <= 5 || sd.outputCount % 60 == 0) {
+                Log.i(TAG, "update_tex_image OK stream=" + streamId
+                        + " frames=" + sd.outputCount);
+            }
             return true;
         } catch (Exception e) {
             Log.w(TAG, "update_tex_image failed for stream=" + streamId + ": " + e);

@@ -59,7 +59,10 @@ func open(codec: int, width: int, height: int) -> bool:
 		var gl_tex_id: int = plug.create_with_surface(sid, mime, width, height)
 		if gl_tex_id > 0:
 			_external_tex = ExternalTexture.new()
-			_external_tex.set_external_buffer_id(gl_tex_id)
+			if _external_tex.has_method("set_external_buffer_id"):
+				_external_tex.set_external_buffer_id(gl_tex_id)
+			else:
+				_external_tex.set("external_buffer_id", gl_tex_id)
 			_external_tex.size = Vector2(width, height)
 			print("[VideoDecoder] ExternalTexture ready: glTex=%d stream=%d" % [gl_tex_id, sid])
 		else:
@@ -92,11 +95,15 @@ func submit(encoded: PackedByteArray) -> void:
 
 ## Schedule a SurfaceTexture.updateTexImage() + transform matrix read on the
 ## render thread, then push the updated tex_transform into the panel material.
+## Material params MUST use RenderingServer.material_set_param (not the
+## ShaderMaterial setter) because we are on the render thread.
 func schedule_update(material: ShaderMaterial) -> void:
 	if not _plugin or _stream_id < 0 or _external_tex == null:
 		return
 	var plug := _plugin
 	var sid := _stream_id
+	var mat_rid := material.get_rid()
+	var ext_tex := _external_tex
 	RenderingServer.call_on_render_thread(func():
 		if not is_instance_valid(material):
 			return
@@ -109,7 +116,8 @@ func schedule_update(material: ShaderMaterial) -> void:
 					Vector4(arr[8], arr[9], arr[10], arr[11]),
 					Vector4(arr[12], arr[13], arr[14], arr[15])
 				)
-				material.set_shader_parameter("tex_transform", proj)
+				RenderingServer.material_set_param(mat_rid, "tex_transform", proj)
+		RenderingServer.material_set_param(mat_rid, "screen_external", ext_tex)
 	)
 
 

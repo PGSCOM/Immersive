@@ -6,6 +6,8 @@
 // This shader is only ever instantiated on Android when a decoder is active, so
 // the samplerExternalOES type never reaches a desktop GLES3 compile.
 
+#extension GL_OES_EGL_image_external : require
+
 shader_type spatial;
 render_mode unshaded, cull_disabled;
 
