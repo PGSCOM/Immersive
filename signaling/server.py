@@ -14,10 +14,9 @@ import secrets
 import signal
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import websockets
-from websockets.server import WebSocketServerProtocol
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -46,7 +45,7 @@ logger = logging.getLogger("signaling")
 
 @dataclass
 class User:
-    ws: WebSocketServerProtocol
+    ws: Any
     user_id: int
     display_name: str
     room_id: str
@@ -66,7 +65,7 @@ class Room:
     def is_p2p(self) -> bool:
         return self.user_count <= P2P_MAX_USERS
 
-    def add_user(self, ws: WebSocketServerProtocol, display_name: str) -> int:
+    def add_user(self, ws: Any, display_name: str) -> int:
         user_id = self.next_user_id
         self.next_user_id += 1
         self.users[user_id] = User(ws, user_id, display_name, self.room_id)
@@ -115,7 +114,7 @@ class SignalingServer:
     def _build_msg(msg_type: str, **kwargs) -> str:
         return json.dumps({"type": msg_type, **kwargs})
 
-    async def _send(self, ws: WebSocketServerProtocol, msg: str) -> None:
+    async def _send(self, ws: Any, msg: str) -> None:
         try:
             await ws.send(msg)
         except websockets.exceptions.ConnectionClosed:
@@ -130,7 +129,7 @@ class SignalingServer:
     # Handlers
     # -----------------------------------------------------------------------
 
-    async def handle_room_join(self, ws: WebSocketServerProtocol, payload: dict) -> None:
+    async def handle_room_join(self, ws: Any, payload: dict) -> None:
         room_id = payload.get("room_id", "default")
         display_name = payload.get("display_name", "Anonymous")
 
@@ -184,7 +183,7 @@ class SignalingServer:
                 self._build_msg("topology_changed", mode="sfu"),
             )
 
-    async def handle_room_leave(self, ws: WebSocketServerProtocol) -> None:
+    async def handle_room_leave(self, ws: Any) -> None:
         user_id = getattr(ws, "user_id", None)
         room_id = getattr(ws, "room_id", None)
         if user_id is None or room_id is None:
@@ -217,7 +216,7 @@ class SignalingServer:
 
         self.destroy_room_if_empty(room_id)
 
-    async def handle_user_pose(self, ws: WebSocketServerProtocol, payload: dict) -> None:
+    async def handle_user_pose(self, ws: Any, payload: dict) -> None:
         user_id = getattr(ws, "user_id", None)
         room_id = getattr(ws, "room_id", None)
         if user_id is None or room_id is None:
@@ -240,7 +239,7 @@ class SignalingServer:
             exclude=user_id,
         )
 
-    async def handle_screen_share_state(self, ws: WebSocketServerProtocol, payload: dict) -> None:
+    async def handle_screen_share_state(self, ws: Any, payload: dict) -> None:
         user_id = getattr(ws, "user_id", None)
         room_id = getattr(ws, "room_id", None)
         if user_id is None or room_id is None:
@@ -262,7 +261,7 @@ class SignalingServer:
             exclude=user_id,
         )
 
-    async def handle_monitor_layout_update(self, ws: WebSocketServerProtocol, payload: dict) -> None:
+    async def handle_monitor_layout_update(self, ws: Any, payload: dict) -> None:
         user_id = getattr(ws, "user_id", None)
         room_id = getattr(ws, "room_id", None)
         if user_id is None or room_id is None:
@@ -283,7 +282,7 @@ class SignalingServer:
             exclude=user_id,
         )
 
-    async def handle_webrtc_signal(self, ws: WebSocketServerProtocol, msg_type: str, payload: dict) -> None:
+    async def handle_webrtc_signal(self, ws: Any, msg_type: str, payload: dict) -> None:
         """Relay WebRTC offer/answer/ice_candidate to target user."""
         user_id = getattr(ws, "user_id", None)
         room_id = getattr(ws, "room_id", None)
@@ -313,7 +312,7 @@ class SignalingServer:
     # WebSocket handler
     # -----------------------------------------------------------------------
 
-    async def handle_client(self, ws: WebSocketServerProtocol, path: str) -> None:
+    async def handle_client(self, ws: Any) -> None:
         logger.info("Client connected")
         try:
             async for message in ws:
