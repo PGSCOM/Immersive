@@ -10,9 +10,9 @@ permission:
   edit:
     "docs/**": allow
     "**/ui/**": allow
-    "*": ask
+    "*": allow
   bash:
-    "*": ask
+    "*": allow
     "ls*": allow
     "cat*": allow
   webfetch: allow

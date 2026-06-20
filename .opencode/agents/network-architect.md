@@ -11,7 +11,7 @@ permission:
     "docs/**": allow
     "*": deny
   bash:
-    "*": ask
+    "*": allow
     "ls*": allow
     "cat*": allow
     "grep*": allow

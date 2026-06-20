@@ -95,6 +95,13 @@ and a short result summary into your final message.
 - Subagents stay in their lane (their file's description), return concise results,
   and must respect this whole file. They do not silently expand scope.
 
+## 7. Non-interactive execution
+
+Agents must **never** stop mid-task to ask the user a clarifying question. Make
+the most reasonable assumption given the available context, proceed with the
+task, and state what you assumed in your final message. If a decision is
+genuinely ambiguous, pick the safer/smaller option — never block on input.
+
 ## 6. Network topology decision (locked)
 
 - **1–2 users:** direct **P2P mesh** (no media server).

@@ -10,9 +10,9 @@ permission:
   edit:
     "**/*.md": allow
     "docs/**": allow
-    "*": ask
+    "*": allow
   bash:
-    "*": ask
+    "*": allow
     "ls*": allow
     "cat*": allow
     "grep*": allow
