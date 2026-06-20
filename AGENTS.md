@@ -17,10 +17,25 @@ Every feature, fix, or refactor must ship with tests **and** a passing run:
 
 - **Godot / GDScript tests MUST be launched with `--xr-mode off`.** Without it
   the headless run shows an XR warning and does **not** continue automatically,
-  so the test hangs/blocks. Canonical command:
+  so the test hangs/blocks.
+
+  **Godot binary on this machine** (Godot 4.7-stable, Steam install) — there is no
+  `godot` on PATH, so always invoke this absolute path (quote it; it has spaces):
+
+  ```
+  C:\Program Files (x86)\Steam\steamapps\common\Godot Engine\godot.windows.opt.tools.64.exe
+  ```
+
+  Canonical test command (PowerShell):
+
+  ```powershell
+  & "C:\Program Files (x86)\Steam\steamapps\common\Godot Engine\godot.windows.opt.tools.64.exe" --headless --xr-mode off --path client/project -s res://test/run_tests.gd
+  ```
+
+  Git-Bash equivalent:
 
   ```bash
-  godot --headless --xr-mode off --path client/project -s res://test/run_tests.gd
+  "/c/Program Files (x86)/Steam/steamapps/common/Godot Engine/godot.windows.opt.tools.64.exe" --headless --xr-mode off --path client/project -s res://test/run_tests.gd
   ```
 
   (Use the project's existing test runner / GUT / GdUnit4 entrypoint; if none
