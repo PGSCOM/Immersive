@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Integration tests for the Immersive-2 signaling server.
+
+Tests room join/leave, presence broadcast, pose relay, screen sharing,
+and topology transitions (P2P <-> SFU).
+"""
+
+import asyncio
+import json
+import sys
+import unittest
+from typing import Any, Dict, List, Optional
+
+import websockets
+
+# Ensure the server module is importable
+sys.path.insert(0, "..")
+from server import SignalingServer, DEFAULT_HOST, DEFAULT_PORT, P2P_MAX_USERS
+
+
+TEST_PORT = DEFAULT_PORT + 1000  # Avoid conflicts with a running server
+
+
+class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.server = SignalingServer()
+        self.server_task = asyncio.create_task(self.server.run(DEFAULT_HOST, TEST_PORT))
+        # Give the server a moment to start
+        await asyncio.sleep(0.1)
+
+    async def asyncTearDown(self) -> None:
+        self.server_task.cancel()
+        try:
+            await self.server_task
+        except asyncio.CancelledError:
+            pass
+
+    async def _connect(self) -> websockets.WebSocketClientProtocol:
+        uri = f"ws://127.0.0.1:{TEST_PORT}"
+        return await websockets.connect(uri)
+
+    async def _send(self, ws: websockets.WebSocketClientProtocol, msg_type: str, payload: Dict[str, Any]) -> None:
+        await ws.send(json.dumps({"type": msg_type, "payload": payload}))
+
+    async def _recv(self, ws: websockets.WebSocketClientProtocol, timeout: float = 2.0) -> Dict[str, Any]:
+        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+        return json.loads(raw)  # type: ignore[no-any-return]
+
+    # -----------------------------------------------------------------------
+    # Tests
+    # -----------------------------------------------------------------------
+
+    async def test_room_join_and_presence(self) -> None:
+        """Two peers join a room; verify room_joined and user_presence."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        # Peer 1 joins
+        await self._send(ws1, "room_join", {"room_id": "test-room", "display_name": "Alice"})
+        msg1 = await self._recv(ws1)
+        self.assertEqual(msg1["type"], "room_joined")
+        self.assertEqual(msg1["room_id"], "test-room")
+        self.assertEqual(msg1["mode"], "p2p")
+        user_id_1 = msg1["user_id"]
+
+        # Peer 2 joins
+        await self._send(ws2, "room_join", {"room_id": "test-room", "display_name": "Bob"})
+        msg2 = await self._recv(ws2)
+        self.assertEqual(msg2["type"], "room_joined")
+        self.assertEqual(msg2["mode"], "p2p")
+        user_id_2 = msg2["user_id"]
+
+        # Peer 1 should receive user_presence for Peer 2
+        presence = await self._recv(ws1)
+        self.assertEqual(presence["type"], "user_presence")
+        self.assertEqual(presence["user_id"], user_id_2)
+        self.assertEqual(presence["display_name"], "Bob")
+        self.assertTrue(presence["is_online"])
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_room_leave(self) -> None:
+        """Peer leaves; verify room_left broadcast."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "leave-room", "display_name": "Alice"})
+        await self._recv(ws1)
+
+        await self._send(ws2, "room_join", {"room_id": "leave-room", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._recv(ws1)  # consume presence
+
+        # Peer 2 leaves
+        await ws2.close()
+
+        # Peer 1 should receive room_left
+        msg = await self._recv(ws1)
+        self.assertEqual(msg["type"], "room_left")
+
+        await ws1.close()
+
+    async def test_topology_transition_to_sfu(self) -> None:
+        """3 peers join; verify transition to SFU mode."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+        ws3 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "sfu-room", "display_name": "Alice"})
+        await self._recv(ws1)
+
+        await self._send(ws2, "room_join", {"room_id": "sfu-room", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._recv(ws1)
+
+        # Third peer triggers SFU
+        await self._send(ws3, "room_join", {"room_id": "sfu-room", "display_name": "Carol"})
+        await self._recv(ws3)
+
+        # ws1 and ws2 receive user_presence for Carol first
+        await self._recv(ws1)
+        await self._recv(ws2)
+
+        # Everyone should get topology_changed
+        for ws in (ws1, ws2, ws3):
+            msg = await self._recv(ws)
+            self.assertEqual(msg["type"], "topology_changed")
+            self.assertEqual(msg["mode"], "sfu")
+
+        await ws1.close()
+        await ws2.close()
+        await ws3.close()
+
+    async def test_pose_relay(self) -> None:
+        """Peer sends pose; verify relay to others."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "pose-room", "display_name": "Alice"})
+        await self._recv(ws1)
+
+        await self._send(ws2, "room_join", {"room_id": "pose-room", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._recv(ws1)
+
+        # Peer 1 sends pose
+        pose = {
+            "head": {"pos": [0, 1.6, 0], "rot": [1, 0, 0, 0]},
+            "left_hand": {"pos": [-0.3, 1.2, 0.5], "rot": [1, 0, 0, 0]},
+            "right_hand": {"pos": [0.3, 1.2, 0.5], "rot": [1, 0, 0, 0]},
+        }
+        await self._send(ws1, "user_pose", pose)
+
+        # Peer 2 should receive the pose
+        msg = await self._recv(ws2)
+        self.assertEqual(msg["type"], "user_pose")
+        self.assertEqual(msg["user_id"], 1)
+        self.assertIn("head", msg)
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_screen_share_state(self) -> None:
+        """Peer updates screen share state; verify broadcast."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "share-room", "display_name": "Alice"})
+        await self._recv(ws1)
+
+        await self._send(ws2, "room_join", {"room_id": "share-room", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._recv(ws1)
+
+        await self._send(ws1, "screen_share_state", {
+            "monitor_count": 2,
+            "monitor_ids": [1, 2],
+            "enabled": True,
+        })
+
+        msg = await self._recv(ws2)
+        self.assertEqual(msg["type"], "screen_share_state")
+        self.assertEqual(msg["user_id"], 1)
+        self.assertEqual(msg["monitor_count"], 2)
+        self.assertTrue(msg["enabled"])
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_webrtc_signal_relay(self) -> None:
+        """Peer sends WebRTC offer; verify relay to target."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "webrtc-room", "display_name": "Alice"})
+        msg1 = await self._recv(ws1)
+
+        await self._send(ws2, "room_join", {"room_id": "webrtc-room", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._recv(ws1)
+
+        # Peer 1 sends offer to Peer 2
+        await self._send(ws1, "webrtc_offer", {
+            "target_user_id": msg1["user_id"] + 1,
+            "sdp": "v=0\n...",
+        })
+
+        msg = await self._recv(ws2)
+        self.assertEqual(msg["type"], "webrtc_offer")
+        self.assertEqual(msg["from_user_id"], msg1["user_id"])
+
+        await ws1.close()
+        await ws2.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

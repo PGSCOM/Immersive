@@ -49,6 +49,70 @@ screens as floating panels. VR controller input is sent back to the PC.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+## Multi-User Shared VR Workspaces
+
+Immersive-2 now supports multi-user shared VR workspaces where several people can share a VR space, see each other as avatars, and view all shared screens arranged in each user's monitor layout.
+
+### Network Topology
+
+- **1–2 users:** Direct P2P mesh (no media server)
+- **3+ users:** SFU server routes streams
+- **Automatic migration:** Seamless transition between P2P and SFU when the 3rd user joins or leaves
+
+### Privacy
+
+- **End-to-end encryption:** Media is encrypted with E2EE (XOR stream cipher for MVP, SRTP/DTLS for transport)
+- **Opt-in screen sharing:** Users choose which monitors to share, with immediate revocation
+- **No PII logging:** Only ephemeral session IDs and monitor IDs are logged
+
+### Supported Clients
+
+- **VR Headsets:** Meta Quest, Pico 4 (OpenXR)
+- **Desktop:** Flat-screen client for non-VR users
+- **Mobile:** Touch-friendly mobile client
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│        Host (Windows full / Linux+macOS portable mode)           │
+│                                                                  │
+│  ┌─────────────┐   ┌──────────────┐    ┌───────────────────────┐ │
+│  │ IDD Virtual │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
+│  │ Display     │   │ Capture      │    │ MJPEG (sw) / NVENC /  │ │
+│  │ Driver      │   └──────────────┘    │ AMF / QSV (hw)        │ │
+│  └─────────────┘                       └──────────┬────────────┘ │
+│                                                   │              │
+│                                                   ▼              │
+│                                        ┌──────────────────────┐  │
+│  ┌─────────────┐                       │ Network Server       │  │
+│  │ Input       │◀──────────────────────│ (TCP control +       │  │
+│  │ Injector    │                       │  UDP video stream)   │  │
+│  └─────────────┘                       └──────────┬───────────┘  │
+└───────────────────────────────────────────────────┼──────────────┘
+                                                    │ Wi-Fi
+┌───────────────────────────────────────────────────┼──────────────┐
+│                       VR Client (Quest / Pico 4)  │              │
+│                                                   ▼              │
+│  ┌──────────────────────┐   ┌──────────────────────────────────┐ │
+│  │ Network Client       │──▶│ Video Decoder                    │ │
+│  │ (TCP ctrl + UDP vid) │   │ (MJPEG via Image.load_jpg_from_  │ │
+│  └──────────────────────┘   │  buffer or MediaCodec H.264)     │ │
+│                             └──────────┬───────────────────────┘ │
+│                                        ▼                         │
+│  ┌──────────────────────┐   ┌──────────────────────────────────┐ │
+│  │ Input Manager        │──▶│ OpenXR Screen Renderer           │ │
+│  │ (pointer + keyboard) │   │ (up to 3 floating panels)        │ │
+│  └──────────────────────┘   └──────────────────────────────────┘ │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ UI Overlay (toggle with B/Y or O key)                        ││
+│  │  • Connection status   • Host IP field   • Monitor list      ││
+│  │  • Latency indicator   • Connect button                      ││
+│  └──────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────┘
+```
+
 ## Project Structure
 
 ```

@@ -369,3 +369,4 @@ Client                                   Host
 | Version | Changes |
 |---------|---------|
 | 1 (current) | Initial protocol: HELLO handshake, monitor list, single-monitor stream, mouse/keyboard input, MJPEG video, latency probing, multi-monitor select, frame ACK |
+| 2 (planned) | Multi-user room messages: ROOM_JOIN, ROOM_JOINED, ROOM_LEFT, USER_PRESENCE, USER_POSE, SCREEN_SHARE_STATE, REMOTE_SCREEN_LAYOUT, MONITOR_LAYOUT_UPDATE |

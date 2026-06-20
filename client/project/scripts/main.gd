@@ -1300,3 +1300,58 @@ func _apply_cmdline_overrides() -> void:
 			stream_codec = _resolve_codec(int(arg.get_slice("=", 1)))
 		elif arg == "--im2-capture":
 			_debug_capture = true
+
+# ---------------------------------------------------------------------------
+# Multi-user remote users
+# ---------------------------------------------------------------------------
+
+## Dictionary of remote users: user_id -> RemoteUser node
+var remote_users: Dictionary = {}
+
+## Local user ID from the signaling server
+var _local_user_id: int = -1
+
+## Called when we successfully join a room.
+func on_room_joined(room_id: String, user_id: int, participants: Array) -> void:
+	_local_user_id = user_id
+	for p in participants:
+		var pid: int = p.get("user_id", 0)
+		if pid != _local_user_id:
+			on_user_presence(pid, p.get("display_name", ""), false, true)
+
+## Called when a user presence update arrives.
+func on_user_presence(user_id: int, display_name: String, is_local: bool, is_online: bool) -> void:
+	if is_local:
+		return
+	if is_online:
+		if not remote_users.has(user_id):
+			var user = preload("res://scripts/remote_user.gd").new()
+			user.name = "RemoteUser_%d" % user_id
+			user.user_id = user_id
+			user.display_name = display_name
+			add_child(user)
+			remote_users[user_id] = user
+	else:
+		if remote_users.has(user_id):
+			remote_users[user_id].queue_free()
+			remote_users.erase(user_id)
+
+## Called when a user leaves the room.
+func on_room_left(user_id: int) -> void:
+	if remote_users.has(user_id):
+		remote_users[user_id].queue_free()
+		remote_users.erase(user_id)
+
+## Apply pose update to a remote user.
+func apply_user_pose(user_id: int, head: Dictionary, left_hand: Dictionary, right_hand: Dictionary) -> void:
+	if remote_users.has(user_id):
+		remote_users[user_id].update_pose(head, left_hand, right_hand)
+
+## Apply screen layout to a remote user.
+func apply_screen_layout(user_id: int, monitors: Array) -> void:
+	if remote_users.has(user_id):
+		remote_users[user_id].apply_screen_layout(monitors)
+
+## Set the local user ID (for testing).
+func set_local_user_id(user_id: int) -> void:
+	_local_user_id = user_id

@@ -1,0 +1,4 @@
+# Signaling server dependencies for Immersive-2 multi-user rooms.
+# Pin to compatible major versions; tested with Python 3.10+.
+
+websockets>=10.0,<15.0

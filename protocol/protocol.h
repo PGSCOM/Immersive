@@ -55,6 +55,15 @@ enum class MessageType : uint8_t {
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
     LATENCY_RESPONSE     = 0x41, ///< Server echoes LATENCY_PROBE back
+    // Multi-user room messages (0x50-0x5F)
+    ROOM_JOIN            = 0x50, ///< Client → Server: request to join a room
+    ROOM_JOINED          = 0x51, ///< Server → Client: joined successfully
+    ROOM_LEFT            = 0x52, ///< Server → Client: a user left the room
+    USER_PRESENCE        = 0x53, ///< Server → Client: user presence update
+    USER_POSE            = 0x54, ///< Bidirectional: head + hand transforms
+    SCREEN_SHARE_STATE   = 0x55, ///< Client → Server: which monitors are shared
+    REMOTE_SCREEN_LAYOUT = 0x56, ///< Server → Client: another user's monitor layout
+    MONITOR_LAYOUT_UPDATE= 0x57, ///< Client → Server: update monitor positions/sizes
     PING                 = 0xFF,
 };
 
@@ -192,6 +201,83 @@ struct VideoPacketHeader {
     uint16_t chunk_index;
     uint16_t chunk_count;
     // Followed by payload bytes
+};
+
+// ---------------------------------------------------------------------------
+// Multi-user room structs
+// ---------------------------------------------------------------------------
+
+/// Client requests to join a room.
+struct RoomJoin {
+    char room_id[16];       ///< UTF-8 room identifier (null-padded)
+    char display_name[32];  ///< UTF-8 display name (null-terminated)
+};
+
+/// Server confirms room join and sends participant list.
+struct RoomJoined {
+    char     room_id[16];   ///< Echoed room identifier
+    uint32_t user_id;       ///< Assigned ephemeral user ID
+    uint8_t  participant_count; ///< Number of participants already in the room
+    // Followed by participant_count * (user_id + display_name[32])
+};
+
+/// A user left the room.
+struct RoomLeft {
+    uint32_t user_id;       ///< User who left
+};
+
+/// User presence update (join/leave/change).
+struct UserPresence {
+    uint32_t user_id;       ///< User ID
+    char     display_name[32]; ///< UTF-8 display name
+    uint8_t  is_local;      ///< 1 = this client, 0 = remote
+    uint8_t  is_online;     ///< 1 = present, 0 = left
+};
+
+/// Pose for a single tracked object (position + quaternion).
+struct TrackedPose {
+    float pos_x, pos_y, pos_z;     ///< Position in meters
+    float rot_w, rot_x, rot_y, rot_z; ///< Quaternion (w, x, y, z)
+};
+
+/// Head + hands pose update for a user.
+struct UserPose {
+    uint32_t user_id;       ///< User ID
+    TrackedPose head;       ///< Head transform
+    TrackedPose left_hand;  ///< Left hand transform
+    TrackedPose right_hand; ///< Right hand transform
+};
+
+/// Which monitors a user is sharing.
+struct ScreenShareState {
+    uint32_t user_id;       ///< User ID
+    uint8_t  monitor_count; ///< Number of shared monitors (0-3)
+    uint8_t  monitor_ids[3]; ///< Monitor IDs being shared
+    uint8_t  enabled;       ///< 1 = sharing, 0 = stopped sharing
+};
+
+/// Monitor layout entry for a single monitor (position + size in VR space).
+struct MonitorLayoutEntry {
+    uint8_t  monitor_id;    ///< Monitor ID
+    float    pos_x, pos_y, pos_z;    ///< Position in meters
+    float    rot_w, rot_x, rot_y, rot_z; ///< Rotation quaternion
+    float    width, height; ///< Size in meters
+    uint16_t resolution_w;  ///< Native resolution width
+    uint16_t resolution_h;  ///< Native resolution height
+};
+
+/// Another user's monitor layout (sent when they join or update layout).
+struct RemoteScreenLayout {
+    uint32_t user_id;       ///< User ID
+    uint8_t  monitor_count; ///< Number of monitors (0-3)
+    // Followed by monitor_count * MonitorLayoutEntry
+};
+
+/// Client updates their monitor layout.
+struct MonitorLayoutUpdate {
+    uint32_t user_id;       ///< User ID
+    uint8_t  monitor_count; ///< Number of monitors (0-3)
+    // Followed by monitor_count * MonitorLayoutEntry
 };
 
 #pragma pack(pop)
