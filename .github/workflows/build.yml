@@ -11,7 +11,7 @@ on:
 jobs:
   host-windows:
     name: Build Host (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,6 +110,10 @@ jobs:
         run: |
           godot --headless --xr-mode off --path client/project -s res://test/run_tests.gd
         timeout-minutes: 5
+
+      - name: Install Python signaling dependencies
+        run: |
+          pip install -r signaling/requirements.txt
 
       - name: Run Python signaling tests
         run: |
