@@ -95,16 +95,36 @@ and a short result summary into your final message.
 - Subagents stay in their lane (their file's description), return concise results,
   and must respect this whole file. They do not silently expand scope.
 
-## 7. Non-interactive execution
-
-Agents must **never** stop mid-task to ask the user a clarifying question. Make
-the most reasonable assumption given the available context, proceed with the
-task, and state what you assumed in your final message. If a decision is
-genuinely ambiguous, pick the safer/smaller option — never block on input.
-
 ## 6. Network topology decision (locked)
 
 - **1–2 users:** direct **P2P mesh** (no media server).
 - **3+ users:** **SFU** server routes streams.
 - Migration across the boundary (the 3rd user joining / dropping to 2) must be
   automatic and seamless. The threshold lives in one config constant.
+
+## 7. Non-interactive execution — never stop to ask
+
+Agents must **never** stop mid-task to ask the user a clarifying question. Make
+the most reasonable assumption given the available context, proceed with the
+task, and state what you assumed in your final message. If a decision is
+genuinely ambiguous, pick the safer/smaller option — never block on input.
+
+## 8. Autonomous continuation — error recovery and shell hygiene
+
+- On build or test failure: diagnose, attempt to fix, and re-run. Only mark
+  **blocked** after two failed fix attempts, and explain exactly what failed.
+- **Never run interactive shell commands.** Specific rules:
+  - `git commit` → always `git commit -m "..."` (never open an editor).
+  - `git merge` → always `git merge --no-edit` or `git merge -m "..."`.
+  - `git rebase` → never interactive (`-i`); use `--onto` or scripted alternatives.
+  - `npm install` / `pip install` / `apt-get install` → always pass `-y` /
+    `--yes` / `--non-interactive` / `--no-input` as appropriate.
+  - `cmake --build` confirmations: use `-y` or pre-configure to avoid prompts.
+- **Long-running servers for tests:** start them in the background (shell `&` or
+  a background task), capture the PID, wait for the health endpoint, run the
+  test, then kill the PID. Never block the agent waiting for a server's stdout.
+- If a file, dependency, or resource is missing, note it and continue with what
+  is available — do not stop to ask where it is.
+- If a change touches more files than expected, apply the change to all affected
+  files and document the wider scope in the final message. Do not stop to confirm
+  scope expansion.
