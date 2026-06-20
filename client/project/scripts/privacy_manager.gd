@@ -53,9 +53,11 @@ var _session_id: String = ""
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-func _ready() -> void:
+func _init() -> void:
 	_generate_session_id()
-	print("[Privacy] PrivacyManager initialized (session: %s)" % _session_id)
+
+func _ready() -> void:
+	print("[Privacy] session=%s initialized" % _session_id)
 
 func _generate_session_id() -> void:
 	# Ephemeral session ID — not persisted, not logged with PII.
@@ -83,14 +85,14 @@ func register_monitor(monitor_id: int, name: String, width: int, height: int) ->
 ## @return true if sharing started, false if already shared or invalid
 func share_monitor(monitor_id: int) -> bool:
 	if not _monitor_names.has(monitor_id):
-		push_warning("[Privacy] Cannot share unknown monitor %d" % monitor_id)
+		push_warning("[Privacy] session=%s Cannot share unknown monitor_id=%d" % [_session_id, monitor_id])
 		return false
 
 	if _shared_monitors.has(monitor_id):
 		return true  # Already shared; idempotent
 
 	if _shared_monitors.size() >= MAX_SHARED_MONITORS:
-		push_warning("[Privacy] Maximum shared monitors (%d) reached" % MAX_SHARED_MONITORS)
+		push_warning("[Privacy] session=%s Maximum shared monitors (%d) reached monitor_id=%d" % [_session_id, MAX_SHARED_MONITORS, monitor_id])
 		return false
 
 	_shared_monitors.append(monitor_id)
@@ -125,7 +127,7 @@ func revoke_all_sharing() -> void:
 		_log_share_state_change(mid, false)
 
 	all_sharing_revoked.emit()
-	print("[Privacy] All sharing revoked (%d monitors)" % monitors_to_revoke.size())
+	print("[Privacy] session=%s All sharing revoked monitor_id_count=%d" % [_session_id, monitors_to_revoke.size()])
 
 ## Check if a specific monitor is currently shared.
 ## @param monitor_id Monitor to check

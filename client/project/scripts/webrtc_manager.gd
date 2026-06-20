@@ -106,3 +106,10 @@ func _on_data_channel_received(channel: WebRTCDataChannel, user_id: int) -> void
 
 func _on_data_channel_message(message: String, user_id: int) -> void:
     data_channel_message.emit(user_id, message)
+
+## Handle topology change from the signaling server.
+## In SFU mode the server relays poses, so direct P2P data-channel connections
+## are closed.  On return to P2P mode the caller re-creates peers via create_offer().
+func on_topology_changed(mode: String) -> void:
+    if mode == "sfu":
+        close_all()

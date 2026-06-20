@@ -19,15 +19,15 @@ var _right_hand: Node3D = null
 ## Screen panels for shared monitors.
 var _screen_panels: Dictionary = {}  # monitor_id -> RemoteScreenPanel
 
-func _ready() -> void:
+func _init() -> void:
     _head = Node3D.new()
     _head.name = "Head"
     add_child(_head)
-    
+
     _left_hand = Node3D.new()
     _left_hand.name = "LeftHand"
     add_child(_left_hand)
-    
+
     _right_hand = Node3D.new()
     _right_hand.name = "RightHand"
     add_child(_right_hand)

@@ -1,87 +1,54 @@
 #!/usr/bin/env python3
-"""SFU (Selective Forwarding Unit) server for Immersive-2 multi-user rooms.
+"""SFU relay server for Immersive-2 — handles 3+ user rooms.
 
-Receives media streams from all participants and forwards selectively.
-Routes encrypted SRTP packets only (no decryption).
+When a room crosses the P2P_MAX_USERS threshold the signaling server broadcasts
+topology_changed(mode="sfu") and clients route pose updates through the server
+relay instead of direct WebRTC data channels.
+
+NOTE: Godot's WebRTCPeerConnection supports only data channels, not media
+tracks.  Video streams continue to flow via the existing host TCP/UDP protocol
+(port 19801/19802).  Only pose/avatar data and signaling travel through here.
+
+This module re-uses SignalingServer from server.py (all relay logic already
+lives there) and exposes it on a dedicated SFU port so it can run as a
+separate process if desired.  In a single-machine deployment both can share
+the same SignalingServer instance.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Dict, List, Optional
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.signaling import object_from_string, object_to_string
+from server import SignalingServer, DEFAULT_HOST, P2P_MAX_USERS  # noqa: F401
 
-logger = logging.getLogger("sfu")
+logger = logging.getLogger("sfu_relay")
 
-class SFUPeer:
-    """Represents a peer in the SFU."""
-    def __init__(self, user_id: int, pc: RTCPeerConnection) -> None:
-        self.user_id = user_id
-        self.pc = pc
-        self.tracks: List = []
+SFU_PORT = 19811  # dedicated port; signaling default is 19810
 
-class SFUServer:
-    """Selective Forwarding Unit for 3+ users."""
-    
-    def __init__(self) -> None:
-        self.peers: Dict[int, SFUPeer] = {}
-        self._shutdown_event = asyncio.Event()
-    
-    async def add_peer(self, user_id: int, offer_sdp: str) -> str:
-        """Add a new peer to the SFU. Returns the answer SDP."""
-        pc = RTCPeerConnection()
-        peer = SFUPeer(user_id, pc)
-        self.peers[user_id] = peer
-        
-        # Set remote description (offer)
-        offer = RTCSessionDescription(sdp=offer_sdp, type="offer")
-        await pc.setRemoteDescription(offer)
-        
-        # Create answer
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        
-        logger.info("Peer %d added to SFU", user_id)
-        return pc.localDescription.sdp
-    
-    async def remove_peer(self, user_id: int) -> None:
-        """Remove a peer from the SFU."""
-        if user_id in self.peers:
-            peer = self.peers.pop(user_id)
-            await peer.pc.close()
-            logger.info("Peer %d removed from SFU", user_id)
-    
-    async def forward_tracks(self, user_id: int) -> None:
-        """Forward tracks from a peer to all other peers."""
-        if user_id not in self.peers:
-            return
-        
-        peer = self.peers[user_id]
-        for other_id, other_peer in self.peers.items():
-            if other_id != user_id:
-                for track in peer.tracks:
-                    other_peer.pc.addTrack(track)
-        
-        logger.info("Tracks from peer %d forwarded to %d peers", user_id, len(self.peers) - 1)
-    
-    async def run(self) -> None:
-        """Main SFU loop."""
-        logger.info("SFU server started")
-        await self._shutdown_event.wait()
-    
-    def shutdown(self) -> None:
-        self._shutdown_event.set()
 
-async def main() -> None:
-    sfu = SFUServer()
-    try:
-        await sfu.run()
-    except KeyboardInterrupt:
-        logger.info("SFU shutting down...")
+class SFURelayServer(SignalingServer):
+    """Signaling server configured for 3+ user SFU relay mode.
+
+    Inherits all of SignalingServer's WebSocket signaling and pose relay.
+    The topology threshold (P2P_MAX_USERS) drives automatic switching: when a
+    room grows past it, topology_changed(mode="sfu") is broadcast and the
+    server takes over pose fan-out.  Video frames are never routed here.
+    """
+
+
+async def _main() -> None:
+    server = SFURelayServer()
+    logger.info(
+        "SFU relay server starting on ws://%s:%d (P2P threshold = %d users)",
+        DEFAULT_HOST, SFU_PORT, P2P_MAX_USERS,
+    )
+    await server.run(host=DEFAULT_HOST, port=SFU_PORT)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    asyncio.run(_main())

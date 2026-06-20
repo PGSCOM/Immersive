@@ -49,7 +49,7 @@ func _assert_eq_float(actual: float, expected: float, tolerance: float,
 
 func _assert_close_vec3(actual: Vector3, expected: Vector3, tolerance: float,
 		message: String, passed: Array, failed: Array) -> void:
-	var ok := abs(actual.x - expected.x) <= tolerance \
+	var ok: bool = abs(actual.x - expected.x) <= tolerance \
 		and abs(actual.y - expected.y) <= tolerance \
 		and abs(actual.z - expected.z) <= tolerance
 	if ok:
@@ -104,7 +104,7 @@ func run_all(results: Dictionary, tree: SceneTree) -> void:
 	var passed: Array = []
 	var failed: Array = []
 
-	test_remote_screen_panel_applies_layout(passed, failed)
+	test_remote_screen_panel_applies_layout(passed, failed, tree)
 	test_remote_user_applies_pose(passed, failed, tree)
 	test_remote_user_applies_screen_layout(passed, failed, tree)
 	test_remote_user_manages_dynamic_screens(passed, failed, tree)
@@ -148,8 +148,9 @@ func test_remote_screen_panel_applies_layout(passed: Array, failed: Array, _tree
 	passed.append("panel exposes apply_layout_metadata()")
 	print("  PASS: panel exposes apply_layout_metadata()")
 
-	# Need a parent (or attachment to a viewport) so transforms are valid in the scene tree.
+	# Parent to a local root (transform checks use local transform which equals global when parent is at origin).
 	var root := Node3D.new()
+	_tree.root.add_child(root)
 	root.add_child(panel)
 
 	var pos := Vector3(2.5, 1.7, -3.0)
@@ -161,12 +162,12 @@ func test_remote_screen_panel_applies_layout(passed: Array, failed: Array, _tree
 	panel.apply_layout_metadata(entry)
 
 	# Position must round-trip relative to the parent.
-	var got_pos: Vector3 = panel.global_transform.origin
+	var got_pos: Vector3 = panel.transform.origin
 	_assert_close_vec3(got_pos, pos, 0.001, "panel global_position matches layout pos", passed, failed)
 
 	# Rotation — compare quaternions via dot product (>= 0 => same orientation).
-	var got_rot := Quaternion(panel.global_transform.basis.orthonormalized()).normalized()
-	var dot := abs(got_rot.dot(rot))
+	var got_rot := Quaternion(panel.transform.basis.orthonormalized()).normalized()
+	var dot: float = abs(got_rot.dot(rot))
 	if dot > 0.999:
 		passed.append("panel global_rotation matches layout rot (dot=%.4f)" % dot)
 		print("  PASS: panel global_rotation matches layout rot (dot=%.4f)" % dot)
@@ -244,15 +245,15 @@ func test_remote_user_applies_pose(passed: Array, failed: Array, _tree: SceneTre
 		_make_pose_dict(right_pos, right_rot))
 
 	var head: Node3D = user.get_head_node()
-	var got_head_pos: Vector3 = head.global_transform.origin
+	var got_head_pos: Vector3 = head.transform.origin
 	_assert_close_vec3(got_head_pos, head_pos, 0.001,
 		"head world position after update_pose", passed, failed)
 
 	var lh: Node3D = user.get_left_hand_node()
 	var rh: Node3D = user.get_right_hand_node()
-	_assert_close_vec3(lh.global_transform.origin, left_pos, 0.001,
+	_assert_close_vec3(lh.transform.origin, left_pos, 0.001,
 		"left hand position after update_pose", passed, failed)
-	_assert_close_vec3(rh.global_transform.origin, right_pos, 0.001,
+	_assert_close_vec3(rh.transform.origin, right_pos, 0.001,
 		"right hand position after update_pose", passed, failed)
 
 	# Re-applying with new pose actually moves the avatar.
@@ -261,7 +262,7 @@ func test_remote_user_applies_pose(passed: Array, failed: Array, _tree: SceneTre
 		_make_pose_dict(new_head_pos, head_rot),
 		_make_pose_dict(left_pos, left_rot),
 		_make_pose_dict(right_pos, right_rot))
-	_assert_close_vec3(head.global_transform.origin, new_head_pos, 0.001,
+	_assert_close_vec3(head.transform.origin, new_head_pos, 0.001,
 		"head position responds to second update_pose", passed, failed)
 
 	user.queue_free()
@@ -306,7 +307,7 @@ func test_remote_user_applies_screen_layout(passed: Array, failed: Array, _tree:
 	passed.append("remote_user exposes get_screen_panels()")
 	print("  PASS: remote_user exposes get_screen_panels()")
 
-	var panels := user.get_screen_panels()
+	var panels: Array = user.get_screen_panels()
 	_assert_eq_int(panels.size(), entries.size(),
 		"screen panel count == entry count", passed, failed)
 
@@ -317,7 +318,7 @@ func test_remote_user_applies_screen_layout(passed: Array, failed: Array, _tree:
 	for i in entries.size():
 		var p: Node = panels[i]
 		var e: Dictionary = entries[i]
-		var p_pos: Vector3 = (p as Node3D).global_transform.origin
+		var p_pos: Vector3 = (p as Node3D).transform.origin
 		_assert_close_vec3(p_pos, Vector3(e.pos_x, e.pos_y, e.pos_z), 0.001,
 			"panel[%d] global_position matches entry monitor_id=%d" % [i, e.monitor_id],
 			passed, failed)
@@ -482,7 +483,7 @@ func test_main_gd_pose_propagation(passed: Array, failed: Array, _tree: SceneTre
 
 		if user.has_method("get_head_node"):
 			var got: Node3D = user.get_head_node()
-			_assert_close_vec3(got.global_transform.origin, head_pos, 0.001,
+			_assert_close_vec3(got.transform.origin, head_pos, 0.001,
 				"head node reaches the pose target after apply_user_pose",
 				passed, failed)
 

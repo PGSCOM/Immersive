@@ -10,7 +10,9 @@ extends SceneTree
 
 # Catalogue of external test suites (RefCounted subclasses with run_all()).
 const EXTERNAL_SUITES := [
-	# "res://test/test_remote_users.gd",
+	"res://test/test_remote_users.gd",
+	"res://test/test_privacy.gd",
+	"res://test/test_hw_decode.gd",
 ]
 
 # Aggregate result counters across all suites.
