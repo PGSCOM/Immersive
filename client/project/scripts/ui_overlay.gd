@@ -2,8 +2,9 @@
 ##
 ## Floating SubViewport panel that shows connection status, IP input,
 ## monitor selection, and display settings.
-## Smoothly follows the camera each frame when visible (lazy-billboard
-## pattern used by the Godot VR editor and godot-xr-tools).
+## Organised in 4 tabs (Connect / Display / Spaces / Monitors) to avoid
+## vertical scrolling in VR. Smoothly follows the camera each frame when
+## visible (lazy-billboard pattern used by the Godot VR editor and godot-xr-tools).
 
 extends Node3D
 
@@ -24,6 +25,7 @@ signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int,
 signal auto_quality_requested
 ## Spaces & collaboration (mixed-reality + multi-user) requests.
 signal environment_cycle_requested
+signal environment_selected(index: int)
 signal portal_add_requested(shape: int)
 signal keyboard_portal_requested
 signal whiteboard_toggle_requested
@@ -87,12 +89,26 @@ var _jpeg_quality          : int             = 70
 var _res_percent           : int             = 100
 var _fps_value             : int             = 0
 
+# Tab state
+var _active_tab            : int             = 0
+var _tab_containers        : Array           = []
+var _tab_buttons           : Array           = []
+
+# Environment picker state
+var _env_names             : Array           = []
+var _env_buttons           : Dictionary     = {}   ## index -> Button
+var _selected_env_index    : int             = 0
+
+# Room state
+var _in_room               : bool = false
+var _mic_muted             : bool = false
+
 # ---------------------------------------------------------------------------
 # Internal node references (built procedurally)
 # ---------------------------------------------------------------------------
 
 var _viewport              : SubViewport
-var _reticle               : Node2D           ## Pointer reticle drawn on top (non-interactive)
+var _reticle               : Node2D           ## Pointer reticle drawn on top
 var _panel_mesh            : MeshInstance3D
 var _canvas                : CanvasLayer
 var _lbl_status            : Label
@@ -111,6 +127,7 @@ var _chk_passthrough       : CheckBox
 var _btn_workspace_save    : Button
 var _btn_workspace_restore : Button
 var _kbd_container         : VBoxContainer  ## In-viewport numeric keyboard
+var _env_button_container  : HBoxContainer  ## Grid of env choice buttons
 
 # Stream quality controls
 var _codec_buttons         : Dictionary = {}  ## value -> Button
@@ -129,18 +146,14 @@ var _input_room_id         : LineEdit
 var _input_room_name       : LineEdit
 var _btn_room_join         : Button
 var _lbl_room_status       : Label
-var _in_room               : bool = false
 
 # Public lobby controls
 var _chk_public            : CheckBox
 var _btn_lobby_refresh     : Button
 var _lobby_list_container  : VBoxContainer
 var _btn_mic               : Button
-var _mic_muted             : bool = false
 
-## Debounce timer: any quality-selector edit auto-applies a short moment later,
-## so settings always take effect without needing the Apply button. The delay
-## coalesces rapid changes (e.g. dragging a slider) into a single stream restart.
+## Debounce timer: any quality-selector edit auto-applies a short moment later.
 var _apply_debounce        : Timer
 const AUTO_APPLY_DELAY      := 0.45
 
@@ -156,7 +169,6 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	_update_labels()
-	# The overlay stays where it was opened; it only moves while being grabbed.
 	if _is_dragging and is_instance_valid(_drag_controller):
 		_follow_controller()
 	_update_reticle()
@@ -165,8 +177,7 @@ func _process(_delta: float) -> void:
 # Public API
 # ---------------------------------------------------------------------------
 
-## Show / hide the overlay.  On show: snap to camera, then smooth-follow
-## takes over each frame.
+## Show / hide the overlay. On show: snap to camera, then stays put until dragged.
 func toggle_visibility() -> void:
 	_visible_overlay = not _visible_overlay
 	if _visible_overlay:
@@ -218,6 +229,25 @@ func set_passthrough_settings(enabled: bool, supported: bool = true) -> void:
 	_passthrough_supported = supported
 	_update_passthrough_ui()
 
+## Populate the environment picker buttons. Called from main.gd after
+## environment_manager is ready (passing get_environment_names()).
+func set_environment_list(names: Array) -> void:
+	_env_names = names.duplicate()
+	_rebuild_env_picker()
+
+## Highlight the environment at `index` in the picker. Called from main.gd
+## after any environment change (cycle or direct selection).
+func set_environment_index(index: int) -> void:
+	_selected_env_index = index
+	_refresh_env_picker()
+	if _lbl_env_name and _env_names.size() > index:
+		_lbl_env_name.text = _env_names[index]
+
+## Legacy: just updates the name label (kept for backward compat; prefer set_environment_index).
+func set_environment_name(env_name: String) -> void:
+	if _lbl_env_name:
+		_lbl_env_name.text = env_name
+
 # ---------------------------------------------------------------------------
 # VR pointer injection  (called by main.gd / vr_input.gd)
 # ---------------------------------------------------------------------------
@@ -249,7 +279,6 @@ func inject_pointer_move(uv: Vector2) -> void:
 		return
 	_last_pointer_uv = uv
 	var px := Vector2(uv.x * _viewport.size.x, uv.y * _viewport.size.y)
-	# Track the reticle so the user can clearly see where the controller points.
 	_pointer_px          = px
 	_reticle_idle_frames = 0
 	var ev := InputEventMouseMotion.new()
@@ -284,17 +313,14 @@ func inject_pointer_scroll(delta_y: float) -> void:
 	_viewport.push_input(ev)
 
 # ---------------------------------------------------------------------------
-# Grab-to-move  (overlay is static; grip drags it like a screen panel)
+# Grab-to-move
 # ---------------------------------------------------------------------------
 
-## Begin dragging the overlay with the given controller (called from main.gd
-## when the grip is pressed while the pointer hovers the overlay).
 func start_drag(controller: Node3D) -> void:
 	if not controller:
 		return
 	_is_dragging     = true
 	_drag_controller = controller
-	# Record the overlay pose relative to the controller at grab time.
 	_drag_offset = controller.global_transform.affine_inverse() * global_transform
 
 func stop_drag() -> void:
@@ -305,11 +331,9 @@ func _follow_controller() -> void:
 	global_transform = _drag_controller.global_transform * _drag_offset
 
 # ---------------------------------------------------------------------------
-# Pointer reticle  (clear cursor over the overlay only)
+# Pointer reticle
 # ---------------------------------------------------------------------------
 
-## Show the reticle only while the pointer is actively hovering the overlay
-## (a few frames of grace so it doesn't flicker between input events).
 func _update_reticle() -> void:
 	if not _reticle:
 		return
@@ -323,7 +347,6 @@ func _update_reticle() -> void:
 func _on_reticle_draw() -> void:
 	var c := _pointer_px
 	var accent := Color(0.45, 0.85, 1.0, 0.95)
-	# Dark halo first for contrast against light/dark UI alike.
 	_reticle.draw_arc(c, 15.0, 0.0, TAU, 48, Color(0.0, 0.0, 0.0, 0.6), 5.0, true)
 	_reticle.draw_arc(c, 15.0, 0.0, TAU, 48, accent, 2.5, true)
 	_reticle.draw_circle(c, 3.0, accent)
@@ -332,7 +355,6 @@ func _on_reticle_draw() -> void:
 # Camera placement
 # ---------------------------------------------------------------------------
 
-## Instant snap used on first show.
 func _reposition_in_front_of_camera() -> void:
 	var vp := get_viewport()
 	if vp == null:
@@ -352,7 +374,7 @@ func _reposition_in_front_of_camera() -> void:
 	global_transform.basis  = Basis(right, Vector3.UP, -fwd)
 
 # ---------------------------------------------------------------------------
-# Theme helpers  (Issue #2 — dark VR-friendly design)
+# Theme helpers
 # ---------------------------------------------------------------------------
 
 func _flat(bg: Color, border: Color,
@@ -376,10 +398,8 @@ func _flat(bg: Color, border: Color,
 
 func _apply_theme(root: Control) -> void:
 	var t := Theme.new()
-	# PanelContainer background
 	t.set_stylebox("panel", "PanelContainer",
 		_flat(Color(0.055, 0.065, 0.115, 0.97), Color(0.20, 0.30, 0.58), 7, 12))
-	# Buttons
 	t.set_stylebox("normal",   "Button", _flat(Color(0.12, 0.18, 0.36), Color(0.26, 0.38, 0.68)))
 	t.set_stylebox("hover",    "Button", _flat(Color(0.20, 0.32, 0.60), Color(0.35, 0.52, 0.90)))
 	t.set_stylebox("pressed",  "Button", _flat(Color(0.07, 0.11, 0.26), Color(0.18, 0.28, 0.52)))
@@ -387,20 +407,16 @@ func _apply_theme(root: Control) -> void:
 	t.set_font_size("font_size", "Button", 18)
 	t.set_color("font_color",          "Button", Color(0.88, 0.92, 1.00))
 	t.set_color("font_disabled_color", "Button", Color(0.35, 0.38, 0.52))
-	# LineEdit
 	t.set_stylebox("normal", "LineEdit", _flat(Color(0.09, 0.10, 0.17), Color(0.26, 0.40, 0.70), 4, 8))
 	t.set_stylebox("focus",  "LineEdit", _flat(Color(0.11, 0.13, 0.21), Color(0.40, 0.62, 1.00), 4, 8))
 	t.set_font_size("font_size",              "LineEdit", 18)
 	t.set_color("font_color",            "LineEdit", Color(0.90, 0.94, 1.00))
 	t.set_color("font_placeholder_color","LineEdit", Color(0.40, 0.45, 0.62))
-	# Labels
 	t.set_font_size("font_size", "Label", 19)
 	t.set_color("font_color",    "Label", Color(0.87, 0.91, 1.00))
-	# CheckBox
 	t.set_font_size("font_size",           "CheckBox", 18)
 	t.set_color("font_color",              "CheckBox", Color(0.87, 0.91, 1.00))
 	t.set_color("font_disabled_color",     "CheckBox", Color(0.38, 0.40, 0.55))
-	# HSlider — make track visible
 	var track := StyleBoxFlat.new()
 	track.bg_color = Color(0.18, 0.22, 0.40)
 	track.corner_radius_top_left = 3
@@ -438,8 +454,7 @@ func _build_ui() -> void:
 	_apply_theme(root)
 	_canvas.add_child(root)
 
-	# Pointer reticle — a Node2D (not a Control) so it draws on top of the UI
-	# but never takes part in GUI input picking: it can't ever eat clicks.
+	# Pointer reticle (non-interactive, draws on top of UI)
 	_reticle = Node2D.new()
 	_reticle.visible = false
 	_reticle.draw.connect(_on_reticle_draw)
@@ -447,7 +462,7 @@ func _build_ui() -> void:
 
 	var vbox := VBoxContainer.new()
 	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	vbox.add_theme_constant_override("separation", 6)
+	vbox.add_theme_constant_override("separation", 0)
 	root.add_child(vbox)
 
 	# ── Title bar ────────────────────────────────────────────────────────
@@ -473,7 +488,15 @@ func _build_ui() -> void:
 	# ── Status row ───────────────────────────────────────────────────────
 	var info_row := HBoxContainer.new()
 	info_row.add_theme_constant_override("separation", 20)
-	vbox.add_child(info_row)
+	var info_mg := StyleBoxEmpty.new()
+	info_mg.content_margin_left  = 14
+	info_mg.content_margin_right = 14
+	info_mg.content_margin_top   = 4
+	info_mg.content_margin_bottom = 4
+	var info_wrap := PanelContainer.new()
+	info_wrap.add_theme_stylebox_override("panel", info_mg)
+	vbox.add_child(info_wrap)
+	info_wrap.add_child(info_row)
 
 	var st_box := HBoxContainer.new()
 	st_box.add_theme_constant_override("separation", 6)
@@ -501,12 +524,130 @@ func _build_ui() -> void:
 	_lbl_ping.text = "-- ms"
 	ping_box.add_child(_lbl_ping)
 
-	# ── Connection section ──────────────────────────────────────────────
-	_add_section_separator(vbox, "Connection")
+	# ── Tab bar ──────────────────────────────────────────────────────────
+	_build_tab_bar(vbox)
+
+	# ── Tab 0: Connect ───────────────────────────────────────────────────
+	var tab0 := VBoxContainer.new()
+	tab0.add_theme_constant_override("separation", 6)
+	tab0.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(tab0)
+	_tab_containers.append(tab0)
+	_build_tab_connect(tab0)
+
+	# ── Tab 1: Display ───────────────────────────────────────────────────
+	var tab1 := VBoxContainer.new()
+	tab1.add_theme_constant_override("separation", 6)
+	tab1.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(tab1)
+	_tab_containers.append(tab1)
+	_build_tab_display(tab1)
+
+	# ── Tab 2: Spaces ────────────────────────────────────────────────────
+	var tab2 := VBoxContainer.new()
+	tab2.add_theme_constant_override("separation", 6)
+	tab2.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(tab2)
+	_tab_containers.append(tab2)
+	_build_spaces_section(tab2)
+
+	# ── Tab 3: Monitors ──────────────────────────────────────────────────
+	var tab3 := VBoxContainer.new()
+	tab3.add_theme_constant_override("separation", 6)
+	tab3.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(tab3)
+	_tab_containers.append(tab3)
+	_build_tab_monitors(tab3)
+
+	# Non-visual timer (shared across tabs)
+	_apply_debounce = Timer.new()
+	_apply_debounce.one_shot = true
+	_apply_debounce.timeout.connect(_on_apply_quality_pressed)
+	add_child(_apply_debounce)
+
+	_switch_tab(0)
+
+	# ── 3D mesh that renders the SubViewport in world space ───────────────
+	_panel_mesh = MeshInstance3D.new()
+	var plane          := PlaneMesh.new()
+	plane.size          = Vector2(panel_width, panel_height)
+	plane.orientation   = PlaneMesh.FACE_Z
+	_panel_mesh.mesh   = plane
+	var mat            := StandardMaterial3D.new()
+	mat.albedo_texture  = _viewport.get_texture()
+	mat.flags_transparent = true
+	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_panel_mesh.material_override = mat
+	add_child(_panel_mesh)
+
+# ---------------------------------------------------------------------------
+# Tab bar
+# ---------------------------------------------------------------------------
+
+func _build_tab_bar(parent: VBoxContainer) -> void:
+	var sep1 := HSeparator.new()
+	sep1.add_theme_color_override("color", Color(0.14, 0.19, 0.38))
+	parent.add_child(sep1)
+
+	var bar_bg := StyleBoxFlat.new()
+	bar_bg.bg_color = Color(0.07, 0.10, 0.22)
+	bar_bg.border_width_bottom = 1
+	bar_bg.border_color = Color(0.20, 0.28, 0.55)
+	bar_bg.content_margin_left   = 4
+	bar_bg.content_margin_right  = 4
+	bar_bg.content_margin_top    = 4
+	bar_bg.content_margin_bottom = 4
+	var bar_wrap := PanelContainer.new()
+	bar_wrap.add_theme_stylebox_override("panel", bar_bg)
+	parent.add_child(bar_wrap)
+
+	var bar := HBoxContainer.new()
+	bar.add_theme_constant_override("separation", 3)
+	bar_wrap.add_child(bar)
+
+	var tab_defs := [
+		["⚡ Connect",  "Connection & host IP"],
+		["🖥 Display",  "Screen & stream quality"],
+		["🌆 Spaces",   "Environments, portals & rooms"],
+		["📺 Monitors", "Active monitor screens"],
+	]
+	for i in range(tab_defs.size()):
+		var btn := Button.new()
+		btn.text         = tab_defs[i][0]
+		btn.tooltip_text = tab_defs[i][1]
+		btn.toggle_mode  = true
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.add_theme_font_size_override("font_size", 17)
+		var idx := i
+		btn.pressed.connect(func(): _switch_tab(idx))
+		bar.add_child(btn)
+		_tab_buttons.append(btn)
+
+func _switch_tab(index: int) -> void:
+	_active_tab = index
+	for i in range(_tab_containers.size()):
+		_tab_containers[i].visible = (i == index)
+	for i in range(_tab_buttons.size()):
+		var btn: Button = _tab_buttons[i]
+		btn.set_pressed_no_signal(i == index)
+		if i == index:
+			btn.add_theme_color_override("font_color", Color(0.55, 0.95, 0.65))
+			btn.add_theme_stylebox_override("normal",
+				_flat(Color(0.10, 0.22, 0.14), Color(0.25, 0.65, 0.40)))
+		else:
+			btn.remove_theme_color_override("font_color")
+			btn.remove_theme_stylebox_override("normal")
+
+# ---------------------------------------------------------------------------
+# Tab 0 – Connect
+# ---------------------------------------------------------------------------
+
+func _build_tab_connect(parent: VBoxContainer) -> void:
+	_add_section_separator(parent, "Connection")
 
 	var ip_row := HBoxContainer.new()
 	ip_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(ip_row)
+	parent.add_child(ip_row)
 	var ip_title := Label.new()
 	ip_title.text = "Host IP"
 	ip_title.add_theme_color_override("font_color", Color(0.68, 0.74, 0.94))
@@ -518,28 +659,31 @@ func _build_ui() -> void:
 	_input_ip.placeholder_text      = "192.168.1.100"
 	ip_row.add_child(_input_ip)
 	var kbd_toggle := Button.new()
-	kbd_toggle.text        = "⌨"
+	kbd_toggle.text         = "⌨"
 	kbd_toggle.tooltip_text = "Show / hide IP keyboard"
 	kbd_toggle.pressed.connect(_on_toggle_kbd)
 	ip_row.add_child(kbd_toggle)
 
-	# In-viewport IP keyboard (Issue #4)
 	_kbd_container         = _build_ip_keyboard()
 	_kbd_container.visible = false
-	vbox.add_child(_kbd_container)
+	parent.add_child(_kbd_container)
 
 	_btn_connect = Button.new()
 	_btn_connect.text = "Connect"
 	_btn_connect.pressed.connect(_on_connect_pressed)
-	vbox.add_child(_btn_connect)
+	parent.add_child(_btn_connect)
 
-	# ── Display section ──────────────────────────────────────────────────
-	_add_section_separator(vbox, "Display")
+# ---------------------------------------------------------------------------
+# Tab 1 – Display
+# ---------------------------------------------------------------------------
 
-	# Curved screen (checkbox + slider on same row)
+func _build_tab_display(parent: VBoxContainer) -> void:
+	_add_section_separator(parent, "Display")
+
+	# Curved screen
 	var curve_row := HBoxContainer.new()
 	curve_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(curve_row)
+	parent.add_child(curve_row)
 	_chk_curved = CheckBox.new()
 	_chk_curved.text           = "Curved screen"
 	_chk_curved.button_pressed = _curved_enabled
@@ -558,7 +702,7 @@ func _build_ui() -> void:
 	_slider_curvature.value_changed.connect(_on_curvature_value_changed)
 	curve_row.add_child(_slider_curvature)
 	_lbl_curvature_value = Label.new()
-	_lbl_curvature_value.text              = "%.2f" % _curvature_amount
+	_lbl_curvature_value.text               = "%.2f" % _curvature_amount
 	_lbl_curvature_value.custom_minimum_size = Vector2(38, 0)
 	_lbl_curvature_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	curve_row.add_child(_lbl_curvature_value)
@@ -567,7 +711,7 @@ func _build_ui() -> void:
 	# Foveated rendering
 	var fov_row := HBoxContainer.new()
 	fov_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(fov_row)
+	parent.add_child(fov_row)
 	_chk_foveation = CheckBox.new()
 	_chk_foveation.text           = "Eye-tracked foveation"
 	_chk_foveation.button_pressed = _foveation_enabled
@@ -594,7 +738,7 @@ func _build_ui() -> void:
 
 	# Passthrough
 	var pass_row := HBoxContainer.new()
-	vbox.add_child(pass_row)
+	parent.add_child(pass_row)
 	_chk_passthrough = CheckBox.new()
 	_chk_passthrough.text           = "Passthrough  (mixed reality)"
 	_chk_passthrough.button_pressed = _passthrough_enabled
@@ -602,18 +746,19 @@ func _build_ui() -> void:
 	pass_row.add_child(_chk_passthrough)
 	_update_passthrough_ui()
 
-	# ── Stream quality section ───────────────────────────────────────────
-	_build_quality_section(vbox)
+	# Stream quality
+	_build_quality_section(parent)
 
-	# ── Spaces & collaboration section ───────────────────────────────────
-	_build_spaces_section(vbox)
+# ---------------------------------------------------------------------------
+# Tab 3 – Monitors
+# ---------------------------------------------------------------------------
 
-	# ── Monitors section ─────────────────────────────────────────────────
-	_add_section_separator(vbox, "Monitors")
+func _build_tab_monitors(parent: VBoxContainer) -> void:
+	_add_section_separator(parent, "Monitors")
 
 	var mon_hdr := HBoxContainer.new()
 	mon_hdr.add_theme_constant_override("separation", 6)
-	vbox.add_child(mon_hdr)
+	parent.add_child(mon_hdr)
 	var mon_fill := Control.new()
 	mon_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	mon_hdr.add_child(mon_fill)
@@ -629,28 +774,15 @@ func _build_ui() -> void:
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical  = Control.SIZE_EXPAND_FILL
 	scroll.custom_minimum_size  = Vector2(0, 80)
-	vbox.add_child(scroll)
+	parent.add_child(scroll)
 
 	_monitor_list = VBoxContainer.new()
 	_monitor_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_monitor_list.add_theme_constant_override("separation", 4)
 	scroll.add_child(_monitor_list)
 
-	# ── 3D mesh that renders the SubViewport in world space ───────────────
-	_panel_mesh = MeshInstance3D.new()
-	var plane          := PlaneMesh.new()
-	plane.size          = Vector2(panel_width, panel_height)
-	plane.orientation   = PlaneMesh.FACE_Z
-	_panel_mesh.mesh   = plane
-	var mat            := StandardMaterial3D.new()
-	mat.albedo_texture  = _viewport.get_texture()
-	mat.flags_transparent = true
-	mat.shading_mode    = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_panel_mesh.material_override = mat
-	add_child(_panel_mesh)
-
 # ---------------------------------------------------------------------------
-# Stream quality section
+# Stream quality section (Tab 1 – Display)
 # ---------------------------------------------------------------------------
 
 ## Row of mutually-exclusive option buttons. `options` = [[label, value], …].
@@ -694,9 +826,6 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	codec_row.add_theme_constant_override("separation", 6)
 	vbox.add_child(codec_row)
 	_quality_label(codec_row, "Codec")
-	# Auto picks the best codec the device can decode (hardware H.264/HEVC/AV1 on
-	# Quest/Pico, software MJPEG on PC/iOS/web). MJPEG can also be forced explicitly
-	# — it is the software fallback, tuned via the JPEG-quality slider below.
 	_codec_buttons = _make_segmented_row(codec_row,
 		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3], ["MJPEG", 2]],
 		_on_codec_chosen)
@@ -763,21 +892,15 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	_lbl_auto_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(_lbl_auto_info)
 
-	# Apply button (settings also auto-apply shortly after any change)
+	# Apply button
 	var apply_btn := Button.new()
 	apply_btn.text = "✔ Apply quality settings"
 	apply_btn.pressed.connect(_on_apply_quality_pressed)
 	vbox.add_child(apply_btn)
 
-	# Debounced auto-apply so the selectors always update without the button.
-	_apply_debounce = Timer.new()
-	_apply_debounce.one_shot = true
-	_apply_debounce.timeout.connect(_on_apply_quality_pressed)
-	add_child(_apply_debounce)
-
 	_refresh_quality_ui()
 
-## (Re)start the auto-apply countdown. Called after every selector edit.
+## (Re)start the auto-apply countdown.
 func _schedule_auto_apply() -> void:
 	if _apply_debounce:
 		_apply_debounce.start(AUTO_APPLY_DELAY)
@@ -794,8 +917,6 @@ func _refresh_quality_ui() -> void:
 		_slider_jpegq.set_value_no_signal(_jpeg_quality)
 	if _lbl_jpegq_value:
 		_lbl_jpegq_value.text = "%d" % _jpeg_quality
-	# Highlight the slider that matters for the chosen codec
-	# (bitrate → H.264/HEVC/AV1; JPEG quality → MJPEG/Auto)
 	if _slider_bitrate:
 		_slider_bitrate.editable = _stream_codec in [0, 1, 3]
 	if _slider_jpegq:
@@ -810,7 +931,6 @@ func _on_res_chosen(value: int) -> void:
 	_res_percent = value
 	_refresh_quality_ui()
 	if value == -1:
-		# Auto resolution recomputes and applies on the spot (its own path).
 		auto_quality_requested.emit()
 	else:
 		_schedule_auto_apply()
@@ -843,7 +963,7 @@ func set_stream_settings(codec: int, bitrate_kbps: int, jpeg_quality: int,
 	_bitrate_kbps = bitrate_kbps
 	_jpeg_quality = jpeg_quality
 	_res_percent = res_percent
-	_fps_value = fps  # if no button matches, none is highlighted — that's fine
+	_fps_value = fps
 	_refresh_quality_ui()
 
 ## Show the result of the perceptual auto-quality computation.
@@ -854,29 +974,40 @@ func set_auto_quality_result(width: int, height: int, fps: int,
 			width, height, fps, angle_deg, distance, ppd]
 
 # ---------------------------------------------------------------------------
-# Spaces & collaboration section (environments, portals, whiteboard, rooms)
+# Tab 2 – Spaces & collaboration (environments, portals, whiteboard, rooms)
 # ---------------------------------------------------------------------------
 
-func _build_spaces_section(vbox: VBoxContainer) -> void:
-	_add_section_separator(vbox, "Spaces & collaboration")
+func _build_spaces_section(parent: VBoxContainer) -> void:
+	# ── Environment picker ────────────────────────────────────────────────
+	_add_section_separator(parent, "Environment")
 
-	# Themed environment cycle.
-	var env_row := HBoxContainer.new()
-	env_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(env_row)
-	var env_btn := Button.new()
-	env_btn.text = "🌆 Environment ▶"
-	env_btn.pressed.connect(func(): environment_cycle_requested.emit())
-	env_row.add_child(env_btn)
+	# Current env name label
 	_lbl_env_name = Label.new()
-	_lbl_env_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_lbl_env_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	env_row.add_child(_lbl_env_name)
+	_lbl_env_name.text = ""
+	_lbl_env_name.add_theme_font_size_override("font_size", 15)
+	_lbl_env_name.add_theme_color_override("font_color", Color(0.55, 0.80, 1.00))
+	_lbl_env_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	parent.add_child(_lbl_env_name)
 
-	# Mixed-reality passthrough portals + whiteboard.
+	# Env picker button row (populated lazily via set_environment_list)
+	_env_button_container = HBoxContainer.new()
+	_env_button_container.add_theme_constant_override("separation", 4)
+	parent.add_child(_env_button_container)
+
+	# Placeholder label shown until set_environment_list() is called
+	var env_placeholder := Label.new()
+	env_placeholder.name = "EnvPlaceholder"
+	env_placeholder.text = "Loading environments…"
+	env_placeholder.add_theme_font_size_override("font_size", 15)
+	env_placeholder.add_theme_color_override("font_color", Color(0.45, 0.50, 0.65))
+	_env_button_container.add_child(env_placeholder)
+
+	# ── Mixed-reality portals + whiteboard ────────────────────────────────
+	_add_section_separator(parent, "Spaces & Collaboration")
+
 	var mr_row := HBoxContainer.new()
 	mr_row.add_theme_constant_override("separation", 6)
-	vbox.add_child(mr_row)
+	parent.add_child(mr_row)
 	_quality_label(mr_row, "Portal", 56)
 	_portal_button(mr_row, "▭", "Add a rectangular passthrough portal", 0)
 	_portal_button(mr_row, "■", "Add a square passthrough portal", 1)
@@ -892,36 +1023,36 @@ func _build_spaces_section(vbox: VBoxContainer) -> void:
 	wb_btn.pressed.connect(func(): whiteboard_toggle_requested.emit())
 	mr_row.add_child(wb_btn)
 
-	# Multi-user room: signaling server URL, room id, display name.
+	# ── Multi-user room ───────────────────────────────────────────────────
 	var url_row := HBoxContainer.new()
 	url_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(url_row)
+	parent.add_child(url_row)
 	_quality_label(url_row, "Server", 56)
 	_input_room_url = LineEdit.new()
-	_input_room_url.placeholder_text = "ws://192.168.1.100:19810"
+	_input_room_url.placeholder_text      = "ws://192.168.1.100:19810"
 	_input_room_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	url_row.add_child(_input_room_url)
 
 	var room_row := HBoxContainer.new()
 	room_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(room_row)
+	parent.add_child(room_row)
 	_quality_label(room_row, "Room", 56)
 	_input_room_id = LineEdit.new()
-	_input_room_id.placeholder_text = "lobby"
-	_input_room_id.text = "lobby"
+	_input_room_id.placeholder_text      = "lobby"
+	_input_room_id.text                  = "lobby"
 	_input_room_id.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	room_row.add_child(_input_room_id)
 	_input_room_name = LineEdit.new()
-	_input_room_name.placeholder_text = "Name"
-	_input_room_name.text = "Guest"
+	_input_room_name.placeholder_text  = "Name"
+	_input_room_name.text              = "Guest"
 	_input_room_name.custom_minimum_size = Vector2(120, 0)
 	room_row.add_child(_input_room_name)
 
 	var join_row := HBoxContainer.new()
 	join_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(join_row)
+	parent.add_child(join_row)
 	_btn_room_join = Button.new()
-	_btn_room_join.text = "🤝 Join room"
+	_btn_room_join.text                  = "🤝 Join room"
 	_btn_room_join.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_room_join.pressed.connect(_on_room_join_pressed)
 	join_row.add_child(_btn_room_join)
@@ -930,39 +1061,39 @@ func _build_spaces_section(vbox: VBoxContainer) -> void:
 	_lbl_room_status.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
 	join_row.add_child(_lbl_room_status)
 
-	# Microphone mute toggle for room voice chat.
+	# Voice chat mute
 	var voice_row := HBoxContainer.new()
 	voice_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(voice_row)
+	parent.add_child(voice_row)
 	_quality_label(voice_row, "Voice", 56)
 	_btn_mic = Button.new()
-	_btn_mic.text = "🎤 Mic on"
+	_btn_mic.text         = "🎤 Mic on"
 	_btn_mic.tooltip_text = "Mute / unmute your microphone for the room (M)"
 	_btn_mic.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_mic.pressed.connect(func(): mic_mute_toggled.emit())
 	voice_row.add_child(_btn_mic)
 
-	# ── Public Lobby ──────────────────────────────────────────────────────────
-	# Browse and one-click-join public rooms without typing a room ID manually.
-	_add_section_separator(vbox, "Public Lobby")
+	# ── Public Lobby ──────────────────────────────────────────────────────
+	_add_section_separator(parent, "Public Lobby")
 
 	var lobby_ctrl_row := HBoxContainer.new()
 	lobby_ctrl_row.add_theme_constant_override("separation", 8)
-	vbox.add_child(lobby_ctrl_row)
+	parent.add_child(lobby_ctrl_row)
 	_chk_public = CheckBox.new()
-	_chk_public.text = "Make public"
+	_chk_public.text         = "Make public"
 	_chk_public.tooltip_text = "List this room in the public lobby so others can discover and join it"
 	lobby_ctrl_row.add_child(_chk_public)
 	_btn_lobby_refresh = Button.new()
-	_btn_lobby_refresh.text = "⟳ Refresh"
+	_btn_lobby_refresh.text                  = "⟳ Refresh"
 	_btn_lobby_refresh.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_lobby_refresh.pressed.connect(func(): lobby_list_requested.emit())
 	lobby_ctrl_row.add_child(_btn_lobby_refresh)
 
 	var lobby_scroll := ScrollContainer.new()
-	lobby_scroll.custom_minimum_size = Vector2(0, 96)
-	lobby_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_child(lobby_scroll)
+	lobby_scroll.custom_minimum_size    = Vector2(0, 80)
+	lobby_scroll.size_flags_horizontal  = Control.SIZE_EXPAND_FILL
+	lobby_scroll.size_flags_vertical    = Control.SIZE_EXPAND_FILL
+	parent.add_child(lobby_scroll)
 	_lobby_list_container = VBoxContainer.new()
 	_lobby_list_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lobby_scroll.add_child(_lobby_list_container)
@@ -974,10 +1105,55 @@ func _build_spaces_section(vbox: VBoxContainer) -> void:
 
 func _portal_button(parent: HBoxContainer, label: String, tip: String, shape: int) -> void:
 	var b := Button.new()
-	b.text = label
+	b.text         = label
 	b.tooltip_text = tip
 	b.pressed.connect(func(): portal_add_requested.emit(shape))
 	parent.add_child(b)
+
+# ---------------------------------------------------------------------------
+# Environment picker – rebuilt when set_environment_list() is called
+# ---------------------------------------------------------------------------
+
+func _rebuild_env_picker() -> void:
+	if not is_instance_valid(_env_button_container):
+		return
+	# Remove all children (placeholder label + old buttons)
+	for child in _env_button_container.get_children():
+		_env_button_container.remove_child(child)
+		child.queue_free()
+	_env_buttons.clear()
+
+	for i in range(_env_names.size()):
+		var b := Button.new()
+		b.text          = _env_names[i]
+		b.toggle_mode   = true
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.add_theme_font_size_override("font_size", 16)
+		var idx := i
+		b.pressed.connect(func(): _on_env_chosen(idx))
+		_env_button_container.add_child(b)
+		_env_buttons[i] = b
+
+	_refresh_env_picker()
+
+func _refresh_env_picker() -> void:
+	for i in _env_buttons:
+		var b: Button = _env_buttons[i]
+		b.set_pressed_no_signal(i == _selected_env_index)
+		if i == _selected_env_index:
+			b.add_theme_color_override("font_color", Color(0.55, 0.95, 0.65))
+			b.add_theme_stylebox_override("normal",
+				_flat(Color(0.08, 0.22, 0.14), Color(0.25, 0.65, 0.40)))
+		else:
+			b.remove_theme_color_override("font_color")
+			b.remove_theme_stylebox_override("normal")
+
+func _on_env_chosen(index: int) -> void:
+	_selected_env_index = index
+	_refresh_env_picker()
+	if _lbl_env_name and _env_names.size() > index:
+		_lbl_env_name.text = _env_names[index]
+	environment_selected.emit(index)
 
 func _on_room_join_pressed() -> void:
 	if _in_room:
@@ -997,18 +1173,10 @@ func set_room_state(in_room: bool, info: String = "") -> void:
 	if _lbl_room_status:
 		_lbl_room_status.text = info if not info.is_empty() else ("In room" if in_room else "Not in a room")
 
-## Reflect the active environment name from main.gd.
-func set_environment_name(env_name: String) -> void:
-	if _lbl_env_name:
-		_lbl_env_name.text = env_name
-
-## Populate the public lobby list. Each entry gets a quick-join button.
-## Called by main.gd when a lobby_rooms / lobby_update signal arrives.
+## Populate the public lobby list.
 func populate_lobby(rooms: Array) -> void:
-	# Lazily create the container if _ready() hasn't fired yet (e.g. headless tests).
 	if not is_instance_valid(_lobby_list_container):
 		_lobby_list_container = VBoxContainer.new()
-	# remove_child before queue_free so get_child_count() is accurate immediately.
 	for child in _lobby_list_container.get_children():
 		_lobby_list_container.remove_child(child)
 		child.queue_free()
@@ -1032,11 +1200,10 @@ func populate_lobby(rooms: Array) -> void:
 		row.add_child(lbl)
 		var btn := Button.new()
 		btn.text = "→ Join"
-		var _rid: String = rid   # capture for closure
+		var _rid: String = rid
 		btn.pressed.connect(func(): _on_lobby_join_pressed(_rid))
 		row.add_child(btn)
 
-## Fill the Room field with the chosen room_id and trigger a join.
 func _on_lobby_join_pressed(room_id: String) -> void:
 	if is_instance_valid(_input_room_id):
 		_input_room_id.text = room_id
@@ -1065,7 +1232,7 @@ func _add_section_separator(parent: VBoxContainer, title: String) -> void:
 	parent.add_child(lbl)
 
 # ---------------------------------------------------------------------------
-# In-viewport IP keyboard  (Issue #4)
+# In-viewport IP keyboard
 # ---------------------------------------------------------------------------
 
 func _build_ip_keyboard() -> VBoxContainer:
@@ -1261,8 +1428,6 @@ func _on_connect_pressed() -> void:
 		connect_requested.emit("", 0, 0)
 
 func _on_monitor_selected(monitor_id: int) -> void:
-	# Keep the overlay open: selection toggles screens on/off, and the list
-	# refreshes via set_active_monitors() to show the new state.
 	monitor_selected.emit(monitor_id)
 
 func _on_curved_toggled(enabled: bool) -> void:
@@ -1302,7 +1467,7 @@ func _on_workspace_restore_pressed() -> void:
 	workspace_restore_requested.emit()
 
 # ---------------------------------------------------------------------------
-# Config persistence  (identical to original)
+# Config persistence
 # ---------------------------------------------------------------------------
 
 func _save_config() -> void:

@@ -46,6 +46,9 @@ var foveation_enabled: bool = false
 var foveation_strength: float = 0.55
 var passthrough_enabled: bool = false
 
+## Persisted environment index (loaded from config, applied after env_manager init).
+var _saved_environment_index: int = 0
+
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
 ## Resolved from the device's decode capability in _load_config(); see
@@ -400,6 +403,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.auto_quality_requested.connect(_on_overlay_auto_quality_requested)
 	if ui_overlay.has_signal("environment_cycle_requested"):
 		ui_overlay.environment_cycle_requested.connect(_on_overlay_environment_cycle)
+	if ui_overlay.has_signal("environment_selected"):
+		ui_overlay.environment_selected.connect(_on_overlay_environment_selected)
 	if ui_overlay.has_signal("portal_add_requested"):
 		ui_overlay.portal_add_requested.connect(_on_overlay_portal_add)
 	if ui_overlay.has_signal("keyboard_portal_requested"):
@@ -1024,7 +1029,20 @@ func _on_overlay_workspace_restore_requested() -> void:
 
 func _on_overlay_environment_cycle() -> void:
 	cycle_environment()
-	if ui_overlay and ui_overlay.has_method("set_environment_name") and environment_manager:
+	_sync_environment_to_overlay()
+
+func _on_overlay_environment_selected(index: int) -> void:
+	if environment_manager:
+		environment_manager.set_environment(index)
+		_save_config()
+		_sync_environment_to_overlay()
+
+func _sync_environment_to_overlay() -> void:
+	if not environment_manager or not ui_overlay:
+		return
+	if ui_overlay.has_method("set_environment_index"):
+		ui_overlay.set_environment_index(environment_manager.get_current_index())
+	if ui_overlay.has_method("set_environment_name"):
 		ui_overlay.set_environment_name(environment_manager.get_current_name())
 
 func _on_overlay_portal_add(shape: int) -> void:
@@ -1327,6 +1345,8 @@ func _save_config() -> void:
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
 	cfg.set_value("stream", "res_percent", stream_res_percent)
 	cfg.set_value("stream", "fps", stream_fps)
+	if environment_manager:
+		cfg.set_value("display", "environment_index", environment_manager.get_current_index())
 	cfg.save(CONFIG_PATH)
 
 ## Best codec this device can actually decode, preferring hardware.
@@ -1369,6 +1389,7 @@ func _load_config() -> void:
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
+		_saved_environment_index = cfg.get_value("display", "environment_index", 0)
 		# Test harness (see _autoconnect_on_start docs). Writable over adb run-as.
 		_autoconnect_on_start = cfg.get_value("test", "autoconnect", false)
 		_debug_capture = cfg.get_value("test", "debug_capture", false)
@@ -1440,8 +1461,16 @@ func _init_world_features() -> void:
 	if is_instance_valid(xr_origin) and is_instance_valid(xr_camera):
 		locomotion.configure(xr_origin, xr_camera)
 
-	if ui_overlay and ui_overlay.has_method("set_environment_name"):
-		ui_overlay.set_environment_name(environment_manager.get_current_name())
+	# Apply saved environment index (loaded from config before _init_world_features runs).
+	environment_manager.set_environment(_saved_environment_index)
+
+	if ui_overlay:
+		if ui_overlay.has_method("set_environment_list"):
+			ui_overlay.set_environment_list(environment_manager.get_environment_names())
+		if ui_overlay.has_method("set_environment_index"):
+			ui_overlay.set_environment_index(environment_manager.get_current_index())
+		elif ui_overlay.has_method("set_environment_name"):
+			ui_overlay.set_environment_name(environment_manager.get_current_name())
 
 func _init_multiuser() -> void:
 	signaling_client = preload("res://scripts/signaling_client.gd").new()
