@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure CMake
         run: |
@@ -25,7 +25,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immersive2_host_windows
           path: host/build/Release/*
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure CMake
         run: |
@@ -47,7 +47,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact (Linux)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immersive2_host_linux
           path: |
@@ -60,7 +60,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure CMake
         run: |
@@ -71,7 +71,7 @@ jobs:
           cmake --build host/build --config Release
 
       - name: Upload Host Artifact (macOS)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immersive2_host_macos
           path: |
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install system packages
         run: |
@@ -126,10 +126,10 @@ jobs:
     needs: client-tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -173,7 +173,7 @@ jobs:
           echo "Godot installed: $(godot --version)"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Configure Android environment for Godot
         run: |
@@ -262,14 +262,14 @@ jobs:
           test -f "${CLIENT_DIR}/export/android/Immersive2.apk"
 
       - name: Upload Client Windows Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immersive2_client_windows
           path: client/export/windows/*
           if-no-files-found: warn
 
       - name: Upload Client Android Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: immersive2_client_android
           path: client/export/android/*
