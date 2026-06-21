@@ -83,6 +83,8 @@ var _foveation_strength    : float           = 0.55
 var _passthrough_enabled   : bool            = false
 var _passthrough_supported : bool            = true
 var _last_pointer_uv       : Vector2         = Vector2(0.5, 0.5)
+var _room_url              : String          = ""
+var _room_name             : String          = "Guest"
 var _kbd_visible           : bool            = false
 
 # Grab-to-move state (the overlay stays static until grabbed with the grip).
@@ -1098,6 +1100,7 @@ func _build_spaces_section(parent: VBoxContainer) -> void:
 	_quality_label(url_row, "Server", 56)
 	_input_room_url = LineEdit.new()
 	_input_room_url.placeholder_text      = "ws://192.168.1.100:19810"
+	_input_room_url.text                  = _room_url
 	_input_room_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	url_row.add_child(_input_room_url)
 
@@ -1112,7 +1115,7 @@ func _build_spaces_section(parent: VBoxContainer) -> void:
 	room_row.add_child(_input_room_id)
 	_input_room_name = LineEdit.new()
 	_input_room_name.placeholder_text  = "Name"
-	_input_room_name.text              = "Guest"
+	_input_room_name.text              = _room_name if not _room_name.is_empty() else "Guest"
 	_input_room_name.custom_minimum_size = Vector2(120, 0)
 	room_row.add_child(_input_room_name)
 
@@ -1677,6 +1680,10 @@ func _save_config() -> void:
 	cfg.set_value("network", "host_ip",           _host_ip)
 	cfg.set_value("network", "tcp_port",           _tcp_port)
 	cfg.set_value("network", "udp_port",           _udp_port)
+	cfg.set_value("network", "room_url",
+		_input_room_url.text.strip_edges() if is_instance_valid(_input_room_url) else _room_url)
+	cfg.set_value("network", "room_name",
+		_input_room_name.text.strip_edges() if is_instance_valid(_input_room_name) else _room_name)
 	cfg.set_value("display", "curved_enabled",     _curved_enabled)
 	cfg.set_value("display", "curved_amount",      _curvature_amount)
 	cfg.set_value("display", "foveation_enabled",  _foveation_enabled)
@@ -1691,6 +1698,8 @@ func _load_config() -> void:
 	_host_ip             = cfg.get_value("network", "host_ip",           "192.168.1.100")
 	_tcp_port            = cfg.get_value("network", "tcp_port",           19800)
 	_udp_port            = cfg.get_value("network", "udp_port",           19801)
+	_room_url            = cfg.get_value("network", "room_url",           "")
+	_room_name           = cfg.get_value("network", "room_name",          "Guest")
 	_curved_enabled      = cfg.get_value("display", "curved_enabled",     false)
 	_curvature_amount    = cfg.get_value("display", "curved_amount",      0.18)
 	_foveation_enabled   = cfg.get_value("display", "foveation_enabled",  false)

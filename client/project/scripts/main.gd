@@ -1828,16 +1828,20 @@ func clear_whiteboard() -> void:
 	if multiuser and multiuser.get_local_user_id() >= 0:
 		multiuser.broadcast_whiteboard_clear()
 
-## Save a high-resolution PNG snapshot of the whiteboard to user://. Returns the
-## saved path, or "" if there is no board to capture.
+## Save a high-resolution PNG snapshot of the whiteboard to the system Pictures
+## folder (visible in Files / Gallery on Android), with fallback to user://.
+## Returns the saved path, or "" if there is no board to capture.
 func save_whiteboard_snapshot() -> String:
 	if not is_instance_valid(whiteboard):
 		return ""
-	var path := "user://whiteboard_%d.png" % Time.get_unix_time_from_system()
+	var base := OS.get_system_dir(OS.SYSTEM_DIR_PICTURES)
+	if base.is_empty():
+		base = OS.get_user_data_dir()
+	var path := base.path_join("whiteboard_%d.png" % Time.get_unix_time_from_system())
 	if whiteboard.save_snapshot(path):
 		print("[Immersive-2] Whiteboard snapshot saved: %s" % path)
 		if ui_overlay and ui_overlay.has_method("set_whiteboard_status"):
-			ui_overlay.set_whiteboard_status("Saved %s" % path.get_file())
+			ui_overlay.set_whiteboard_status("Saved %s" % path)
 		return path
 	return ""
 
