@@ -25,7 +25,7 @@ detail, or hardware/OS capability that cannot exist in this open-source client).
 | Telepresence (multiple people in one room) | ✅ | `multiuser_manager.gd` + signaling server, wired into `main.gd` |
 | Private rooms (by room id) | ✅ | overlay "Room" field → `join_room()` |
 | Avatars (see each other) | ✅ | `remote_user.gd` (head + hands meshes + nameplate) |
-| Multi-screen sharing in a room | ✅ | `REMOTE_SCREEN_LAYOUT` + `remote_screen_panel.gd`, opt-in via `privacy_manager.gd` |
+| Multi-screen sharing in a room | ✅ | opt-in `privacy_manager.gd` → `main.gd` pushes `screen_share_state` + `monitor_layout_update` → server fans out → `multiuser_manager.gd` re-emits → `remote_user.gd` / `remote_screen_panel.gd` place the panels; share toggles live in the overlay's Monitors tab |
 | Shared whiteboards + high-res save | ✅ | `whiteboard.gd` (collaborative strokes, snapshot PNG) |
 | Audio chat between users (headset mic → others) | ✅ | `voice_chat.gd` mic capture → `multiuser_manager.broadcast_voice` (P2P voice channel / SFU relay) → spatial `voice_playback.gd` on each avatar |
 | Public co-working / VIP spaces | ✅ | public lobby: `public` flag on join, `lobby_list`/`lobby_update` wire protocol, overlay "Public Lobby" section with one-click join (`ui_overlay.gd`, `signaling/server.py`) |
@@ -107,3 +107,9 @@ microphone capture) is kept thin and delegates to pure helpers that *are*
 unit-tested (`MultiuserManager` pose/voice routing, `WebRTCManager.parse_ice_candidate`,
 the portal / whiteboard / locomotion geometry, keyboard edge-detection, the
 `VoiceChat` PCM frame codec + mute gate + per-user playback buffering).
+
+Screen sharing is covered end-to-end by `test/test_main_integration.gd`: the opt-in
+toggle (`set_monitor_shared`) and the full relay chain (signaling client →
+`MultiuserManager` → `main.gd` → the remote avatar's screen panel) are asserted on
+the real `main.gd` controller, plus the server-side fan-out in
+`signaling/test_server.py::test_screen_share_state`.

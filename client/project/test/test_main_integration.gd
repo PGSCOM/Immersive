@@ -99,6 +99,37 @@ func run_all(results: Dictionary, tree: SceneTree) -> void:
 	passed.append("snap_turn / teleport_to are null-safe without XR")
 	print("  PASS: snap_turn / teleport_to are null-safe without XR")
 
+	# ── Screen sharing (opt-in per monitor) end-to-end wiring ────────────────
+	_assert(main.privacy_manager != null, "privacy_manager created", passed, failed)
+
+	# Register a monitor (as MONITOR_LIST would) then opt in / out of sharing it.
+	main._on_monitor_list([{ "id": 7, "name": "Test", "width": 1920, "height": 1080, "refresh_rate": 60 }])
+	main.set_monitor_shared(7, true)
+	_assert(main.is_monitor_shared(7), "set_monitor_shared opts in to a monitor", passed, failed)
+	_assert(main.get_shared_monitor_ids().has(7), "shared monitor id tracked", passed, failed)
+	main.set_monitor_shared(7, false)
+	_assert(not main.is_monitor_shared(7), "set_monitor_shared revokes a monitor", passed, failed)
+
+	# Full relay chain: a remote user's shared-screen layout flows signaling client
+	# → multiuser manager → main.gd → the avatar's screen panel. This is exactly the
+	# path that used to dangle (signals declared but never connected).
+	main.multiuser.remote_presence.emit(77, "Max", true)
+	var layout := [{
+		"monitor_id": 3,
+		"pos_x": 1.0, "pos_y": 1.5, "pos_z": -2.0,
+		"rot_w": 1.0, "rot_x": 0.0, "rot_y": 0.0, "rot_z": 0.0,
+		"width": 1.6, "height": 0.9, "resolution_w": 2560, "resolution_h": 1440,
+	}]
+	main.signaling_client.remote_screen_layout.emit(77, layout)
+	var max_avatar = main.remote_users.get(77, null)
+	_assert(max_avatar != null and max_avatar.get_screen_panel_for_monitor(3) != null,
+		"remote screen layout relayed through to the avatar's screen panel", passed, failed)
+
+	# Turning sharing off (screen_share_state enabled=false) clears the panels.
+	main.signaling_client.screen_share_state.emit(77, 0, [], false)
+	_assert(max_avatar != null and max_avatar.get_screen_panels().is_empty(),
+		"remote share-off clears the avatar's screen panels", passed, failed)
+
 	main.queue_free()
 
 	print("\n=== main.gd Integration Results: Passed %d / Failed %d ===" % [passed.size(), failed.size()])

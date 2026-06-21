@@ -24,6 +24,10 @@ signal mode_changed(mode: String)
 signal remote_whiteboard_stroke(user_id: int, stroke: Dictionary)
 signal remote_whiteboard_clear(user_id: int)
 signal remote_voice(user_id: int, frame: PackedByteArray)
+## A remote user toggled screen sharing (which monitors they expose, on/off).
+signal remote_screen_share(user_id: int, monitor_count: int, monitor_ids: Array, enabled: bool)
+## A remote user's shared-screen layout (where their shared panels sit in the room).
+signal remote_screen_layout(user_id: int, monitors: Array)
 ## Re-emitted from the signaling client on lobby_rooms / lobby_update responses.
 signal lobby_rooms_received(rooms: Array)
 
@@ -60,6 +64,8 @@ func setup(signaling: Node, webrtc: Node = null) -> void:
 		_connect_if(signaling, "whiteboard_stroke_received", _on_whiteboard_stroke)
 		_connect_if(signaling, "whiteboard_clear_received", _on_whiteboard_clear)
 		_connect_if(signaling, "voice_frame_received", _on_relay_voice)
+		_connect_if(signaling, "screen_share_state", _on_screen_share_state)
+		_connect_if(signaling, "remote_screen_layout", _on_remote_screen_layout)
 		_connect_if(signaling, "lobby_rooms_received", _on_lobby_rooms)
 
 	if webrtc:
@@ -237,6 +243,29 @@ func broadcast_whiteboard_stroke(stroke: Dictionary) -> void:
 func broadcast_whiteboard_clear() -> void:
 	if _signaling and _signaling.has_method("send_whiteboard_clear"):
 		_signaling.send_whiteboard_clear()
+
+# ---------------------------------------------------------------------------
+# Screen sharing (opt-in, per-monitor) — see PrivacyManager in main.gd
+# ---------------------------------------------------------------------------
+
+## Tell the room which monitors the local user is exposing (or that sharing is off).
+## The server fans this out to the other participants as `screen_share_state`.
+func broadcast_screen_share(monitor_count: int, monitor_ids: Array, enabled: bool) -> void:
+	if _signaling and _signaling.has_method("send_screen_share_state"):
+		_signaling.send_screen_share_state(monitor_count, monitor_ids, enabled)
+
+## Send the layout (world pose + size + resolution) of the local user's shared
+## panels so the room can place them around this user's avatar. The server fans it
+## out as `remote_screen_layout`.
+func broadcast_screen_layout(monitors: Array) -> void:
+	if _signaling and _signaling.has_method("send_monitor_layout_update"):
+		_signaling.send_monitor_layout_update(monitors)
+
+func _on_screen_share_state(user_id: int, monitor_count: int, monitor_ids: Array, enabled: bool) -> void:
+	remote_screen_share.emit(user_id, monitor_count, monitor_ids, enabled)
+
+func _on_remote_screen_layout(user_id: int, monitors: Array) -> void:
+	remote_screen_layout.emit(user_id, monitors)
 
 # ---------------------------------------------------------------------------
 # Internal

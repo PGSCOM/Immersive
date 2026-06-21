@@ -166,6 +166,7 @@ func _process(delta: float) -> void:
 	_update_decoders()
 	_pump_multiuser()
 	_broadcast_local_pose(delta)
+	_broadcast_screen_layout(delta)
 	_handle_locomotion()
 
 # ---------------------------------------------------------------------------
@@ -419,6 +420,16 @@ func _init_ui_overlay() -> void:
 		ui_overlay.mic_mute_toggled.connect(toggle_mic_mute)
 	if ui_overlay.has_signal("lobby_list_requested"):
 		ui_overlay.lobby_list_requested.connect(_on_overlay_lobby_list_requested)
+	if ui_overlay.has_signal("monitor_share_toggled"):
+		ui_overlay.monitor_share_toggled.connect(_on_overlay_monitor_share_toggled)
+	if ui_overlay.has_signal("keyboard_toggle_requested"):
+		ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
+	if ui_overlay.has_signal("whiteboard_clear_requested"):
+		ui_overlay.whiteboard_clear_requested.connect(clear_whiteboard)
+	if ui_overlay.has_signal("whiteboard_save_requested"):
+		ui_overlay.whiteboard_save_requested.connect(save_whiteboard_snapshot)
+	if ui_overlay.has_signal("portals_clear_requested"):
+		ui_overlay.portals_clear_requested.connect(clear_portals)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -623,8 +634,14 @@ func _on_monitor_list(monitors: Array) -> void:
 	for m in monitors:
 		print("  [%d] %s (%dx%d)" % [m.id, m.name, m.width, m.height])
 
+	# Register each monitor with the privacy manager so it can be shared by name.
+	if privacy_manager:
+		for m in monitors:
+			privacy_manager.register_monitor(m.id, m.get("name", "Monitor"), m.width, m.height)
+
 	if ui_overlay and ui_overlay.has_method("set_monitor_list"):
 		ui_overlay.set_monitor_list(monitors)
+	_sync_share_ui()
 
 	if _pending_workspace_restore and _workspace_monitor_ids.size() > 0:
 		if _request_workspace_monitors():
@@ -1054,6 +1071,9 @@ func _on_overlay_keyboard_portal() -> void:
 func _on_overlay_whiteboard_toggle() -> void:
 	toggle_whiteboard()
 
+func _on_overlay_monitor_share_toggled(monitor_id: int, shared: bool) -> void:
+	set_monitor_shared(monitor_id, shared)
+
 func _on_overlay_room_join(url: String, room_id: String, display_name: String, public: bool = false) -> void:
 	join_room(url, room_id, display_name, public)
 
@@ -1439,9 +1459,15 @@ var signaling_client: Node = null
 var webrtc_manager: WebRTCManager = null
 var multiuser: MultiuserManager = null
 var voice_chat: VoiceChat = null
+## Per-monitor opt-in screen sharing consent (nothing shared by default).
+var privacy_manager: PrivacyManager = null
 
 const POSE_BROADCAST_INTERVAL := 0.05  ## 20 Hz pose updates to the room
 var _pose_broadcast_accum: float = 0.0
+## Shared-screen layout refresh so remote panels follow the local panels as they
+## are dragged/scaled. Slower than pose — the layout only changes when panels move.
+const SCREEN_LAYOUT_INTERVAL := 0.5
+var _screen_layout_accum: float = 0.0
 
 func _init_world_features() -> void:
 	portal_manager = PortalManager.new()
@@ -1493,6 +1519,8 @@ func _init_multiuser() -> void:
 	multiuser.remote_whiteboard_clear.connect(_on_remote_whiteboard_clear)
 	multiuser.lobby_rooms_received.connect(_on_lobby_rooms_received)
 	multiuser.remote_voice.connect(_on_remote_voice)
+	multiuser.remote_screen_share.connect(_on_remote_screen_share)
+	multiuser.remote_screen_layout.connect(_on_remote_screen_layout)
 
 	# Voice chat: capture the headset mic and play remote users back spatially.
 	voice_chat = VoiceChat.new()
@@ -1500,6 +1528,13 @@ func _init_multiuser() -> void:
 	add_child(voice_chat)
 	voice_chat.voice_frame_ready.connect(_on_local_voice_frame)
 	voice_chat.mute_changed.connect(_on_voice_mute_changed)
+
+	# Screen-share consent (opt-in per monitor, nothing shared by default).
+	privacy_manager = PrivacyManager.new()
+	privacy_manager.name = "PrivacyManager"
+	add_child(privacy_manager)
+	privacy_manager.monitor_share_changed.connect(_on_monitor_share_changed)
+	privacy_manager.all_sharing_revoked.connect(_on_all_sharing_revoked)
 
 ## Join a shared VR room via the signaling server (called from the overlay).
 ## Pass public=true to make the room visible in the public lobby listing.
@@ -1512,6 +1547,9 @@ func join_room(url: String, room_id: String, display_name: String, public: bool 
 
 ## Leave the room and drop every remote avatar.
 func leave_room() -> void:
+	# Stop exposing any monitor before we tear down the room connection.
+	if privacy_manager:
+		privacy_manager.revoke_all_sharing()
 	if multiuser:
 		multiuser.leave()
 	if voice_chat:
@@ -1522,12 +1560,18 @@ func leave_room() -> void:
 			remote_users[uid].queue_free()
 	remote_users.clear()
 	_local_user_id = -1
+	_sync_share_ui()
 
 func _on_room_state(room_id: String, user_id: int, mode: String) -> void:
 	_local_user_id = user_id
 	print("[Immersive-2] Joined room '%s' as user %d (%s mode)" % [room_id, user_id, mode])
 	if ui_overlay and ui_overlay.has_method("set_room_state"):
 		ui_overlay.set_room_state(true, "In '%s' · %s" % [room_id, mode])
+	# Re-announce anything already shared (and refresh the share toggles' enabled
+	# state now that we're in a room).
+	_push_screen_share_state()
+	_push_screen_layout()
+	_sync_share_ui()
 
 ## Drive the WebRTC peer/ICE state machines each frame so the P2P mesh (pose +
 ## voice data channels) actually progresses to OPEN. Inert until a peer exists.
@@ -1586,6 +1630,99 @@ func _on_voice_mute_changed(muted: bool) -> void:
 		ui_overlay.set_mic_muted(muted)
 
 # ---------------------------------------------------------------------------
+# Screen sharing (opt-in per monitor) — exposes the local panels to the room and
+# renders the panels other users share around their avatars.
+# ---------------------------------------------------------------------------
+
+## Opt in / out of sharing a monitor with the room (driven by the overlay).
+## Nothing is shared by default; revocation stops the remote panel within a frame.
+func set_monitor_shared(monitor_id: int, shared: bool) -> void:
+	if privacy_manager == null:
+		return
+	if shared:
+		privacy_manager.share_monitor(monitor_id)
+	else:
+		privacy_manager.unshare_monitor(monitor_id)
+
+func is_monitor_shared(monitor_id: int) -> bool:
+	return privacy_manager != null and privacy_manager.is_monitor_shared(monitor_id)
+
+func get_shared_monitor_ids() -> Array:
+	return privacy_manager.get_shared_monitors() if privacy_manager else []
+
+## A monitor's share state changed: tell the room (state + layout) and refresh UI.
+func _on_monitor_share_changed(_monitor_id: int, _is_shared: bool) -> void:
+	_push_screen_share_state()
+	_push_screen_layout()
+	_sync_share_ui()
+
+## All sharing revoked (emergency stop / room leave): tell the room and refresh UI.
+func _on_all_sharing_revoked() -> void:
+	_push_screen_share_state()
+	_push_screen_layout()
+	_sync_share_ui()
+
+## Announce which monitors we currently expose (or that sharing is off).
+func _push_screen_share_state() -> void:
+	if multiuser == null or multiuser.get_local_user_id() < 0:
+		return
+	var ids: Array = get_shared_monitor_ids()
+	multiuser.broadcast_screen_share(ids.size(), ids, not ids.is_empty())
+
+## Send the world pose + size + resolution of each shared panel to the room.
+func _push_screen_layout() -> void:
+	if multiuser == null or multiuser.get_local_user_id() < 0:
+		return
+	multiuser.broadcast_screen_layout(_build_shared_layout())
+
+## Build the layout entries for the currently shared monitors from their live
+## panels. Coordinates are world-space (the room shares one origin), so a remote
+## client places each panel exactly where the sharer positioned it.
+func _build_shared_layout() -> Array:
+	var entries: Array = []
+	for mid in get_shared_monitor_ids():
+		var panel := _find_panel_for_monitor(mid)
+		if panel == null:
+			continue
+		var t := panel.global_transform
+		var q := t.basis.get_rotation_quaternion()
+		entries.append({
+			"monitor_id": mid,
+			"pos_x": t.origin.x, "pos_y": t.origin.y, "pos_z": t.origin.z,
+			"rot_w": q.w, "rot_x": q.x, "rot_y": q.y, "rot_z": q.z,
+			"width": panel.panel_width, "height": panel.panel_height,
+			"resolution_w": panel.screen_width, "resolution_h": panel.screen_height,
+		})
+	return entries
+
+## Periodic layout refresh so remote panels track the local panels as they move.
+func _broadcast_screen_layout(delta: float) -> void:
+	if privacy_manager == null or not privacy_manager.is_any_shared():
+		return
+	if multiuser == null or multiuser.get_local_user_id() < 0:
+		return
+	_screen_layout_accum += delta
+	if _screen_layout_accum < SCREEN_LAYOUT_INTERVAL:
+		return
+	_screen_layout_accum = 0.0
+	_push_screen_layout()
+
+## Mirror the local share state into the overlay (active share toggles).
+func _sync_share_ui() -> void:
+	if ui_overlay and ui_overlay.has_method("set_shared_monitors"):
+		ui_overlay.set_shared_monitors(get_shared_monitor_ids())
+
+## A remote user toggled sharing: drop their panels when they stop sharing (the
+## layout message that follows recreates them when they start again).
+func _on_remote_screen_share(user_id: int, _count: int, _ids: Array, enabled: bool) -> void:
+	if not enabled and remote_users.has(user_id):
+		remote_users[user_id].apply_screen_layout([])
+
+## A remote user's shared-screen layout arrived: place their panels on their avatar.
+func _on_remote_screen_layout(user_id: int, monitors: Array) -> void:
+	apply_screen_layout(user_id, monitors)
+
+# ---------------------------------------------------------------------------
 # World-feature actions (driven by the overlay / controller input)
 # ---------------------------------------------------------------------------
 
@@ -1600,6 +1737,11 @@ func add_passthrough_portal(shape: int = Im2Portal.Shape.RECTANGLE) -> Im2Portal
 	if portal_manager == null:
 		return null
 	return portal_manager.add_portal(shape, Vector2.ZERO, _front_of_camera(1.0))
+
+## Remove every passthrough portal (overlay "Clear portals").
+func clear_portals() -> void:
+	if portal_manager:
+		portal_manager.clear_portals()
 
 ## Create the dedicated keyboard portal (anchored low, where the keyboard sits).
 func create_keyboard_portal() -> Im2Portal:
@@ -1624,6 +1766,26 @@ func _ensure_whiteboard() -> Whiteboard:
 
 func is_whiteboard_active() -> bool:
 	return is_instance_valid(whiteboard) and whiteboard.visible
+
+## Clear the shared whiteboard (locally + for the room).
+func clear_whiteboard() -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.clear_board()
+	if multiuser and multiuser.get_local_user_id() >= 0:
+		multiuser.broadcast_whiteboard_clear()
+
+## Save a high-resolution PNG snapshot of the whiteboard to user://. Returns the
+## saved path, or "" if there is no board to capture.
+func save_whiteboard_snapshot() -> String:
+	if not is_instance_valid(whiteboard):
+		return ""
+	var path := "user://whiteboard_%d.png" % Time.get_unix_time_from_system()
+	if whiteboard.save_snapshot(path):
+		print("[Immersive-2] Whiteboard snapshot saved: %s" % path)
+		if ui_overlay and ui_overlay.has_method("set_whiteboard_status"):
+			ui_overlay.set_whiteboard_status("Saved %s" % path.get_file())
+		return path
+	return ""
 
 # Local whiteboard drawing state.
 var _wb_drawing: bool = false

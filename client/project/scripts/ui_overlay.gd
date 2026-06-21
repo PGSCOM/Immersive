@@ -35,6 +35,15 @@ signal room_leave_requested
 signal mic_mute_toggled
 ## Emitted when the user presses "Refresh" in the Public Lobby section.
 signal lobby_list_requested
+## Per-monitor opt-in screen sharing toggle (Monitors tab).
+signal monitor_share_toggled(monitor_id: int, shared: bool)
+## Show / hide the in-VR QWERTY keyboard from the overlay.
+signal keyboard_toggle_requested
+## Whiteboard maintenance (clear all strokes / save a PNG snapshot).
+signal whiteboard_clear_requested
+signal whiteboard_save_requested
+## Remove every passthrough portal.
+signal portals_clear_requested
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -102,6 +111,8 @@ var _selected_env_index    : int             = 0
 # Room state
 var _in_room               : bool = false
 var _mic_muted             : bool = false
+## Monitor IDs the local user is currently sharing with the room (opt-in).
+var _shared_monitor_ids    : Array = []
 
 # ---------------------------------------------------------------------------
 # Internal node references (built procedurally)
@@ -146,6 +157,7 @@ var _input_room_id         : LineEdit
 var _input_room_name       : LineEdit
 var _btn_room_join         : Button
 var _lbl_room_status       : Label
+var _lbl_whiteboard_status : Label
 
 # Public lobby controls
 var _chk_public            : CheckBox
@@ -771,6 +783,13 @@ func _build_tab_monitors(parent: VBoxContainer) -> void:
 	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
 	mon_hdr.add_child(_btn_workspace_restore)
 
+	var hint := Label.new()
+	hint.text = "Tap a monitor to add/remove its screen. Use 🔗 Share to show it to the room (join a room first)."
+	hint.add_theme_font_size_override("font_size", 14)
+	hint.add_theme_color_override("font_color", Color(0.50, 0.58, 0.78))
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	parent.add_child(hint)
+
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical  = Control.SIZE_EXPAND_FILL
 	scroll.custom_minimum_size  = Vector2(0, 80)
@@ -1005,6 +1024,7 @@ func _build_spaces_section(parent: VBoxContainer) -> void:
 	# ── Mixed-reality portals + whiteboard ────────────────────────────────
 	_add_section_separator(parent, "Spaces & Collaboration")
 
+	# Portals row: add a shape, the keyboard passthrough portal, or clear them all.
 	var mr_row := HBoxContainer.new()
 	mr_row.add_theme_constant_override("separation", 6)
 	parent.add_child(mr_row)
@@ -1017,11 +1037,45 @@ func _build_spaces_section(parent: VBoxContainer) -> void:
 	kbp_btn.tooltip_text = "Keyboard passthrough portal (see your real keyboard)"
 	kbp_btn.pressed.connect(func(): keyboard_portal_requested.emit())
 	mr_row.add_child(kbp_btn)
+	var clrp_btn := Button.new()
+	clrp_btn.text = "🗑"
+	clrp_btn.tooltip_text = "Remove all passthrough portals"
+	clrp_btn.pressed.connect(func(): portals_clear_requested.emit())
+	mr_row.add_child(clrp_btn)
+
+	# Tools row: in-VR keyboard, whiteboard toggle, and whiteboard maintenance.
+	var tools_row := HBoxContainer.new()
+	tools_row.add_theme_constant_override("separation", 6)
+	parent.add_child(tools_row)
+	_quality_label(tools_row, "Tools", 56)
+	var kbd_btn := Button.new()
+	kbd_btn.text = "⌨ Keyboard"
+	kbd_btn.tooltip_text = "Show / hide the in-VR QWERTY keyboard (also A/X on the controller)"
+	kbd_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	kbd_btn.pressed.connect(func(): keyboard_toggle_requested.emit())
+	tools_row.add_child(kbd_btn)
 	var wb_btn := Button.new()
 	wb_btn.text = "📝 Whiteboard"
 	wb_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	wb_btn.pressed.connect(func(): whiteboard_toggle_requested.emit())
-	mr_row.add_child(wb_btn)
+	tools_row.add_child(wb_btn)
+	var wb_clear := Button.new()
+	wb_clear.text = "🧹"
+	wb_clear.tooltip_text = "Clear the whiteboard for everyone in the room"
+	wb_clear.pressed.connect(func(): whiteboard_clear_requested.emit())
+	tools_row.add_child(wb_clear)
+	var wb_save := Button.new()
+	wb_save.text = "💾"
+	wb_save.tooltip_text = "Save a high-resolution PNG snapshot of the whiteboard"
+	wb_save.pressed.connect(func(): whiteboard_save_requested.emit())
+	tools_row.add_child(wb_save)
+
+	_lbl_whiteboard_status = Label.new()
+	_lbl_whiteboard_status.text = ""
+	_lbl_whiteboard_status.add_theme_font_size_override("font_size", 14)
+	_lbl_whiteboard_status.add_theme_color_override("font_color", Color(0.55, 0.80, 1.00))
+	_lbl_whiteboard_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	parent.add_child(_lbl_whiteboard_status)
 
 	# ── Multi-user room ───────────────────────────────────────────────────
 	var url_row := HBoxContainer.new()
@@ -1172,6 +1226,13 @@ func set_room_state(in_room: bool, info: String = "") -> void:
 		_btn_room_join.text = "🚪 Leave room" if in_room else "🤝 Join room"
 	if _lbl_room_status:
 		_lbl_room_status.text = info if not info.is_empty() else ("In room" if in_room else "Not in a room")
+	# Share toggles are only enabled inside a room — refresh their state.
+	_rebuild_monitor_list()
+
+## Show a short status line under the whiteboard tools (e.g. after a snapshot save).
+func set_whiteboard_status(text: String) -> void:
+	if is_instance_valid(_lbl_whiteboard_status):
+		_lbl_whiteboard_status.text = text
 
 ## Populate the public lobby list.
 func populate_lobby(rooms: Array) -> void:
@@ -1329,8 +1390,15 @@ func _rebuild_monitor_list() -> void:
 	for mon in _available_monitors:
 		var mid: int = mon.get("id", 0)
 		var is_active: bool = _active_monitor_ids.has(mid)
-		var btn := Button.new()
+		var is_shared: bool = _shared_monitor_ids.has(mid)
 
+		# Each monitor is a row: a wide "select / deselect" button + a share toggle.
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		_monitor_list.add_child(row)
+
+		var btn := Button.new()
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var status := "●  " if is_active else "○  "
 		var hint := "   (tap to remove)" if is_active else "   (tap to add)"
 		btn.text = "%s[%d]  %s  —  %dx%d @ %d Hz%s" % [
@@ -1350,7 +1418,33 @@ func _rebuild_monitor_list() -> void:
 			btn.add_theme_stylebox_override("hover",
 				_flat(Color(0.12, 0.30, 0.18), Color(0.35, 0.80, 0.50)))
 		btn.pressed.connect(func(): _on_monitor_selected(mid))
-		_monitor_list.add_child(btn)
+		row.add_child(btn)
+
+		# Share toggle — opt-in per monitor, only meaningful inside a room.
+		var share_btn := Button.new()
+		share_btn.toggle_mode = true
+		share_btn.custom_minimum_size = Vector2(120, 0)
+		share_btn.add_theme_font_size_override("font_size", 16)
+		share_btn.text = "🟢 Sharing" if is_shared else "🔗 Share"
+		share_btn.button_pressed = is_shared
+		share_btn.disabled = not _in_room
+		share_btn.tooltip_text = "Share this monitor with the room" if _in_room \
+			else "Join a room first to share a monitor"
+		if is_shared:
+			share_btn.add_theme_color_override("font_color", Color(0.45, 0.95, 0.60))
+		var _mid: int = mid
+		share_btn.pressed.connect(func(): _on_monitor_share_pressed(_mid))
+		row.add_child(share_btn)
+
+## A monitor's share toggle was pressed — flip its shared state and notify main.gd.
+func _on_monitor_share_pressed(monitor_id: int) -> void:
+	var now_shared: bool = not _shared_monitor_ids.has(monitor_id)
+	monitor_share_toggled.emit(monitor_id, now_shared)
+
+## Reflect the set of locally-shared monitors from main.gd (rebuilds the toggles).
+func set_shared_monitors(ids: Array) -> void:
+	_shared_monitor_ids = ids.duplicate()
+	_rebuild_monitor_list()
 
 # ---------------------------------------------------------------------------
 # Label update  (called every frame)
