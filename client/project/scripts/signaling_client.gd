@@ -20,6 +20,8 @@ signal ice_candidate_received(from_user_id: int, candidate: String)
 signal whiteboard_stroke_received(from_user_id: int, stroke: Dictionary)
 signal whiteboard_clear_received(from_user_id: int)
 signal voice_frame_received(from_user_id: int, frame: PackedByteArray)
+## Emitted on lobby_rooms (response to send_lobby_list) and lobby_update (server push).
+signal lobby_rooms_received(rooms: Array)
 
 # --- State ---
 
@@ -137,6 +139,8 @@ func _handle_message(data: Dictionary) -> void:
 			whiteboard_stroke_received.emit(data.get("from_user_id", 0), data.get("stroke", {}))
 		"whiteboard_clear":
 			whiteboard_clear_received.emit(data.get("from_user_id", 0))
+		"lobby_rooms", "lobby_update":
+			lobby_rooms_received.emit(data.get("rooms", []))
 		"voice_frame":
 			var b64: String = data.get("audio", "")
 			if not b64.is_empty():
@@ -144,8 +148,13 @@ func _handle_message(data: Dictionary) -> void:
 
 # --- Outbound messages ---
 
-func send_room_join(room_id: String, display_name: String) -> void:
-	_send_json({"type": "room_join", "payload": {"room_id": room_id, "display_name": display_name}})
+## Join or create a room. Pass public=true so the room appears in the lobby listing.
+func send_room_join(room_id: String, display_name: String, public: bool = false) -> void:
+	_send_json({"type": "room_join", "payload": {"room_id": room_id, "display_name": display_name, "public": public}})
+
+## Request the current public-lobby room list (server replies with lobby_rooms).
+func send_lobby_list() -> void:
+	_send_json({"type": "lobby_list", "payload": {}})
 
 func send_user_pose(head: Dictionary, left_hand: Dictionary, right_hand: Dictionary) -> void:
 	_send_json({"type": "user_pose", "payload": {"head": head, "left_hand": left_hand, "right_hand": right_hand}})

@@ -27,9 +27,12 @@ signal environment_cycle_requested
 signal portal_add_requested(shape: int)
 signal keyboard_portal_requested
 signal whiteboard_toggle_requested
-signal room_join_requested(url: String, room_id: String, display_name: String)
+## public=true means the room should be visible in the public lobby listing.
+signal room_join_requested(url: String, room_id: String, display_name: String, public: bool)
 signal room_leave_requested
 signal mic_mute_toggled
+## Emitted when the user presses "Refresh" in the Public Lobby section.
+signal lobby_list_requested
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -127,6 +130,11 @@ var _input_room_name       : LineEdit
 var _btn_room_join         : Button
 var _lbl_room_status       : Label
 var _in_room               : bool = false
+
+# Public lobby controls
+var _chk_public            : CheckBox
+var _btn_lobby_refresh     : Button
+var _lobby_list_container  : VBoxContainer
 var _btn_mic               : Button
 var _mic_muted             : bool = false
 
@@ -934,6 +942,36 @@ func _build_spaces_section(vbox: VBoxContainer) -> void:
 	_btn_mic.pressed.connect(func(): mic_mute_toggled.emit())
 	voice_row.add_child(_btn_mic)
 
+	# ── Public Lobby ──────────────────────────────────────────────────────────
+	# Browse and one-click-join public rooms without typing a room ID manually.
+	_add_section_separator(vbox, "Public Lobby")
+
+	var lobby_ctrl_row := HBoxContainer.new()
+	lobby_ctrl_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(lobby_ctrl_row)
+	_chk_public = CheckBox.new()
+	_chk_public.text = "Make public"
+	_chk_public.tooltip_text = "List this room in the public lobby so others can discover and join it"
+	lobby_ctrl_row.add_child(_chk_public)
+	_btn_lobby_refresh = Button.new()
+	_btn_lobby_refresh.text = "⟳ Refresh"
+	_btn_lobby_refresh.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_lobby_refresh.pressed.connect(func(): lobby_list_requested.emit())
+	lobby_ctrl_row.add_child(_btn_lobby_refresh)
+
+	var lobby_scroll := ScrollContainer.new()
+	lobby_scroll.custom_minimum_size = Vector2(0, 96)
+	lobby_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(lobby_scroll)
+	_lobby_list_container = VBoxContainer.new()
+	_lobby_list_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lobby_scroll.add_child(_lobby_list_container)
+	var lbl_empty := Label.new()
+	lbl_empty.text = "Press ⟳ Refresh to browse public rooms"
+	lbl_empty.add_theme_color_override("font_color", Color(0.45, 0.50, 0.65))
+	lbl_empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_lobby_list_container.add_child(lbl_empty)
+
 func _portal_button(parent: HBoxContainer, label: String, tip: String, shape: int) -> void:
 	var b := Button.new()
 	b.text = label
@@ -948,7 +986,8 @@ func _on_room_join_pressed() -> void:
 	var url := _input_room_url.text.strip_edges()
 	if url.is_empty():
 		url = "ws://127.0.0.1:19810"
-	room_join_requested.emit(url, _input_room_id.text.strip_edges(), _input_room_name.text.strip_edges())
+	var is_public: bool = is_instance_valid(_chk_public) and _chk_public.button_pressed
+	room_join_requested.emit(url, _input_room_id.text.strip_edges(), _input_room_name.text.strip_edges(), is_public)
 
 ## Reflect room membership from main.gd.
 func set_room_state(in_room: bool, info: String = "") -> void:
@@ -962,6 +1001,46 @@ func set_room_state(in_room: bool, info: String = "") -> void:
 func set_environment_name(env_name: String) -> void:
 	if _lbl_env_name:
 		_lbl_env_name.text = env_name
+
+## Populate the public lobby list. Each entry gets a quick-join button.
+## Called by main.gd when a lobby_rooms / lobby_update signal arrives.
+func populate_lobby(rooms: Array) -> void:
+	# Lazily create the container if _ready() hasn't fired yet (e.g. headless tests).
+	if not is_instance_valid(_lobby_list_container):
+		_lobby_list_container = VBoxContainer.new()
+	# remove_child before queue_free so get_child_count() is accurate immediately.
+	for child in _lobby_list_container.get_children():
+		_lobby_list_container.remove_child(child)
+		child.queue_free()
+	if rooms.is_empty():
+		var lbl := Label.new()
+		lbl.text = "No public rooms at the moment"
+		lbl.add_theme_color_override("font_color", Color(0.45, 0.50, 0.65))
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_lobby_list_container.add_child(lbl)
+		return
+	for room_info in rooms:
+		var rid: String  = str(room_info.get("room_id", ""))
+		var cnt: int     = int(room_info.get("user_count", 0))
+		var row          := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		_lobby_list_container.add_child(row)
+		var lbl := Label.new()
+		lbl.text = "%s  (%d)" % [rid, cnt]
+		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		lbl.add_theme_color_override("font_color", Color(0.75, 0.82, 1.0))
+		row.add_child(lbl)
+		var btn := Button.new()
+		btn.text = "→ Join"
+		var _rid: String = rid   # capture for closure
+		btn.pressed.connect(func(): _on_lobby_join_pressed(_rid))
+		row.add_child(btn)
+
+## Fill the Room field with the chosen room_id and trigger a join.
+func _on_lobby_join_pressed(room_id: String) -> void:
+	if is_instance_valid(_input_room_id):
+		_input_room_id.text = room_id
+	_on_room_join_pressed()
 
 ## Reflect the local microphone mute state from main.gd.
 func set_mic_muted(muted: bool) -> void:

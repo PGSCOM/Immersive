@@ -24,6 +24,8 @@ signal mode_changed(mode: String)
 signal remote_whiteboard_stroke(user_id: int, stroke: Dictionary)
 signal remote_whiteboard_clear(user_id: int)
 signal remote_voice(user_id: int, frame: PackedByteArray)
+## Re-emitted from the signaling client on lobby_rooms / lobby_update responses.
+signal lobby_rooms_received(rooms: Array)
 
 ## Mirrors signaling/server.py P2P_MAX_USERS (the locked topology threshold).
 const P2P_MAX_USERS := 2
@@ -58,6 +60,7 @@ func setup(signaling: Node, webrtc: Node = null) -> void:
 		_connect_if(signaling, "whiteboard_stroke_received", _on_whiteboard_stroke)
 		_connect_if(signaling, "whiteboard_clear_received", _on_whiteboard_clear)
 		_connect_if(signaling, "voice_frame_received", _on_relay_voice)
+		_connect_if(signaling, "lobby_rooms_received", _on_lobby_rooms)
 
 	if webrtc:
 		if webrtc.has_method("initialize"):
@@ -70,7 +73,8 @@ func _connect_if(obj: Object, sig: String, callable: Callable) -> void:
 		obj.connect(sig, callable)
 
 ## Connect to a signaling server and join a room.
-func join(url: String, room_id: String, display_name: String) -> void:
+## Pass public=true to make the room visible in the public lobby listing.
+func join(url: String, room_id: String, display_name: String, public: bool = false) -> void:
 	if _signaling == null:
 		return
 	if _signaling.has_method("connect_to_signaling"):
@@ -78,7 +82,13 @@ func join(url: String, room_id: String, display_name: String) -> void:
 	if _signaling.has_signal("connected_to_signaling"):
 		await _signaling.connected_to_signaling
 	if _signaling.has_method("send_room_join"):
-		_signaling.send_room_join(room_id, display_name)
+		_signaling.send_room_join(room_id, display_name, public)
+
+## Request the public lobby list from the signaling server.
+## The server replies with lobby_rooms_received (and pushes lobby_update on changes).
+func request_lobby() -> void:
+	if _signaling and _signaling.has_method("send_lobby_list"):
+		_signaling.send_lobby_list()
 
 ## Leave the room and drop all peer connections.
 func leave() -> void:
@@ -214,6 +224,9 @@ func _on_whiteboard_stroke(from_user_id: int, stroke: Dictionary) -> void:
 
 func _on_whiteboard_clear(from_user_id: int) -> void:
 	remote_whiteboard_clear.emit(from_user_id)
+
+func _on_lobby_rooms(rooms: Array) -> void:
+	lobby_rooms_received.emit(rooms)
 
 ## Share a finished whiteboard stroke (serialised dict) with the room.
 func broadcast_whiteboard_stroke(stroke: Dictionary) -> void:

@@ -412,6 +412,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.room_leave_requested.connect(_on_overlay_room_leave)
 	if ui_overlay.has_signal("mic_mute_toggled"):
 		ui_overlay.mic_mute_toggled.connect(toggle_mic_mute)
+	if ui_overlay.has_signal("lobby_list_requested"):
+		ui_overlay.lobby_list_requested.connect(_on_overlay_lobby_list_requested)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -1034,8 +1036,16 @@ func _on_overlay_keyboard_portal() -> void:
 func _on_overlay_whiteboard_toggle() -> void:
 	toggle_whiteboard()
 
-func _on_overlay_room_join(url: String, room_id: String, display_name: String) -> void:
-	join_room(url, room_id, display_name)
+func _on_overlay_room_join(url: String, room_id: String, display_name: String, public: bool = false) -> void:
+	join_room(url, room_id, display_name, public)
+
+func _on_overlay_lobby_list_requested() -> void:
+	if multiuser:
+		multiuser.request_lobby()
+
+func _on_lobby_rooms_received(rooms: Array) -> void:
+	if ui_overlay and ui_overlay.has_method("populate_lobby"):
+		ui_overlay.populate_lobby(rooms)
 
 func _on_overlay_room_leave() -> void:
 	leave_room()
@@ -1452,6 +1462,7 @@ func _init_multiuser() -> void:
 	multiuser.room_state.connect(_on_room_state)
 	multiuser.remote_whiteboard_stroke.connect(_on_remote_whiteboard_stroke)
 	multiuser.remote_whiteboard_clear.connect(_on_remote_whiteboard_clear)
+	multiuser.lobby_rooms_received.connect(_on_lobby_rooms_received)
 	multiuser.remote_voice.connect(_on_remote_voice)
 
 	# Voice chat: capture the headset mic and play remote users back spatially.
@@ -1462,9 +1473,10 @@ func _init_multiuser() -> void:
 	voice_chat.mute_changed.connect(_on_voice_mute_changed)
 
 ## Join a shared VR room via the signaling server (called from the overlay).
-func join_room(url: String, room_id: String, display_name: String) -> void:
+## Pass public=true to make the room visible in the public lobby listing.
+func join_room(url: String, room_id: String, display_name: String, public: bool = false) -> void:
 	if multiuser:
-		multiuser.join(url, room_id, display_name)
+		multiuser.join(url, room_id, display_name, public)
 	# Start recording the mic so the room can hear us (mute toggle still applies).
 	if voice_chat:
 		voice_chat.start_capture()

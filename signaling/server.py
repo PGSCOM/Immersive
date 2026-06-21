@@ -87,6 +87,8 @@ class Room:
 	room_id: str
 	users: Dict[int, User] = field(default_factory=dict)
 	next_user_id: int = 1
+	## True when this room appears in the public lobby listing.
+	public: bool = False
 
 	@property
 	def user_count(self) -> int:
@@ -120,6 +122,8 @@ class SignalingServer:
 	def __init__(self) -> None:
 		self.rooms: Dict[str, Room] = {}
 		self._active_connections: int = 0
+		## All currently open WebSocket connections (used to push lobby updates).
+		self._connections: set = set()
 
 	# -----------------------------------------------------------------------
 	# Room management
@@ -160,11 +164,39 @@ class SignalingServer:
 	# Message handlers
 	# -----------------------------------------------------------------------
 
+	async def handle_lobby_list(self, ws: Any) -> None:
+		"""Send the current list of public rooms to the requesting client."""
+		await self._send(ws, self._build_msg("lobby_rooms", rooms=self._public_rooms_list()))
+
+	def _public_rooms_list(self) -> List[Dict[str, Any]]:
+		"""Return serialisable info for every public room that has at least one user."""
+		return [
+			{"room_id": r.room_id, "user_count": r.user_count}
+			for r in self.rooms.values()
+			if r.public and r.user_count > 0
+		]
+
+	async def _push_lobby_update(self) -> None:
+		"""Push a lobby_update to every connected client that is not in any room.
+
+		These are the 'lobby watchers' — clients that have connected to the
+		signaling server but have not yet joined a room, so they are browsing
+		the public lobby list."""
+		msg = self._build_msg("lobby_update", rooms=self._public_rooms_list())
+		for ws in list(self._connections):
+			if getattr(ws, "room_id", None) is None:
+				await self._send(ws, msg)
+
 	async def handle_room_join(self, ws: Any, payload: dict) -> None:
 		room_id = payload.get("room_id", "default")
 		display_name = payload.get("display_name", "Anonymous")
 
 		room = self.get_or_create_room(room_id)
+
+		# Mark a newly created room as public only at creation time; joining an
+		# existing room never changes its visibility (the creator decides).
+		if room.user_count == 0:
+			room.public = bool(payload.get("public", False))
 
 		if room.user_count >= MAX_USERS_PER_ROOM:
 			await self._send(ws, self._build_msg("error", code="ROOM_FULL"))
@@ -202,6 +234,10 @@ class SignalingServer:
 			logger.info("Room → SFU mode: room_id=%s users=%d", room_id, room.user_count)
 			await self._broadcast(room, self._build_msg("topology_changed", mode="sfu"))
 
+		# Notify lobby watchers whenever a public room's occupancy changes.
+		if room.public:
+			await self._push_lobby_update()
+
 	async def handle_room_leave(self, ws: Any) -> None:
 		user_id = getattr(ws, "user_id", None)
 		room_id = getattr(ws, "room_id", None)
@@ -212,6 +248,7 @@ class SignalingServer:
 		if not room:
 			return
 
+		was_public = room.public
 		user = room.remove_user(user_id)
 		if not user:
 			return
@@ -225,6 +262,10 @@ class SignalingServer:
 			await self._broadcast(room, self._build_msg("topology_changed", mode="p2p"))
 
 		self.destroy_room_if_empty(room_id)
+
+		# Notify lobby watchers that a public room's occupancy changed (or disappeared).
+		if was_public:
+			await self._push_lobby_update()
 
 	async def handle_user_pose(self, ws: Any, payload: dict) -> None:
 		user_id = getattr(ws, "user_id", None)
@@ -353,6 +394,7 @@ class SignalingServer:
 
 	async def handle_client(self, ws: Any) -> None:
 		self._active_connections += 1
+		self._connections.add(ws)
 		logger.debug("Client connected (active=%d)", self._active_connections)
 		try:
 			async for message in ws:
@@ -367,6 +409,8 @@ class SignalingServer:
 
 				if msg_type == "room_join":
 					await self.handle_room_join(ws, payload)
+				elif msg_type == "lobby_list":
+					await self.handle_lobby_list(ws)
 				elif msg_type == "user_pose":
 					await self.handle_user_pose(ws, payload)
 				elif msg_type == "screen_share_state":
@@ -386,6 +430,7 @@ class SignalingServer:
 			pass
 		finally:
 			await self.handle_room_leave(ws)
+			self._connections.discard(ws)
 			self._active_connections -= 1
 			logger.debug("Client disconnected (active=%d)", self._active_connections)
 

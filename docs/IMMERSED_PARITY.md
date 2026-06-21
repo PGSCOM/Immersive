@@ -28,7 +28,7 @@ detail, or hardware/OS capability that cannot exist in this open-source client).
 | Multi-screen sharing in a room | ✅ | `REMOTE_SCREEN_LAYOUT` + `remote_screen_panel.gd`, opt-in via `privacy_manager.gd` |
 | Shared whiteboards + high-res save | ✅ | `whiteboard.gd` (collaborative strokes, snapshot PNG) |
 | Audio chat between users (headset mic → others) | ✅ | `voice_chat.gd` mic capture → `multiuser_manager.broadcast_voice` (P2P voice channel / SFU relay) → spatial `voice_playback.gd` on each avatar |
-| Public co-working / VIP spaces | 🟡 | room model supports it; no curated public lobby list |
+| Public co-working / VIP spaces | ✅ | public lobby: `public` flag on join, `lobby_list`/`lobby_update` wire protocol, overlay "Public Lobby" section with one-click join (`ui_overlay.gd`, `signaling/server.py`) |
 | P2P mesh (≤2) / SFU relay (3+) with migration | ✅ | server topology + `webrtc_manager.gd`; tested both directions |
 
 ## Passthrough & mixed-reality portals
@@ -96,9 +96,9 @@ suite:
 
 ```
 godot --headless --xr-mode off --path client/project -s res://test/run_tests.gd
-#   → Total Passed: 384 / Total Failed: 0
+#   → Total Passed: 399 / Total Failed: 0
 python -m unittest discover -s signaling
-#   → Ran 10 tests … OK
+#   → Ran 15 tests … OK
 ```
 
 The runtime-only glue that cannot be asserted headlessly (live WebRTC ICE

@@ -315,6 +315,93 @@ class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
         await ws1.close()
         await ws2.close()
 
+    # -----------------------------------------------------------------------
+    # Lobby tests
+    # -----------------------------------------------------------------------
+
+    async def test_lobby_list_empty(self) -> None:
+        """lobby_list with no public rooms returns an empty list."""
+        ws = await self._connect()
+        await self._send(ws, "lobby_list", {})
+        msg = await self._recv(ws)
+        self.assertEqual(msg["type"], "lobby_rooms")
+        self.assertEqual(msg["rooms"], [])
+        await ws.close()
+
+    async def test_public_room_appears_in_lobby(self) -> None:
+        """A room created with public=True shows up in lobby_rooms."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "pub-alpha", "display_name": "Alice", "public": True})
+        await self._recv(ws1)  # room_joined
+
+        # ws2 may have already received a lobby_update push when ws1 joined;
+        # use _recv_until so that push doesn't shadow the lobby_rooms response.
+        await self._send(ws2, "lobby_list", {})
+        msg = await self._recv_until(ws2, "lobby_rooms")
+        self.assertEqual(msg["type"], "lobby_rooms")
+        rooms = msg["rooms"]
+        self.assertEqual(len(rooms), 1)
+        self.assertEqual(rooms[0]["room_id"], "pub-alpha")
+        self.assertEqual(rooms[0]["user_count"], 1)
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_private_room_not_in_lobby(self) -> None:
+        """A room created without public=True does not appear in lobby_rooms."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "priv-beta", "display_name": "Alice"})
+        await self._recv(ws1)
+
+        await self._send(ws2, "lobby_list", {})
+        msg = await self._recv(ws2)
+        self.assertEqual(msg["type"], "lobby_rooms")
+        self.assertEqual(msg["rooms"], [])
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_lobby_update_pushed_to_watcher(self) -> None:
+        """Creating a public room pushes lobby_update to clients not yet in a room."""
+        ws_watcher = await self._connect()   # never joins a room
+        ws_joiner  = await self._connect()
+
+        await self._send(ws_joiner, "room_join",
+                         {"room_id": "pub-watch", "display_name": "Alice", "public": True})
+        await self._recv(ws_joiner)  # room_joined
+
+        # The watcher should receive a lobby_update automatically.
+        msg = await self._recv(ws_watcher)
+        self.assertEqual(msg["type"], "lobby_update")
+        rooms = msg["rooms"]
+        self.assertEqual(len(rooms), 1)
+        self.assertEqual(rooms[0]["room_id"], "pub-watch")
+
+        await ws_joiner.close()
+        await ws_watcher.close()
+
+    async def test_lobby_update_on_public_room_empty(self) -> None:
+        """When the last user leaves a public room it is removed from lobby_update."""
+        ws_watcher = await self._connect()
+        ws_joiner  = await self._connect()
+
+        await self._send(ws_joiner, "room_join",
+                         {"room_id": "pub-gone", "display_name": "Alice", "public": True})
+        await self._recv(ws_joiner)
+        await self._recv(ws_watcher)   # consume lobby_update for join
+
+        # Joiner leaves; watcher should get another lobby_update with empty rooms.
+        await ws_joiner.close()
+        msg = await self._recv(ws_watcher)
+        self.assertEqual(msg["type"], "lobby_update")
+        self.assertEqual(msg["rooms"], [])
+
+        await ws_watcher.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ const EXTERNAL_SUITES := [
 	"res://test/test_keyboard_avatars.gd",
 	"res://test/test_voice_chat.gd",
 	"res://test/test_main_integration.gd",
+	"res://test/test_lobby.gd",
 ]
 
 # Aggregate result counters across all suites.
