@@ -20,6 +20,8 @@ signal ice_candidate_received(from_user_id: int, candidate: String)
 signal whiteboard_stroke_received(from_user_id: int, stroke: Dictionary)
 signal whiteboard_clear_received(from_user_id: int)
 signal voice_frame_received(from_user_id: int, frame: PackedByteArray)
+## A remote user's shared-monitor MJPEG frame relayed by the SFU (3+ users).
+signal video_frame_received(from_user_id: int, monitor_id: int, frame: PackedByteArray)
 ## Emitted on lobby_rooms (response to send_lobby_list) and lobby_update (server push).
 signal lobby_rooms_received(rooms: Array)
 
@@ -145,6 +147,14 @@ func _handle_message(data: Dictionary) -> void:
 			var b64: String = data.get("audio", "")
 			if not b64.is_empty():
 				voice_frame_received.emit(data.get("from_user_id", 0), Marshalls.base64_to_raw(b64))
+		"video_frame":
+			var b64: String = data.get("video", "")
+			if not b64.is_empty():
+				video_frame_received.emit(
+					data.get("from_user_id", 0),
+					data.get("monitor_id", 0),
+					Marshalls.base64_to_raw(b64)
+				)
 
 # --- Outbound messages ---
 
@@ -186,6 +196,18 @@ func send_voice_frame(frame: PackedByteArray) -> void:
 	if frame.is_empty():
 		return
 	_send_json({"type": "voice_frame", "payload": {"audio": Marshalls.raw_to_base64(frame)}})
+
+## Relay an MJPEG frame for one shared monitor to the room (SFU path, 3+ users).
+## In a 2-user P2P room this is never called — frames go over the WebRTC video
+## channel instead (see webrtc_manager.gd). The server fans the payload out to
+## all other participants as a "video_frame" message.
+func send_video_frame(monitor_id: int, frame: PackedByteArray) -> void:
+	if frame.is_empty():
+		return
+	_send_json({"type": "video_frame", "payload": {
+		"monitor_id": monitor_id,
+		"video": Marshalls.raw_to_base64(frame),
+	}})
 
 func _send_json(data: Dictionary) -> void:
 	if _connected:

@@ -755,6 +755,16 @@ func _on_stream_stopped(monitor_id: int) -> void:
 	_update_overlay_monitors()
 
 func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, height: int) -> void:
+	# Fan out to peers if this monitor is being shared. Only MJPEG frames (magic
+	# bytes FF D8 FF) are relayed — remote panels use SoftwareVideoDecoder which
+	# supports only MJPEG; H.264/HEVC fanout is future work once remote panels
+	# have a hardware decode path.
+	if multiuser != null and privacy_manager != null \
+			and privacy_manager.is_monitor_shared(monitor_id) \
+			and frame_data.size() >= 3 \
+			and frame_data[0] == 0xFF and frame_data[1] == 0xD8 and frame_data[2] == 0xFF:
+		multiuser.broadcast_video(monitor_id, frame_data)
+
 	if _decoders.has(monitor_id):
 		var dec: VideoDecoder = _decoders[monitor_id]
 		# Fase 3: after a frame gap, skip non-IDR frames until clean intra arrives
@@ -1521,6 +1531,7 @@ func _init_multiuser() -> void:
 	multiuser.remote_voice.connect(_on_remote_voice)
 	multiuser.remote_screen_share.connect(_on_remote_screen_share)
 	multiuser.remote_screen_layout.connect(_on_remote_screen_layout)
+	multiuser.remote_video_frame.connect(_on_remote_video_frame)
 
 	# Voice chat: capture the headset mic and play remote users back spatially.
 	voice_chat = VoiceChat.new()
@@ -1727,6 +1738,15 @@ func _on_remote_screen_share(user_id: int, _count: int, _ids: Array, enabled: bo
 ## A remote user's shared-screen layout arrived: place their panels on their avatar.
 func _on_remote_screen_layout(user_id: int, monitors: Array) -> void:
 	apply_screen_layout(user_id, monitors)
+
+## An MJPEG video frame arrived for one of a remote user's shared monitors.
+## Route it to that user's avatar so its per-panel decoder can display it.
+func _on_remote_video_frame(user_id: int, monitor_id: int, frame_data: PackedByteArray) -> void:
+	if not remote_users.has(user_id):
+		return
+	var avatar = remote_users[user_id]
+	if avatar.has_method("on_video_frame"):
+		avatar.on_video_frame(monitor_id, frame_data)
 
 # ---------------------------------------------------------------------------
 # World-feature actions (driven by the overlay / controller input)

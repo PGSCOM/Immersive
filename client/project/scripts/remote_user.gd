@@ -1,5 +1,8 @@
 ## Remote user avatar in the VR space.
-## Manages head, hands, and screen panels for another participant.
+## Manages head, hands, screen panels, and per-panel MJPEG decoders for another
+## participant. When video frames arrive (via on_video_frame()), they are handed
+## to a SoftwareVideoDecoder that runs on a WorkerThreadPool thread; _process()
+## polls the decoder each frame and uploads the result to the panel.
 
 extends Node3D
 
@@ -21,6 +24,10 @@ var _nameplate: Label3D = null
 
 ## Screen panels for shared monitors.
 var _screen_panels: Dictionary = {}  # monitor_id -> RemoteScreenPanel
+
+## MJPEG decoders — one per active panel.  Mirrors the _sw_decoders dict in
+## main.gd but lives here so the avatar owns its own decode lifecycle.
+var _decoders: Dictionary = {}  # monitor_id -> SoftwareVideoDecoder
 
 func _init() -> void:
 	var avatar_color := Color(0.30, 0.60, 0.95)
@@ -92,11 +99,44 @@ func _apply_pose(node: Node3D, pose: Dictionary) -> void:
 	node.transform.origin = pos
 	node.transform.basis = Basis(rot)
 
+## Poll decoders and upload finished frames to their panels (call every frame).
+func _process(_delta: float) -> void:
+	for mid in _decoders.keys():
+		var dec: SoftwareVideoDecoder = _decoders[mid]
+		var img: Image = dec.get_decoded_image()
+		if img == null:
+			continue
+		var panel = _screen_panels.get(mid)
+		if panel and panel.has_method("update_decoded_image"):
+			panel.update_decoded_image(img)
+
+## Feed an encoded MJPEG frame for one of this user's shared monitors.
+##
+## Thread-safe (SoftwareVideoDecoder.submit is guarded by a mutex). The
+## decoder is created on first call; if the monitor has no panel yet the frame
+## is silently dropped (the panel and decoder lifecycle are tied together via
+## apply_screen_layout).
+func on_video_frame(monitor_id: int, frame_data: PackedByteArray) -> void:
+	if not _screen_panels.has(monitor_id):
+		return  # panel not yet created — layout hasn't arrived yet
+
+	if not _decoders.has(monitor_id):
+		var dec := SoftwareVideoDecoder.new()
+		var panel = _screen_panels[monitor_id]
+		var res: Vector2i = panel.get_resolution() if panel.has_method("get_resolution") \
+			else Vector2i(1920, 1080)
+		if dec.open(SoftwareVideoDecoder.CODEC_MJPEG, res.x, res.y):
+			_decoders[monitor_id] = dec
+		else:
+			return  # codec not supported (should never happen for MJPEG)
+
+	(_decoders[monitor_id] as SoftwareVideoDecoder).submit(frame_data)
+
 ## Apply screen layout from REMOTE_SCREEN_LAYOUT message.
 ## Panels are parented to the head node so their local-transform offsets
 ## (which are head-relative from the sender) follow the avatar as it moves.
 func apply_screen_layout(entries: Array) -> void:
-	# Remove panels for monitors no longer in layout
+	# Remove panels (and their decoders) for monitors no longer in layout.
 	var new_ids: Array = []
 	for entry in entries:
 		new_ids.append(entry.get("monitor_id", -1))
@@ -105,6 +145,9 @@ func apply_screen_layout(entries: Array) -> void:
 		if not new_ids.has(existing_id):
 			_screen_panels[existing_id].queue_free()
 			_screen_panels.erase(existing_id)
+			if _decoders.has(existing_id):
+				(_decoders[existing_id] as SoftwareVideoDecoder).close()
+				_decoders.erase(existing_id)
 
 	# Add or update panels (parented to head so they move with the avatar).
 	for entry in entries:
@@ -143,3 +186,11 @@ func get_right_hand_node() -> Node3D:
 ## Get display name.
 func get_display_name() -> String:
 	return display_name
+
+## Close all decoders. Called implicitly via apply_screen_layout([]) when the
+## remote user stops sharing, and from queue_free paths.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		for mid in _decoders.keys():
+			(_decoders[mid] as SoftwareVideoDecoder).close()
+		_decoders.clear()

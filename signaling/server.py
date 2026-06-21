@@ -365,6 +365,29 @@ class SignalingServer:
 			exclude=user_id,
 		)
 
+	async def handle_video_frame(self, ws: Any, payload: dict) -> None:
+		"""Relay an MJPEG video frame (base64) for one shared monitor to the room.
+
+		Used only in SFU mode (3+ users); 1-2 user rooms carry video over the
+		direct P2P WebRTC 'video' data channel and never reach here. The frame
+		payload is forwarded verbatim and never logged or stored (privacy: §4)."""
+		user_id = getattr(ws, "user_id", None)
+		room_id = getattr(ws, "room_id", None)
+		if user_id is None or room_id is None:
+			return
+		room = self.rooms.get(room_id)
+		if not room:
+			return
+		video = payload.get("video")
+		monitor_id = payload.get("monitor_id")
+		if not video or monitor_id is None:
+			return
+		await self._broadcast(
+			room,
+			self._build_msg("video_frame", from_user_id=user_id, monitor_id=monitor_id, video=video),
+			exclude=user_id,
+		)
+
 	async def handle_webrtc_signal(self, ws: Any, msg_type: str, payload: dict) -> None:
 		user_id = getattr(ws, "user_id", None)
 		room_id = getattr(ws, "room_id", None)
@@ -421,6 +444,8 @@ class SignalingServer:
 					await self.handle_whiteboard(ws, msg_type, payload)
 				elif msg_type == "voice_frame":
 					await self.handle_voice_frame(ws, payload)
+				elif msg_type == "video_frame":
+					await self.handle_video_frame(ws, payload)
 				elif msg_type in ("webrtc_offer", "webrtc_answer", "ice_candidate"):
 					await self.handle_webrtc_signal(ws, msg_type, payload)
 				else:

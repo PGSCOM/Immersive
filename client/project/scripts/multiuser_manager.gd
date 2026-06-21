@@ -30,6 +30,9 @@ signal remote_screen_share(user_id: int, monitor_count: int, monitor_ids: Array,
 signal remote_screen_layout(user_id: int, monitors: Array)
 ## Re-emitted from the signaling client on lobby_rooms / lobby_update responses.
 signal lobby_rooms_received(rooms: Array)
+## A remote user's MJPEG video frame for one of their shared monitors.
+## Routed from the P2P video channel (2-user mesh) or the SFU relay (3+ users).
+signal remote_video_frame(user_id: int, monitor_id: int, frame_data: PackedByteArray)
 
 ## Mirrors signaling/server.py P2P_MAX_USERS (the locked topology threshold).
 const P2P_MAX_USERS := 2
@@ -67,12 +70,14 @@ func setup(signaling: Node, webrtc: Node = null) -> void:
 		_connect_if(signaling, "screen_share_state", _on_screen_share_state)
 		_connect_if(signaling, "remote_screen_layout", _on_remote_screen_layout)
 		_connect_if(signaling, "lobby_rooms_received", _on_lobby_rooms)
+		_connect_if(signaling, "video_frame_received", _on_relay_video)
 
 	if webrtc:
 		if webrtc.has_method("initialize"):
 			webrtc.initialize(signaling, _local_user_id)
 		_connect_if(webrtc, "pose_received", _on_p2p_pose)
 		_connect_if(webrtc, "voice_received", _on_p2p_voice)
+		_connect_if(webrtc, "video_frame_received", _on_p2p_video)
 
 func _connect_if(obj: Object, sig: String, callable: Callable) -> void:
 	if obj.has_signal(sig) and not obj.is_connected(sig, callable):
@@ -134,6 +139,20 @@ func broadcast_voice(frame: PackedByteArray) -> String:
 			return "p2p"
 	if _signaling and _signaling.has_method("send_voice_frame"):
 		_signaling.send_voice_frame(frame)
+		return "sfu"
+	return "none"
+
+## Send an MJPEG frame for a shared monitor to the room. Uses the P2P WebRTC
+## video channel when peers are connected (1-2 user mesh), otherwise falls back
+## to the SFU signaling relay (3+ users). Returns "p2p", "sfu", or "none".
+func broadcast_video(monitor_id: int, frame_data: PackedByteArray) -> String:
+	if frame_data.is_empty():
+		return "none"
+	if _mode == "p2p" and _webrtc and _webrtc.has_method("broadcast_video"):
+		if int(_webrtc.broadcast_video(monitor_id, frame_data)) > 0:
+			return "p2p"
+	if _signaling and _signaling.has_method("send_video_frame"):
+		_signaling.send_video_frame(monitor_id, frame_data)
 		return "sfu"
 	return "none"
 
@@ -224,6 +243,12 @@ func _on_relay_voice(user_id: int, frame: PackedByteArray) -> void:
 
 func _on_p2p_voice(user_id: int, frame: PackedByteArray) -> void:
 	remote_voice.emit(user_id, frame)
+
+func _on_p2p_video(user_id: int, monitor_id: int, frame_data: PackedByteArray) -> void:
+	remote_video_frame.emit(user_id, monitor_id, frame_data)
+
+func _on_relay_video(user_id: int, monitor_id: int, frame_data: PackedByteArray) -> void:
+	remote_video_frame.emit(user_id, monitor_id, frame_data)
 
 func _on_whiteboard_stroke(from_user_id: int, stroke: Dictionary) -> void:
 	remote_whiteboard_stroke.emit(from_user_id, stroke)

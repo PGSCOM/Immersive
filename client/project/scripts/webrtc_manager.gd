@@ -3,9 +3,14 @@
 ## Per AGENTS.md §6 the topology is server-driven: 1-2 users use a direct P2P mesh
 ## (this manager), 3+ users fall back to the SFU relay (poses go through the
 ## signaling server instead). Here we establish one WebRTCPeerConnection per remote
-## user with a negotiated "pose" data channel, relay SDP/ICE through the injected
-## signaling client, and expose broadcast_pose() so the multiuser manager can send
-## pose over the low-latency P2P channel when it is open.
+## user with negotiated data channels, relay SDP/ICE through the injected signaling
+## client, and expose broadcast_* methods so the multiuser manager can route data
+## over the low-latency P2P channel when it is open.
+##
+## Data channels (negotiated, fixed ids):
+##   id 1  "pose"  — reliable/ordered  JSON pose + whiteboard
+##   id 2  "voice" — unreliable/unordered  PCM audio (100 ms lifetime)
+##   id 3  "video" — unreliable/unordered  MJPEG frames with 1-byte monitor_id header
 
 extends Node
 class_name WebRTCManager
@@ -18,6 +23,9 @@ signal peer_disconnected(user_id: int)
 signal pose_received(user_id: int, payload: String)
 ## A binary voice frame arrived over a peer's voice data channel.
 signal voice_received(user_id: int, frame: PackedByteArray)
+## A video frame arrived over a peer's video data channel.
+## monitor_id is the first byte of the payload; frame_data is the JPEG body.
+signal video_frame_received(user_id: int, monitor_id: int, frame_data: PackedByteArray)
 
 # --- State ---
 
@@ -27,6 +35,8 @@ var _peers: Dictionary = {}
 var _channels: Dictionary = {}
 ## user_id -> WebRTCDataChannel ("voice", negotiated id 2, unreliable/unordered)
 var _voice_channels: Dictionary = {}
+## user_id -> WebRTCDataChannel ("video", negotiated id 3, unreliable/unordered)
+var _video_channels: Dictionary = {}
 
 ## Injected signaling client (duck-typed: send_webrtc_offer/answer/ice_candidate).
 var _signaling: Node = null
@@ -67,6 +77,15 @@ func create_peer(user_id: int) -> WebRTCPeerConnection:
 	if voice:
 		voice.message_received.connect(_on_voice_channel_message.bind(user_id))
 		_voice_channels[user_id] = voice
+
+	# Video uses a third negotiated channel (id 3). Like voice it is unordered and
+	# unreliable — a late video frame should be dropped in favour of a newer one.
+	# The payload is: [monitor_id: uint8][JPEG bytes…]
+	var video := peer.create_data_channel("video",
+		{"id": 3, "negotiated": true, "ordered": false, "maxPacketLifeTime": 500})
+	if video:
+		video.message_received.connect(_on_video_channel_message.bind(user_id))
+		_video_channels[user_id] = video
 
 	return peer
 
@@ -121,6 +140,25 @@ func broadcast_voice(frame: PackedByteArray) -> int:
 			sent += 1
 	return sent
 
+## Send a video frame to every OPEN video channel. The payload prepends the
+## monitor_id as a single byte so the receiving side can route to the right panel.
+## Returns the number of peers reached (0 = no live P2P video link).
+func broadcast_video(monitor_id: int, frame_data: PackedByteArray) -> int:
+	if frame_data.is_empty():
+		return 0
+	# Header: [monitor_id: uint8][JPEG bytes…]
+	var packet := PackedByteArray()
+	packet.append(monitor_id & 0xFF)
+	packet.append_array(frame_data)
+
+	var sent := 0
+	for uid in _video_channels:
+		var channel: WebRTCDataChannel = _video_channels[uid]
+		if channel and channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
+			channel.put_packet(packet)
+			sent += 1
+	return sent
+
 ## Number of peers whose data channel is currently open.
 func open_channel_count() -> int:
 	var n := 0
@@ -142,6 +180,8 @@ func close_peer(user_id: int) -> void:
 		_channels.erase(user_id)
 	if _voice_channels.has(user_id):
 		_voice_channels.erase(user_id)
+	if _video_channels.has(user_id):
+		_video_channels.erase(user_id)
 	if _peers.has(user_id):
 		_peers[user_id].close()
 		_peers.erase(user_id)
@@ -182,3 +222,10 @@ func _on_data_channel_message(message: PackedByteArray, user_id: int) -> void:
 
 func _on_voice_channel_message(message: PackedByteArray, user_id: int) -> void:
 	voice_received.emit(user_id, message)
+
+func _on_video_channel_message(message: PackedByteArray, user_id: int) -> void:
+	# Packet format: [monitor_id: uint8][JPEG bytes…]
+	if message.size() < 2:
+		return
+	var mid := int(message[0])
+	video_frame_received.emit(user_id, mid, message.slice(1))
