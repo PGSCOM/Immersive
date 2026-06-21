@@ -982,9 +982,16 @@ func _request_codec_fallback(codec: int) -> void:
 	var fallback := 2  # MJPEG
 	if codec != 0 and VideoDecoder.is_codec_supported(0):
 		fallback = 0  # H.264
+	var original_name: String = names.get(codec, str(codec))
+	var fallback_name: String = names.get(fallback, "MJPEG")
 	push_warning("[Immersive-2] No decoder for %s on this device — requesting %s" %
-		[names.get(codec, str(codec)), names.get(fallback, "MJPEG")])
+		[original_name, fallback_name])
 	stream_codec = fallback
+	if ui_overlay and ui_overlay.has_method("show_toast"):
+		ui_overlay.show_toast("Codec fallback: %s → %s" % [original_name, fallback_name])
+	if ui_overlay and ui_overlay.has_method("set_stream_settings"):
+		ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
+			stream_jpeg_quality, stream_res_percent, stream_fps)
 	_save_config()
 	if network_client and network_client.has_method("send_stream_config"):
 		network_client.send_stream_config(fallback, stream_bitrate_kbps,

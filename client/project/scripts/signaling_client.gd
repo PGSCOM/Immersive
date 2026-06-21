@@ -32,12 +32,14 @@ var _connected: bool = false
 var _url: String = ""
 var _reconnect_timer: float = 0.0
 var _reconnect_interval: float = 5.0
+var _should_reconnect: bool = false
 
 func _ready() -> void:
 	set_process(false)
 
 func connect_to_signaling(url: String) -> void:
 	_url = url
+	_should_reconnect = true
 	var err := ws_client.connect_to_url(url)
 	if err != OK:
 		push_error("[Signaling] Failed to connect to %s (error %d)" % [url, err])
@@ -46,6 +48,7 @@ func connect_to_signaling(url: String) -> void:
 	print("[Signaling] Connecting to %s..." % url)
 
 func disconnect_from_signaling() -> void:
+	_should_reconnect = false
 	ws_client.close()
 	_connected = false
 	set_process(false)
@@ -56,6 +59,7 @@ func _process(delta: float) -> void:
 
 	match state:
 		WebSocketPeer.STATE_OPEN:
+			_reconnect_timer = 0.0
 			if not _connected:
 				_connected = true
 				connected_to_signaling.emit()
@@ -67,7 +71,15 @@ func _process(delta: float) -> void:
 				_connected = false
 				disconnected_from_signaling.emit()
 				print("[Signaling] Disconnected")
-			set_process(false)
+			if not _should_reconnect:
+				set_process(false)
+				return
+			_reconnect_timer += delta
+			if _reconnect_timer >= _reconnect_interval:
+				_reconnect_timer = 0.0
+				print("[Signaling] Reconnecting to %s…" % _url)
+				ws_client = WebSocketPeer.new()
+				ws_client.connect_to_url(_url)
 
 		WebSocketPeer.STATE_CLOSING:
 			pass

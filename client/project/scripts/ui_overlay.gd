@@ -179,6 +179,10 @@ var _privacy_pending_mid   : int = -1  ## Monitor whose share triggered the noti
 var _apply_debounce        : Timer
 const AUTO_APPLY_DELAY      := 0.45
 
+# Toast notification
+var _toast_label           : Label
+var _toast_timer           : Timer
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -235,6 +239,14 @@ func set_active_monitors(ids: Array) -> void:
 
 func set_latency(ms: float) -> void:
 	_ping_ms = ms
+
+## Show a transient toast message at the bottom of the panel for `duration_s` seconds.
+func show_toast(text: String, duration_s: float = 3.0) -> void:
+	if not is_instance_valid(_toast_label) or not is_instance_valid(_toast_timer):
+		return
+	_toast_label.text    = text
+	_toast_label.visible = true
+	_toast_timer.start(duration_s)
 
 func set_screen_curvature(enabled: bool, amount: float) -> void:
 	_curved_enabled   = enabled
@@ -594,6 +606,22 @@ func _build_ui() -> void:
 	# Keep the pointer reticle drawn on top of everything, including the modal.
 	if is_instance_valid(_reticle):
 		_canvas.move_child(_reticle, _canvas.get_child_count() - 1)
+
+	# ── Toast label (fades after a short duration) ────────────────────────
+	_toast_label = Label.new()
+	_toast_label.visible = false
+	_toast_label.add_theme_font_size_override("font_size", 17)
+	_toast_label.add_theme_color_override("font_color", Color(0.95, 0.88, 0.40))
+	_toast_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_toast_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_toast_label.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	_toast_label.offset_top = -56
+	_canvas.add_child(_toast_label)
+
+	_toast_timer = Timer.new()
+	_toast_timer.one_shot = true
+	_toast_timer.timeout.connect(func(): _toast_label.visible = false)
+	add_child(_toast_timer)
 
 	# ── 3D mesh that renders the SubViewport in world space ───────────────
 	_panel_mesh = MeshInstance3D.new()
