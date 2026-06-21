@@ -124,35 +124,49 @@ python signaling/server.py                  # listens on 0.0.0.0:19810
 
 # Explicit SFU entry point (identical logic, different default port):
 python signaling/sfu_server.py              # listens on 0.0.0.0:19811
-
-# Custom address / port:
-python signaling/server.py --host 0.0.0.0 --port 9000
 ```
 
-The server logs to stdout at INFO level — only ephemeral `user_id` integers and `room_id` strings appear in the log; no IPs, display names in log lines, or screen contents ever reach the log.
+All options are set via environment variables — no CLI flags needed:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `19810` | WebSocket port (Render sets this automatically) |
+| `HOST` | `0.0.0.0` | Bind address |
+| `MAX_USERS_PER_ROOM` | `8` | Hard cap per room |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
+
+The server logs to stdout — only ephemeral integer `user_id`s and opaque `room_id` strings appear; no IPs, display names, or message contents are ever logged.
 
 ### Capacity
 
-- Up to **8 users per room** (configurable via `MAX_USERS_PER_ROOM` in `server.py`)
+- Up to **8 users per room** (override with `MAX_USERS_PER_ROOM`)
 - Unlimited simultaneous rooms
 - No persistence — rooms vanish when the last user disconnects
 
-### Running on a server / cloud VM
+### Free cloud deployment — no credit card
 
-The signaling server needs to be reachable by all VR headsets on the same network (or over the internet). A minimal Linux VM works fine — the only open port required is the WebSocket port (default 19810).
+The server ships with `signaling/render.yaml` for one-click deployment on **[Render.com](https://render.com)** (free forever, no credit card):
+
+1. Push the repo to GitHub
+2. Go to **dashboard.render.com → New → Web Service**
+3. Connect the repo — Render auto-detects `render.yaml`
+4. Click **Create Web Service**
+
+Render assigns a `*.onrender.com` URL that you enter in the overlay's **Room** field from the headset.
+
+**How sleeping works:** Render's free tier spins the instance down after 15 minutes of *complete* inactivity (no open connections). Active WebSocket connections keep it awake, so during a VR session the server stays up. The next connection after an idle period triggers a ~30 s cold start, after which the session continues normally.
+
+**Free tier limits:** 750 instance-hours/month (one service fits in ~31 days), 100 GB outbound bandwidth/month. Lightweight JSON signaling traffic is well within these limits for any small-to-medium deployment.
+
+### Running locally (LAN sessions)
+
+For local LAN sessions the signaling server can run on the same Windows PC as the host — no cloud needed:
 
 ```bash
-# Run in background with logging to a file:
-nohup python signaling/server.py > signaling.log 2>&1 &
-
-# Or as a systemd service (create /etc/systemd/system/im2-signaling.service):
-# [Unit]  Description=Immersive-2 signaling server
-# [Service]  ExecStart=/usr/bin/python3 /opt/im2/signaling/server.py
-#            Restart=on-failure
-# [Install]  WantedBy=multi-user.target
+python signaling/server.py   # default port 19810
 ```
 
-For local LAN sessions the signaling server can run on the same Windows machine as the host — just use that machine's LAN IP when connecting from the headsets.
+Enter the host PC's LAN IP as the Room URL from the headset.
 
 ## Project Structure
 
@@ -171,8 +185,9 @@ Immersive-2/
 │   │   └── test/            # Godot headless test suite (run_tests.gd + 11 suites)
 │   └── android-plugin/      # Java/Gradle source for the Im2VideoDecoder AAR
 ├── signaling/               # Multi-user signaling server
-│   ├── server.py            # WebSocket server (P2P ↔ SFU topology)
+│   ├── server.py            # WebSocket server (P2P ↔ SFU topology, Render-ready)
 │   ├── sfu_server.py        # SFU relay entry point (extends server.py)
+│   ├── render.yaml          # One-click Render.com free-tier deployment
 │   ├── requirements.txt     # websockets>=10,<15
 │   └── test_server.py       # Python unittest suite (8 tests)
 ├── protocol/

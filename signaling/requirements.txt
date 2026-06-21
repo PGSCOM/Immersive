@@ -1,4 +1,5 @@
-# Signaling server dependencies for Immersive-2 multi-user rooms.
-# Pin to compatible major versions; tested with Python 3.10+.
+# Immersive-2 signaling server dependencies.
+# Compatible with Python 3.10+.
+# Tested range: websockets 10–14.  No other runtime dependencies.
 
 websockets>=10.0,<15.0

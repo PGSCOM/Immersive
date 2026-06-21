@@ -1,0 +1,40 @@
+# Render.com deployment — free tier, no credit card required.
+#
+# How to deploy:
+#   1. Push this repo to GitHub (or GitLab / Bitbucket)
+#   2. Go to dashboard.render.com → New → Web Service
+#   3. Connect your repo; Render detects this file automatically
+#   4. Click "Create Web Service" — that's it
+#
+# The service listens for WebSocket connections on the PORT Render assigns.
+# Render keeps the instance awake as long as at least one WebSocket connection
+# is open; it spins down after 15 min of complete inactivity (no connections).
+# On the next connection it wakes up in ~30 s (one-time cold start per idle period).
+#
+# Free tier limits (as of 2025):
+#   - 750 instance-hours / month  (one service = ~31 days, more than enough)
+#   - 100 GB outbound bandwidth / month
+#   - 512 MB RAM, shared CPU
+
+services:
+  - type: web
+    name: im2-signaling
+    runtime: python
+    region: oregon          # pick the region closest to your users
+    plan: free
+
+    rootDir: signaling      # server.py and requirements.txt live here
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+
+    # Render sets PORT automatically; the other vars are optional overrides.
+    envVars:
+      - key: MAX_USERS_PER_ROOM
+        value: "8"
+      - key: LOG_LEVEL
+        value: "INFO"
+      # PORT is injected by Render automatically — do not set it here.
+
+    # Render free tier does not support custom domains, but the default
+    # *.onrender.com URL works fine for VR headset connections.
