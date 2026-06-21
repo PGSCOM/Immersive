@@ -422,6 +422,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.lobby_list_requested.connect(_on_overlay_lobby_list_requested)
 	if ui_overlay.has_signal("monitor_share_toggled"):
 		ui_overlay.monitor_share_toggled.connect(_on_overlay_monitor_share_toggled)
+	if ui_overlay.has_signal("privacy_notice_acknowledged"):
+		ui_overlay.privacy_notice_acknowledged.connect(_on_overlay_privacy_acknowledged)
 	if ui_overlay.has_signal("keyboard_toggle_requested"):
 		ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
 	if ui_overlay.has_signal("whiteboard_clear_requested"):
@@ -1084,6 +1086,24 @@ func _on_overlay_whiteboard_toggle() -> void:
 func _on_overlay_monitor_share_toggled(monitor_id: int, shared: bool) -> void:
 	set_monitor_shared(monitor_id, shared)
 
+## PrivacyManager blocked a share because the notice hasn't been acknowledged —
+## ask the overlay to show the one-time consent dialog for this monitor.
+func _on_privacy_notice_required(monitor_id: int) -> void:
+	# Reset the optimistic toggle: nothing is shared until consent is given.
+	_sync_share_ui()
+	if ui_overlay and ui_overlay.has_method("show_privacy_notice"):
+		ui_overlay.show_privacy_notice(monitor_id)
+
+## The user accepted the consent dialog: record it (persist for next launch) and
+## retry the share that originally triggered the notice.
+func _on_overlay_privacy_acknowledged(monitor_id: int) -> void:
+	if privacy_manager:
+		privacy_manager.acknowledge_privacy_notice()
+	_privacy_acknowledged_saved = true
+	_save_config()
+	if monitor_id >= 0:
+		set_monitor_shared(monitor_id, true)
+
 func _on_overlay_room_join(url: String, room_id: String, display_name: String, public: bool = false) -> void:
 	join_room(url, room_id, display_name, public)
 
@@ -1377,6 +1397,7 @@ func _save_config() -> void:
 	cfg.set_value("stream", "fps", stream_fps)
 	if environment_manager:
 		cfg.set_value("display", "environment_index", environment_manager.get_current_index())
+	cfg.set_value("privacy", "acknowledged", _privacy_acknowledged_saved)
 	cfg.save(CONFIG_PATH)
 
 ## Best codec this device can actually decode, preferring hardware.
@@ -1420,6 +1441,7 @@ func _load_config() -> void:
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
 		_saved_environment_index = cfg.get_value("display", "environment_index", 0)
+		_privacy_acknowledged_saved = cfg.get_value("privacy", "acknowledged", false)
 		# Test harness (see _autoconnect_on_start docs). Writable over adb run-as.
 		_autoconnect_on_start = cfg.get_value("test", "autoconnect", false)
 		_debug_capture = cfg.get_value("test", "debug_capture", false)
@@ -1471,6 +1493,8 @@ var multiuser: MultiuserManager = null
 var voice_chat: VoiceChat = null
 ## Per-monitor opt-in screen sharing consent (nothing shared by default).
 var privacy_manager: PrivacyManager = null
+## Persisted one-time privacy-notice acknowledgement (shown once per install).
+var _privacy_acknowledged_saved: bool = false
 
 const POSE_BROADCAST_INTERVAL := 0.05  ## 20 Hz pose updates to the room
 var _pose_broadcast_accum: float = 0.0
@@ -1546,6 +1570,10 @@ func _init_multiuser() -> void:
 	add_child(privacy_manager)
 	privacy_manager.monitor_share_changed.connect(_on_monitor_share_changed)
 	privacy_manager.all_sharing_revoked.connect(_on_all_sharing_revoked)
+	privacy_manager.privacy_notice_required.connect(_on_privacy_notice_required)
+	# Restore a previously granted consent so the notice only appears once per install.
+	if _privacy_acknowledged_saved:
+		privacy_manager.acknowledge_privacy_notice()
 
 ## Join a shared VR room via the signaling server (called from the overlay).
 ## Pass public=true to make the room visible in the public lobby listing.

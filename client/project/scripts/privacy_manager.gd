@@ -23,6 +23,11 @@ signal monitor_share_changed(monitor_id: int, is_shared: bool)
 ## Emitted when all sharing is revoked (emergency stop).
 signal all_sharing_revoked
 
+## Emitted when a share was requested before the privacy notice was acknowledged.
+## The UI should show the one-time consent dialog and, on confirmation,
+## acknowledge_privacy_notice() then retry sharing this monitor.
+signal privacy_notice_required(monitor_id: int)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -81,11 +86,20 @@ func register_monitor(monitor_id: int, name: String, width: int, height: int) ->
 
 ## Opt-in to share a specific monitor.
 ## Immediately starts streaming that monitor to other participants.
+## Gated on the one-time privacy notice: until the user has acknowledged it,
+## this emits privacy_notice_required (so the UI can show the consent dialog)
+## and shares nothing.
 ## @param monitor_id Monitor to share (must be registered)
-## @return true if sharing started, false if already shared or invalid
+## @return true if sharing started, false if not acknowledged, invalid, or full
 func share_monitor(monitor_id: int) -> bool:
 	if not _monitor_names.has(monitor_id):
 		push_warning("[Privacy] session=%s Cannot share unknown monitor_id=%d" % [_session_id, monitor_id])
+		return false
+
+	# Never expose a monitor before the user has accepted the privacy notice.
+	# Ask the UI to obtain consent; it retries the share once acknowledged.
+	if not _privacy_acknowledged:
+		privacy_notice_required.emit(monitor_id)
 		return false
 
 	if _shared_monitors.has(monitor_id):
@@ -176,7 +190,7 @@ func is_any_shared() -> bool:
 	return not _shared_monitors.is_empty()
 
 ## Mark that the user has acknowledged the privacy notice.
-## Required before any sharing can be enabled (enforced by UI).
+## Required before any sharing can be enabled (enforced by share_monitor()).
 func acknowledge_privacy_notice() -> void:
 	_privacy_acknowledged = true
 

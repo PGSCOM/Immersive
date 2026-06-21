@@ -13,6 +13,7 @@ const EXTERNAL_SUITES := [
 	"res://test/test_remote_users.gd",
 	"res://test/test_remote_screen_panel.gd",
 	"res://test/test_privacy.gd",
+	"res://test/test_ui_overlay.gd",
 	"res://test/test_hw_decode.gd",
 	"res://test/test_portals.gd",
 	"res://test/test_environments.gd",

@@ -46,6 +46,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design details.
 - **Performance** — Latency optimization
 - **UI/UX** — Settings panel, connection UI
 
+## Out of Scope (for now)
+
+- **Application-layer E2EE for multiuser media/metadata** — A prototype
+  `e2ee_crypto.gd` (rolling-key XOR) was removed because it implied security it
+  did not provide: it had no callers and, crucially, no key-exchange protocol, so
+  every peer would have needed an out-of-band shared secret. Multiuser media is
+  already protected in transit by WebRTC's DTLS-SRTP. True end-to-end encryption
+  (e.g. SFrame/Insertable Streams for the SFU path) is welcome once a real key
+  exchange (DH or an authenticated pre-shared key set in the overlay) is defined
+  — please open an issue to discuss the design before re-adding a crypto module.
+
 ## Reporting Issues
 
 - Use GitHub Issues

@@ -24,6 +24,7 @@ func run_all(results: Dictionary, tree: SceneTree) -> void:
 
 	_test_privacy_manager_instantiates(passed, failed)
 	_test_register_monitor(passed, failed)
+	_test_share_requires_acknowledgement(passed, failed)
 	_test_share_monitor_opt_in(passed, failed)
 	_test_unshare_monitor_revokes_immediately(passed, failed)
 	_test_revoke_all_sharing(passed, failed)
@@ -90,6 +91,7 @@ func _test_privacy_manager_instantiates(passed: Array, failed: Array) -> void:
 	_assert(pm != null, 'PrivacyManager instantiates', passed, failed)
 	_assert(pm.has_signal('monitor_share_changed'), 'Has monitor_share_changed signal', passed, failed)
 	_assert(pm.has_signal('all_sharing_revoked'), 'Has all_sharing_revoked signal', passed, failed)
+	_assert(pm.has_signal('privacy_notice_required'), 'Has privacy_notice_required signal', passed, failed)
 	_assert(pm.has_method('share_monitor'), 'Has share_monitor method', passed, failed)
 	_assert(pm.has_method('unshare_monitor'), 'Has unshare_monitor method', passed, failed)
 	_assert(pm.has_method('revoke_all_sharing'), 'Has revoke_all_sharing method', passed, failed)
@@ -122,6 +124,41 @@ func _test_register_monitor(passed: Array, failed: Array) -> void:
 	pm.queue_free()
 
 # ---------------------------------------------------------------------------
+# Test: Share requires privacy-notice acknowledgement (consent gate)
+# ---------------------------------------------------------------------------
+
+func _test_share_requires_acknowledgement(passed: Array, failed: Array) -> void:
+	print('\nTest: Share requires privacy acknowledgement')
+	var pm: Node = load('res://scripts/privacy_manager.gd').new()
+	_tree.root.add_child(pm)
+
+	pm.register_monitor(1, 'Monitor A', 1920, 1080)
+
+	# Array wrapper so the lambda can mutate a counter visible to the test.
+	var required: Array = [0]
+	pm.privacy_notice_required.connect(func(mid: int):
+		required[0] += 1
+	)
+
+	_assert_false(pm.is_privacy_acknowledged(), 'Not acknowledged initially', passed, failed)
+
+	# Before acknowledgement: share is blocked and asks for the consent dialog.
+	var result: bool = pm.share_monitor(1)
+	_assert_false(result, 'share_monitor before ack returns false', passed, failed)
+	_assert_false(pm.is_monitor_shared(1), 'Monitor not shared before ack', passed, failed)
+	_assert_eq_int(pm.get_shared_count(), 0, 'Nothing shared before ack', passed, failed)
+	_assert_eq_int(required[0], 1, 'privacy_notice_required emitted once', passed, failed)
+
+	# After acknowledgement: the same share now succeeds.
+	pm.acknowledge_privacy_notice()
+	result = pm.share_monitor(1)
+	_assert_true(result, 'share_monitor after ack returns true', passed, failed)
+	_assert_true(pm.is_monitor_shared(1), 'Monitor shared after ack', passed, failed)
+	_assert_eq_int(required[0], 1, 'No further privacy_notice_required after ack', passed, failed)
+
+	pm.queue_free()
+
+# ---------------------------------------------------------------------------
 # Test 3: Share monitor (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -133,6 +170,7 @@ func _test_share_monitor_opt_in(passed: Array, failed: Array) -> void:
 	pm.register_monitor(1, 'Monitor A', 1920, 1080)
 	pm.register_monitor(2, 'Monitor B', 1920, 1080)
 	pm.register_monitor(3, 'Monitor C', 1920, 1080)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 
 	_assert_false(pm.is_monitor_shared(1), 'Monitor 1 not shared initially', passed, failed)
 	_assert_false(pm.is_monitor_shared(2), 'Monitor 2 not shared initially', passed, failed)
@@ -168,6 +206,7 @@ func _test_unshare_monitor_revokes_immediately(passed: Array, failed: Array) -> 
 
 	pm.register_monitor(1, 'Monitor A', 1920, 1080)
 	pm.register_monitor(2, 'Monitor B', 1920, 1080)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 
 	pm.share_monitor(1)
 	pm.share_monitor(2)
@@ -201,6 +240,7 @@ func _test_revoke_all_sharing(passed: Array, failed: Array) -> void:
 	pm.register_monitor(1, 'Monitor A', 1920, 1080)
 	pm.register_monitor(2, 'Monitor B', 1920, 1080)
 	pm.register_monitor(3, 'Monitor C', 1920, 1080)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 
 	pm.share_monitor(1)
 	pm.share_monitor(2)
@@ -251,6 +291,7 @@ func _test_max_shared_monitors_limit(passed: Array, failed: Array) -> void:
 	pm.register_monitor(2, 'Monitor 2', 1920, 1080)
 	pm.register_monitor(3, 'Monitor 3', 1920, 1080)
 	pm.register_monitor(4, 'Monitor 4', 1920, 1080)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 
 	_assert_true(pm.share_monitor(1), 'Share monitor 1', passed, failed)
 	_assert_true(pm.share_monitor(2), 'Share monitor 2', passed, failed)
@@ -280,6 +321,7 @@ func _test_sharing_summary_ui_data(passed: Array, failed: Array) -> void:
 	pm.register_monitor(1, 'Dell U2719D', 2560, 1440)
 	pm.register_monitor(2, 'LG 27GN950', 3840, 2160)
 	pm.register_monitor(3, 'Samsung Odyssey', 3440, 1440)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 
 	pm.share_monitor(1)
 	pm.share_monitor(3)
@@ -330,9 +372,9 @@ func _test_reset_on_disconnect(passed: Array, failed: Array) -> void:
 
 	pm.register_monitor(1, 'Monitor A', 1920, 1080)
 	pm.register_monitor(2, 'Monitor B', 1920, 1080)
+	pm.acknowledge_privacy_notice()  # sharing is gated on the privacy notice
 	pm.share_monitor(1)
 	pm.share_monitor(2)
-	pm.acknowledge_privacy_notice()
 
 	var session_id_before: String = pm.get_session_id()
 

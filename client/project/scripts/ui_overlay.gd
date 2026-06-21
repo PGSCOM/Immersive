@@ -37,6 +37,10 @@ signal mic_mute_toggled
 signal lobby_list_requested
 ## Per-monitor opt-in screen sharing toggle (Monitors tab).
 signal monitor_share_toggled(monitor_id: int, shared: bool)
+## Emitted when the user accepts the one-time screen-sharing privacy notice.
+## Carries the monitor whose share request triggered the dialog so the share
+## can be retried once consent is given.
+signal privacy_notice_acknowledged(monitor_id: int)
 ## Show / hide the in-VR QWERTY keyboard from the overlay.
 signal keyboard_toggle_requested
 ## Whiteboard maintenance (clear all strokes / save a PNG snapshot).
@@ -164,6 +168,10 @@ var _chk_public            : CheckBox
 var _btn_lobby_refresh     : Button
 var _lobby_list_container  : VBoxContainer
 var _btn_mic               : Button
+
+# Privacy consent modal (one-time screen-sharing notice)
+var _privacy_dialog        : Control   ## Full-rect dimmer + centered notice panel
+var _privacy_pending_mid   : int = -1  ## Monitor whose share triggered the notice
 
 ## Debounce timer: any quality-selector edit auto-applies a short moment later.
 var _apply_debounce        : Timer
@@ -578,6 +586,12 @@ func _build_ui() -> void:
 	add_child(_apply_debounce)
 
 	_switch_tab(0)
+
+	# ── One-time privacy consent modal (hidden until a share is requested) ─
+	_build_privacy_dialog()
+	# Keep the pointer reticle drawn on top of everything, including the modal.
+	if is_instance_valid(_reticle):
+		_canvas.move_child(_reticle, _canvas.get_child_count() - 1)
 
 	# ── 3D mesh that renders the SubViewport in world space ───────────────
 	_panel_mesh = MeshInstance3D.new()
@@ -1445,6 +1459,96 @@ func _on_monitor_share_pressed(monitor_id: int) -> void:
 func set_shared_monitors(ids: Array) -> void:
 	_shared_monitor_ids = ids.duplicate()
 	_rebuild_monitor_list()
+
+# ---------------------------------------------------------------------------
+# Privacy consent modal (one-time screen-sharing notice)
+# ---------------------------------------------------------------------------
+
+## Build the hidden full-rect consent modal: a click-blocking dimmer plus a
+## centered panel with the privacy notice and accept / dismiss buttons.
+func _build_privacy_dialog() -> void:
+	_privacy_dialog = Control.new()
+	_privacy_dialog.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_privacy_dialog.visible = false
+	_canvas.add_child(_privacy_dialog)
+
+	# Dimmer — STOP filter swallows pointer input so the UI beneath is inert.
+	var dim := ColorRect.new()
+	dim.color = Color(0.0, 0.0, 0.0, 0.66)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_privacy_dialog.add_child(dim)
+
+	# Centered notice card.
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_privacy_dialog.add_child(center)
+
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel",
+		_flat(Color(0.07, 0.09, 0.17, 0.99), Color(0.30, 0.46, 0.82), 8, 18))
+	card.custom_minimum_size = Vector2(640, 0)
+	center.add_child(card)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	card.add_child(vb)
+
+	var title := Label.new()
+	title.text = "🔒  Screen sharing"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color(0.72, 0.87, 1.00))
+	vb.add_child(title)
+
+	var body := Label.new()
+	body.text = "You are about to share a monitor with everyone in this room. " \
+		+ "They will see its live contents until you stop sharing.\n\n" \
+		+ "Sharing is opt-in per monitor and you can revoke it at any time. " \
+		+ "Only what you explicitly share is sent — nothing is shared by default."
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.add_theme_font_size_override("font_size", 17)
+	body.add_theme_color_override("font_color", Color(0.82, 0.87, 0.98))
+	vb.add_child(body)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 10)
+	vb.add_child(btn_row)
+
+	var cancel := Button.new()
+	cancel.text = "Not now"
+	cancel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cancel.pressed.connect(_on_privacy_dialog_cancel)
+	btn_row.add_child(cancel)
+
+	var accept := Button.new()
+	accept.text = "I understand — share"
+	accept.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	accept.add_theme_color_override("font_color", Color(0.55, 0.95, 0.65))
+	accept.pressed.connect(_on_privacy_dialog_confirm)
+	btn_row.add_child(accept)
+
+## Show the one-time consent modal for the monitor that triggered a share.
+## Called by main.gd in response to PrivacyManager.privacy_notice_required.
+func show_privacy_notice(monitor_id: int) -> void:
+	_privacy_pending_mid = monitor_id
+	if is_instance_valid(_privacy_dialog):
+		_privacy_dialog.visible = true
+
+## Whether the consent modal is currently shown (test/observability helper).
+func is_privacy_notice_visible() -> bool:
+	return is_instance_valid(_privacy_dialog) and _privacy_dialog.visible
+
+func _on_privacy_dialog_confirm() -> void:
+	if is_instance_valid(_privacy_dialog):
+		_privacy_dialog.visible = false
+	privacy_notice_acknowledged.emit(_privacy_pending_mid)
+	_privacy_pending_mid = -1
+
+func _on_privacy_dialog_cancel() -> void:
+	if is_instance_valid(_privacy_dialog):
+		_privacy_dialog.visible = false
+	_privacy_pending_mid = -1
 
 # ---------------------------------------------------------------------------
 # Label update  (called every frame)
