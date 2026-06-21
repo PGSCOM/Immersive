@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  GODOT_VERSION: "4.7"
+  GODOT_RELEASE: "stable"
+
 jobs:
   host-windows:
     name: Build Host (Windows)
@@ -15,6 +19,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: host/build
+          key: cmake-win-${{ hashFiles('host/CMakeLists.txt', 'host/src/**') }}
+          restore-keys: cmake-win-
 
       - name: Configure CMake
         run: |
@@ -37,6 +48,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: host/build
+          key: cmake-linux-${{ hashFiles('host/CMakeLists.txt', 'host/src/**') }}
+          restore-keys: cmake-linux-
 
       - name: Configure CMake
         run: |
@@ -62,6 +80,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: host/build
+          key: cmake-macos-${{ hashFiles('host/CMakeLists.txt', 'host/src/**') }}
+          restore-keys: cmake-macos-
+
       - name: Configure CMake
         run: |
           cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
@@ -86,6 +111,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Cache Godot binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/godot
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_RELEASE }}-linux-x86_64
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('signaling/requirements.txt') }}
+          restore-keys: pip-
+
       - name: Install system packages
         run: |
           sudo apt-get update
@@ -94,17 +132,20 @@ jobs:
       - name: Install Godot headless
         run: |
           set -euo pipefail
-          GODOT_VERSION="4.7"
-          GODOT_RELEASE="stable"
-          GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
-          GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
-          GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}"
-
-          curl -fL --retry 5 --retry-delay 3 -o "${GODOT_ZIP}" "${GODOT_BASE_URL}/${GODOT_ZIP}"
-          unzip -q "${GODOT_ZIP}"
-          sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
-          sudo chmod +x /usr/local/bin/godot
-          echo "Godot installed: $(godot --version)"
+          GODOT_BIN="$HOME/.cache/godot/godot"
+          if [ ! -x "$GODOT_BIN" ]; then
+            GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
+            GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
+            curl -fL --retry 5 --retry-delay 3 \
+              -o "$GODOT_ZIP" \
+              "https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}/${GODOT_ZIP}"
+            unzip -q "$GODOT_ZIP"
+            mkdir -p "$HOME/.cache/godot"
+            mv "Godot_v${GODOT_TAG}_linux.x86_64" "$GODOT_BIN"
+            chmod +x "$GODOT_BIN"
+          fi
+          sudo ln -sf "$GODOT_BIN" /usr/local/bin/godot
+          echo "Godot $(godot --version) ready"
 
       - name: Run Godot test suite
         run: |
@@ -134,6 +175,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Cache Godot binary and export templates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/godot
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_RELEASE }}-linux-with-templates
+
       - name: Install system packages
         run: |
           sudo apt-get update
@@ -143,34 +192,37 @@ jobs:
       - name: Install Godot headless and templates
         run: |
           set -euo pipefail
-          GODOT_VERSION="4.7"
-          GODOT_RELEASE="stable"
+          GODOT_BIN="$HOME/.cache/godot/godot"
           GODOT_TAG="${GODOT_VERSION}-${GODOT_RELEASE}"
-          GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
-          GODOT_TPZ="Godot_v${GODOT_TAG}_export_templates.tpz"
-          GODOT_BASE_URL="https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}"
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
 
-          echo "Downloading Godot ${GODOT_TAG}..."
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
-            -o "${GODOT_ZIP}" "${GODOT_BASE_URL}/${GODOT_ZIP}"
+          if [ ! -x "$GODOT_BIN" ]; then
+            GODOT_ZIP="Godot_v${GODOT_TAG}_linux.x86_64.zip"
+            echo "Downloading Godot ${GODOT_TAG}..."
+            curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+              -o "$GODOT_ZIP" \
+              "https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}/${GODOT_ZIP}"
+            unzip -q "$GODOT_ZIP"
+            mkdir -p "$HOME/.cache/godot"
+            mv "Godot_v${GODOT_TAG}_linux.x86_64" "$GODOT_BIN"
+            chmod +x "$GODOT_BIN"
+          fi
+          sudo ln -sf "$GODOT_BIN" /usr/local/bin/godot
 
-          echo "Downloading export templates..."
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
-            -o "${GODOT_TPZ}" "${GODOT_BASE_URL}/${GODOT_TPZ}"
+          if [ ! -d "$TEMPLATES_DIR" ] || [ -z "$(ls -A "$TEMPLATES_DIR" 2>/dev/null)" ]; then
+            GODOT_TPZ="Godot_v${GODOT_TAG}_export_templates.tpz"
+            echo "Downloading export templates..."
+            curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+              -o "$GODOT_TPZ" \
+              "https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}/${GODOT_TPZ}"
+            mkdir -p "$TEMPLATES_DIR"
+            mkdir -p /tmp/godot-templates
+            unzip -q "$GODOT_TPZ" -d /tmp/godot-templates
+            cp -R /tmp/godot-templates/templates/* "$TEMPLATES_DIR/"
+            rm -rf /tmp/godot-templates "$GODOT_TPZ"
+          fi
 
-          echo "Installing Godot..."
-          unzip -q "${GODOT_ZIP}"
-          sudo mv "Godot_v${GODOT_VERSION}-${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
-          sudo chmod +x /usr/local/bin/godot
-
-          echo "Installing export templates..."
-          mkdir -p "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}"
-          mkdir -p /tmp/godot-templates
-          unzip -q "${GODOT_TPZ}" -d /tmp/godot-templates
-          cp -R /tmp/godot-templates/templates/* \
-            "${HOME}/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_RELEASE}/"
-
-          echo "Godot installed: $(godot --version)"
+          echo "Godot $(godot --version) ready"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -189,7 +241,18 @@ jobs:
           echo "ANDROID_NDK_ROOT=${SDK_ROOT}/ndk/29.0.14206865" >> "$GITHUB_ENV"
           echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
 
+      - name: Cache Android SDK packages
+        id: cache-android
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/platforms/android-36
+            /usr/local/lib/android/sdk/build-tools/36.1.0
+            /usr/local/lib/android/sdk/ndk/29.0.14206865
+          key: android-sdk-36-bt-36.1.0-ndk-29.0.14206865
+
       - name: Install Android SDK packages
+        if: steps.cache-android.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           # Use printf instead of `yes` to avoid SIGPIPE broken pipe error
