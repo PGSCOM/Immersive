@@ -62,6 +62,98 @@ Multiple users can share a VR space, see each other as avatars, and view all sha
 - Revocation is immediate (stream stops within one frame)
 - Logs contain only ephemeral session IDs and opaque monitor IDs — no IPs, names, or screen contents
 
+## Signaling Server
+
+The signaling server (`signaling/server.py`) is a lightweight Python asyncio WebSocket server. It has no database, no persistent state, and no authentication — it only lives for the duration of an active session.
+
+### How it works
+
+```
+VR client A ──────────────────────────────────────────────────────── VR client B
+     │                                                                     │
+     │  room_join / user_pose / whiteboard_stroke / webrtc_offer …        │
+     └──────────────────────► signaling server ◄───────────────────────────┘
+                               ws://host:19810
+```
+
+Each connecting VR client sends JSON messages over a persistent WebSocket. The server:
+
+1. **Assigns a numeric `user_id`** (monotonically increasing per room) to each connection.
+2. **Broadcasts `user_presence`** to everyone already in the room so avatars appear immediately.
+3. **Relays `user_pose`** (head + hand transforms, ~20 Hz) to all other room members.
+4. **Relays WebRTC signals** (`webrtc_offer` / `webrtc_answer` / `ice_candidate`) point-to-point so clients can negotiate a direct data channel for low-latency pose delivery (P2P mode).
+5. **Relays whiteboard strokes / clears** to keep the shared canvas in sync.
+6. **Relays `screen_share_state`** so clients know which monitors a remote user is exposing.
+7. **Manages topology** — when the room crosses the P2P threshold it broadcasts `topology_changed {mode: "sfu"}` so all clients switch to routing pose data through the server relay instead of a direct channel. When the room drops back below the threshold, it sends `topology_changed {mode: "p2p"}` and clients re-establish direct connections.
+
+No video or audio is ever routed through the signaling server. Only lightweight JSON control messages pass through it.
+
+### Message types
+
+| Direction | Type | Purpose |
+|---|---|---|
+| client → server | `room_join` | Join or create a room by `room_id` |
+| server → client | `room_joined` | Confirms join, returns `user_id`, participant list, `mode` |
+| server → others | `user_presence` | New participant appeared / went offline |
+| server → others | `room_left` | Participant disconnected |
+| client → server | `user_pose` | Head + hand transforms (relayed to all others) |
+| client → server | `screen_share_state` | Which monitors are being shared |
+| client → server | `whiteboard_stroke` | A finished brush stroke (relayed to all others) |
+| client → server | `whiteboard_clear` | Clear the shared whiteboard |
+| client → server | `webrtc_offer` / `webrtc_answer` / `ice_candidate` | P2P WebRTC negotiation (relayed to `target_user_id`) |
+| server → all | `topology_changed` | Mode switched between `p2p` and `sfu` |
+| server → client | `error` | `ROOM_FULL` or `INVALID_JSON` |
+
+### Topology: P2P vs SFU
+
+| Room size | Mode | How pose data travels |
+|---|---|---|
+| 1–2 users | **P2P** | Direct WebRTC data channel between both clients; server only carries WebRTC signaling |
+| 3–8 users | **SFU relay** | Server forwards all `user_pose` messages; no direct channel required |
+
+Migration is seamless and automatic in both directions — no reconnect needed.
+
+### Requirements and startup
+
+```bash
+# Python 3.10+ required. Install the single dependency:
+pip install -r signaling/requirements.txt   # websockets>=10,<15
+
+# Standard mode (handles P2P ≤2 and SFU relay ≥3 automatically):
+python signaling/server.py                  # listens on 0.0.0.0:19810
+
+# Explicit SFU entry point (identical logic, different default port):
+python signaling/sfu_server.py              # listens on 0.0.0.0:19811
+
+# Custom address / port:
+python signaling/server.py --host 0.0.0.0 --port 9000
+```
+
+The server logs to stdout at INFO level — only ephemeral `user_id` integers and `room_id` strings appear in the log; no IPs, display names in log lines, or screen contents ever reach the log.
+
+### Capacity
+
+- Up to **8 users per room** (configurable via `MAX_USERS_PER_ROOM` in `server.py`)
+- Unlimited simultaneous rooms
+- No persistence — rooms vanish when the last user disconnects
+
+### Running on a server / cloud VM
+
+The signaling server needs to be reachable by all VR headsets on the same network (or over the internet). A minimal Linux VM works fine — the only open port required is the WebSocket port (default 19810).
+
+```bash
+# Run in background with logging to a file:
+nohup python signaling/server.py > signaling.log 2>&1 &
+
+# Or as a systemd service (create /etc/systemd/system/im2-signaling.service):
+# [Unit]  Description=Immersive-2 signaling server
+# [Service]  ExecStart=/usr/bin/python3 /opt/im2/signaling/server.py
+#            Restart=on-failure
+# [Install]  WantedBy=multi-user.target
+```
+
+For local LAN sessions the signaling server can run on the same Windows machine as the host — just use that machine's LAN IP when connecting from the headsets.
+
 ## Project Structure
 
 ```
