@@ -77,7 +77,8 @@ func start(host_ip: String, audio_port: int) -> bool:
 		push_warning("[AudioReceiver] Failed to bind UDP port %d: %d" % [audio_port, err])
 		return false
 
-	# Set filter so we only accept packets from the host
+	# Set the default destination (used if we ever reply); incoming host packets
+	# are matched by source when read. This does NOT filter inbound packets.
 	_udp.set_dest_address(host_ip, audio_port)
 
 	_running          = true

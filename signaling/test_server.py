@@ -46,6 +46,14 @@ class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
         raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
         return json.loads(raw)  # type: ignore[no-any-return]
 
+    async def _recv_until(self, ws: websockets.WebSocketClientProtocol, msg_type: str,
+                          timeout: float = 2.0) -> Dict[str, Any]:
+        """Read (and discard) messages until one of `msg_type` arrives."""
+        while True:
+            msg = await self._recv(ws, timeout)
+            if msg.get("type") == msg_type:
+                return msg
+
     # -----------------------------------------------------------------------
     # Tests
     # -----------------------------------------------------------------------
@@ -132,6 +140,35 @@ class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
         await ws2.close()
         await ws3.close()
 
+    async def test_topology_transition_back_to_p2p(self) -> None:
+        """3 peers (SFU) drop to 2; verify seamless migration back to P2P."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+        ws3 = await self._connect()
+
+        await self._send(ws1, "room_join", {"room_id": "p2p-back", "display_name": "Alice"})
+        await self._recv(ws1)
+        await self._send(ws2, "room_join", {"room_id": "p2p-back", "display_name": "Bob"})
+        await self._recv(ws2)
+        await self._send(ws3, "room_join", {"room_id": "p2p-back", "display_name": "Carol"})
+        await self._recv(ws3)
+
+        # Drain until both remaining peers have seen the SFU transition.
+        sfu1 = await self._recv_until(ws1, "topology_changed")
+        sfu2 = await self._recv_until(ws2, "topology_changed")
+        self.assertEqual(sfu1["mode"], "sfu")
+        self.assertEqual(sfu2["mode"], "sfu")
+
+        # Carol leaves → room drops to 2 → back to P2P for everyone remaining.
+        await ws3.close()
+        p2p1 = await self._recv_until(ws1, "topology_changed")
+        p2p2 = await self._recv_until(ws2, "topology_changed")
+        self.assertEqual(p2p1["mode"], "p2p")
+        self.assertEqual(p2p2["mode"], "p2p")
+
+        await ws1.close()
+        await ws2.close()
+
     async def test_pose_relay(self) -> None:
         """Peer sends pose; verify relay to others."""
         ws1 = await self._connect()
@@ -184,6 +221,29 @@ class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg["user_id"], 1)
         self.assertEqual(msg["monitor_count"], 2)
         self.assertTrue(msg["enabled"])
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_whiteboard_relay(self) -> None:
+        """A user draws / clears the whiteboard; verify relay to others in the room."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+        await self._send(ws1, "room_join", {"room_id": "wb", "display_name": "A"})
+        await self._recv(ws1)
+        await self._send(ws2, "room_join", {"room_id": "wb", "display_name": "B"})
+        await self._recv(ws2)
+        await self._recv(ws1)  # presence for B
+
+        stroke = {"user_id": 1, "color": [0.0, 0.0, 0.0], "points": [0.1, 0.1, 0.9, 0.9]}
+        await self._send(ws1, "whiteboard_stroke", {"stroke": stroke})
+        msg = await self._recv_until(ws2, "whiteboard_stroke")
+        self.assertEqual(msg["user_id"], 1)
+        self.assertEqual(msg["stroke"]["points"], [0.1, 0.1, 0.9, 0.9])
+
+        await self._send(ws1, "whiteboard_clear", {})
+        msg2 = await self._recv_until(ws2, "whiteboard_clear")
+        self.assertEqual(msg2["user_id"], 1)
 
         await ws1.close()
         await ws2.close()

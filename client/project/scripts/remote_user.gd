@@ -6,8 +6,8 @@ extends Node3D
 ## User ID from the signaling server.
 var user_id: int = -1
 
-## Display name (for UI, not logged).
-var display_name: String = ""
+## Display name (for UI, not logged). Updates the floating nameplate on assignment.
+var display_name: String = "" : set = _set_display_name
 
 ## Head node.
 var _head: Node3D = null
@@ -16,80 +16,128 @@ var _head: Node3D = null
 var _left_hand: Node3D = null
 var _right_hand: Node3D = null
 
+## Floating name label above the head.
+var _nameplate: Label3D = null
+
 ## Screen panels for shared monitors.
 var _screen_panels: Dictionary = {}  # monitor_id -> RemoteScreenPanel
 
 func _init() -> void:
-    _head = Node3D.new()
-    _head.name = "Head"
-    add_child(_head)
+	var avatar_color := Color(0.30, 0.60, 0.95)
 
-    _left_hand = Node3D.new()
-    _left_hand.name = "LeftHand"
-    add_child(_left_hand)
+	_head = Node3D.new()
+	_head.name = "Head"
+	add_child(_head)
+	var head_mesh := MeshInstance3D.new()
+	var head_box := BoxMesh.new()
+	head_box.size = Vector3(0.18, 0.22, 0.16)
+	head_mesh.mesh = head_box
+	head_mesh.material_override = _avatar_material(avatar_color)
+	_head.add_child(head_mesh)
 
-    _right_hand = Node3D.new()
-    _right_hand.name = "RightHand"
-    add_child(_right_hand)
+	# Floating nameplate above the head (billboarded, no depth test so it is
+	# always readable). Text is filled in when display_name is assigned.
+	_nameplate = Label3D.new()
+	_nameplate.font_size = 28
+	_nameplate.modulate = Color(0.85, 0.92, 1.0)
+	_nameplate.no_depth_test = true
+	_nameplate.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_nameplate.position = Vector3(0.0, 0.22, 0.0)
+	_nameplate.text = display_name
+	_head.add_child(_nameplate)
+
+	_left_hand = Node3D.new()
+	_left_hand.name = "LeftHand"
+	add_child(_left_hand)
+	_left_hand.add_child(_make_hand_mesh(avatar_color))
+
+	_right_hand = Node3D.new()
+	_right_hand.name = "RightHand"
+	add_child(_right_hand)
+	_right_hand.add_child(_make_hand_mesh(avatar_color))
+
+## Build a simple hand cube for the avatar.
+func _make_hand_mesh(color: Color) -> MeshInstance3D:
+	var hand_mesh := MeshInstance3D.new()
+	var hand_box := BoxMesh.new()
+	hand_box.size = Vector3(0.07, 0.04, 0.10)
+	hand_mesh.mesh = hand_box
+	hand_mesh.material_override = _avatar_material(color)
+	return hand_mesh
+
+## Unshaded, slightly emissive material so avatars read clearly in any environment.
+func _avatar_material(color: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.emission_enabled = true
+	mat.emission = Color(color.r * 0.4, color.g * 0.4, color.b * 0.4)
+	mat.emission_energy_multiplier = 0.6
+	return mat
+
+func _set_display_name(value: String) -> void:
+	display_name = value
+	if _nameplate:
+		_nameplate.text = value
 
 ## Update pose from USER_POSE message.
 func update_pose(head: Dictionary, left_hand: Dictionary, right_hand: Dictionary) -> void:
-    _apply_pose(_head, head)
-    _apply_pose(_left_hand, left_hand)
-    _apply_pose(_right_hand, right_hand)
+	_apply_pose(_head, head)
+	_apply_pose(_left_hand, left_hand)
+	_apply_pose(_right_hand, right_hand)
 
 func _apply_pose(node: Node3D, pose: Dictionary) -> void:
-    var pos := Vector3(pose.get("pos_x", 0.0), pose.get("pos_y", 0.0), pose.get("pos_z", 0.0))
-    var rot := Quaternion(pose.get("rot_x", 0.0), pose.get("rot_y", 0.0), pose.get("rot_z", 0.0), pose.get("rot_w", 1.0))
-    node.transform.origin = pos
-    node.transform.basis = Basis(rot)
+	var pos := Vector3(pose.get("pos_x", 0.0), pose.get("pos_y", 0.0), pose.get("pos_z", 0.0))
+	var rot := Quaternion(pose.get("rot_x", 0.0), pose.get("rot_y", 0.0), pose.get("rot_z", 0.0), pose.get("rot_w", 1.0))
+	node.transform.origin = pos
+	node.transform.basis = Basis(rot)
 
 ## Apply screen layout from REMOTE_SCREEN_LAYOUT message.
 func apply_screen_layout(entries: Array) -> void:
-    # Remove panels for monitors no longer in layout
-    var new_ids: Array = []
-    for entry in entries:
-        new_ids.append(entry.get("monitor_id", -1))
-    
-    for existing_id in _screen_panels.keys():
-        if not new_ids.has(existing_id):
-            _screen_panels[existing_id].queue_free()
-            _screen_panels.erase(existing_id)
-    
-    # Add or update panels
-    for entry in entries:
-        var mid: int = entry.get("monitor_id", -1)
-        if mid < 0:
-            continue
-        
-        if not _screen_panels.has(mid):
-            var panel = preload("res://scripts/remote_screen_panel.gd").new()
-            panel.name = "ScreenPanel_%d" % mid
-            add_child(panel)
-            _screen_panels[mid] = panel
-        
-        _screen_panels[mid].apply_layout_metadata(entry)
+	# Remove panels for monitors no longer in layout
+	var new_ids: Array = []
+	for entry in entries:
+		new_ids.append(entry.get("monitor_id", -1))
+	
+	for existing_id in _screen_panels.keys():
+		if not new_ids.has(existing_id):
+			_screen_panels[existing_id].queue_free()
+			_screen_panels.erase(existing_id)
+	
+	# Add or update panels
+	for entry in entries:
+		var mid: int = entry.get("monitor_id", -1)
+		if mid < 0:
+			continue
+		
+		if not _screen_panels.has(mid):
+			var panel = preload("res://scripts/remote_screen_panel.gd").new()
+			panel.name = "ScreenPanel_%d" % mid
+			add_child(panel)
+			_screen_panels[mid] = panel
+		
+		_screen_panels[mid].apply_layout_metadata(entry)
 
 ## Get all screen panels.
 func get_screen_panels() -> Array:
-    return _screen_panels.values()
+	return _screen_panels.values()
 
 ## Get a specific screen panel by monitor ID.
 func get_screen_panel_for_monitor(monitor_id: int) -> Node:
-    return _screen_panels.get(monitor_id, null)
+	return _screen_panels.get(monitor_id, null)
 
 ## Get the head node.
 func get_head_node() -> Node3D:
-    return _head
+	return _head
 
 ## Get the left hand node.
 func get_left_hand_node() -> Node3D:
-    return _left_hand
+	return _left_hand
 
 ## Get the right hand node.
 func get_right_hand_node() -> Node3D:
-    return _right_hand
+	return _right_hand
 
 ## Get display name.
 func get_display_name() -> String:
-    return display_name
+	return display_name

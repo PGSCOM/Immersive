@@ -282,6 +282,30 @@ class SignalingServer:
             exclude=user_id,
         )
 
+    async def handle_whiteboard(self, ws: Any, msg_type: str, payload: dict) -> None:
+        """Relay a whiteboard stroke / clear to everyone else in the room."""
+        user_id = getattr(ws, "user_id", None)
+        room_id = getattr(ws, "room_id", None)
+        if user_id is None or room_id is None:
+            return
+
+        room = self.rooms.get(room_id)
+        if not room:
+            return
+
+        if msg_type == "whiteboard_stroke":
+            await self._broadcast(
+                room,
+                self._build_msg("whiteboard_stroke", user_id=user_id, stroke=payload.get("stroke")),
+                exclude=user_id,
+            )
+        else:  # whiteboard_clear
+            await self._broadcast(
+                room,
+                self._build_msg("whiteboard_clear", user_id=user_id),
+                exclude=user_id,
+            )
+
     async def handle_webrtc_signal(self, ws: Any, msg_type: str, payload: dict) -> None:
         """Relay WebRTC offer/answer/ice_candidate to target user."""
         user_id = getattr(ws, "user_id", None)
@@ -333,6 +357,8 @@ class SignalingServer:
                     await self.handle_screen_share_state(ws, payload)
                 elif msg_type == "monitor_layout_update":
                     await self.handle_monitor_layout_update(ws, payload)
+                elif msg_type in ("whiteboard_stroke", "whiteboard_clear"):
+                    await self.handle_whiteboard(ws, msg_type, payload)
                 elif msg_type in ("webrtc_offer", "webrtc_answer", "ice_candidate"):
                     await self.handle_webrtc_signal(ws, msg_type, payload)
                 else:

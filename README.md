@@ -76,13 +76,13 @@ Immersive-2/
 │   │   ├── scenes/          # main.tscn, virtual_keyboard.tscn
 │   │   ├── shaders/         # screen.gdshader (ExternalTexture / MJPEG paths)
 │   │   ├── addons/          # im2_decoder export plugin (bundles MediaCodec AAR)
-│   │   └── test/            # Godot headless test suite (run_tests.gd + 3 suites)
+│   │   └── test/            # Godot headless test suite (run_tests.gd + 11 suites)
 │   └── android-plugin/      # Java/Gradle source for the Im2VideoDecoder AAR
 ├── signaling/               # Multi-user signaling server
 │   ├── server.py            # WebSocket server (P2P ↔ SFU topology)
 │   ├── sfu_server.py        # SFU relay entry point (extends server.py)
 │   ├── requirements.txt     # websockets>=10,<15
-│   └── test_server.py       # Python unittest suite (6 tests)
+│   └── test_server.py       # Python unittest suite (8 tests)
 ├── protocol/
 │   └── protocol.h           # Wire protocol (shared C++ header — source of truth)
 ├── web/
@@ -222,14 +222,20 @@ Then open:
 
 | Action | Function |
 |---|---|
-| B / Y | Toggle UI overlay |
-| Right trigger | Click / interact |
+| B (right controller) / Y | Toggle UI overlay |
+| A (right controller) / X | Toggle the in-VR QWERTY keyboard |
+| Right trigger | Click / interact (panels, keyboard, portals, overlay) |
 | Right grip (hold) | Grab and reposition panel |
 | Right grip + thumbstick Y | Scale panel up/down |
 | Right thumbstick | Scroll |
-| A / X (left controller) | Toggle virtual keyboard |
+| Left thumbstick X (flick) | Snap-turn ±30° |
+| Left thumbstick forward (hold → release) | Aim teleport → go |
 | Right hand pinch | Pointer click/drag (hand tracking, no controller) |
 | Left hand pinch-hold | Toggle overlay (hand tracking) |
+
+The overlay's **Spaces & collaboration** section adds passthrough portals
+(rectangle/square/circle + a keyboard portal), a themed-environment cycler, the
+shared whiteboard, and the multi-user **Room** join/leave controls.
 
 ## Running Tests
 
@@ -237,13 +243,13 @@ Then open:
 ```bash
 godot --headless --xr-mode off \
   --path client/project -s res://test/run_tests.gd
-# Expected: Total Passed: 159 / Total Failed: 0
+# Expected: Total Passed: 353 / Total Failed: 0
 ```
 
 **Python signaling tests:**
 ```bash
 python -m unittest discover -v signaling/
-# Expected: Ran 6 tests … OK
+# Expected: Ran 8 tests … OK
 ```
 
 CI runs both suites on every push before building the export artifacts.
@@ -273,8 +279,16 @@ CI runs both suites on every push before building the export artifacts.
 - IDD virtual display driver integration
 - Passthrough/mixed-reality background mode
 - Web client (WebXR + Node bridge, H.264 via WebCodecs)
-- Multi-user shared VR workspaces (WebSocket signaling, P2P mesh / SFU relay)
+- Multi-user shared VR workspaces (WebSocket signaling, P2P mesh / SFU relay) — wired into the VR client with avatars, pose sync, and a Room join UI
 - Per-monitor opt-in screen sharing with immediate revocation
+- Passthrough portals — up to 5 mixed-reality cut-outs (rectangle/square/circle) + a dedicated keyboard portal
+- Themed environments (café / space lounge / mountain lodge / starship) with weekly rotation
+- Teleport + comfort snap-turn locomotion
+- Shared collaborative whiteboard with high-resolution snapshot save
+- In-VR QWERTY keyboard (controller ray + hand pinch), now reachable via A/X
+
+See [docs/IMMERSED_PARITY.md](docs/IMMERSED_PARITY.md) for a feature-by-feature
+map against Immersed (implemented / partial / not-feasible), each backed by tests.
 
 ## Protocol
 

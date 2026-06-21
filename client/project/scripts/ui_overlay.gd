@@ -22,6 +22,13 @@ signal workspace_restore_requested
 ## codec: 0xFF auto, 0 H.264, 2 MJPEG · res_percent: 100/75/50, -1 auto · fps: 0 auto
 signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int, res_percent: int, fps: int)
 signal auto_quality_requested
+## Spaces & collaboration (mixed-reality + multi-user) requests.
+signal environment_cycle_requested
+signal portal_add_requested(shape: int)
+signal keyboard_portal_requested
+signal whiteboard_toggle_requested
+signal room_join_requested(url: String, room_id: String, display_name: String)
+signal room_leave_requested
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -110,6 +117,15 @@ var _lbl_bitrate_value     : Label
 var _slider_jpegq          : HSlider
 var _lbl_jpegq_value       : Label
 var _lbl_auto_info         : Label
+
+# Spaces & collaboration controls
+var _lbl_env_name          : Label
+var _input_room_url        : LineEdit
+var _input_room_id         : LineEdit
+var _input_room_name       : LineEdit
+var _btn_room_join         : Button
+var _lbl_room_status       : Label
+var _in_room               : bool = false
 
 ## Debounce timer: any quality-selector edit auto-applies a short moment later,
 ## so settings always take effect without needing the Apply button. The delay
@@ -307,7 +323,10 @@ func _on_reticle_draw() -> void:
 
 ## Instant snap used on first show.
 func _reposition_in_front_of_camera() -> void:
-	var camera := get_viewport().get_camera_3d()
+	var vp := get_viewport()
+	if vp == null:
+		return
+	var camera := vp.get_camera_3d()
 	if not camera:
 		return
 	var fwd := -camera.global_transform.basis.z
@@ -575,6 +594,9 @@ func _build_ui() -> void:
 	# ── Stream quality section ───────────────────────────────────────────
 	_build_quality_section(vbox)
 
+	# ── Spaces & collaboration section ───────────────────────────────────
+	_build_spaces_section(vbox)
+
 	# ── Monitors section ─────────────────────────────────────────────────
 	_add_section_separator(vbox, "Monitors")
 
@@ -661,9 +683,11 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	codec_row.add_theme_constant_override("separation", 6)
 	vbox.add_child(codec_row)
 	_quality_label(codec_row, "Codec")
-	# Hardware-decoded codecs only — the MJPEG software path has been removed.
+	# Auto picks the best codec the device can decode (hardware H.264/HEVC/AV1 on
+	# Quest/Pico, software MJPEG on PC/iOS/web). MJPEG can also be forced explicitly
+	# — it is the software fallback, tuned via the JPEG-quality slider below.
 	_codec_buttons = _make_segmented_row(codec_row,
-		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3]],
+		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3], ["MJPEG", 2]],
 		_on_codec_chosen)
 
 	# Resolution row
@@ -817,6 +841,112 @@ func set_auto_quality_result(width: int, height: int, fps: int,
 	if _lbl_auto_info:
 		_lbl_auto_info.text = "Auto: %dx%d @ %d fps — panel covers %.0f° at %.1f m (headset ≈ %.0f px/°)" % [
 			width, height, fps, angle_deg, distance, ppd]
+
+# ---------------------------------------------------------------------------
+# Spaces & collaboration section (environments, portals, whiteboard, rooms)
+# ---------------------------------------------------------------------------
+
+func _build_spaces_section(vbox: VBoxContainer) -> void:
+	_add_section_separator(vbox, "Spaces & collaboration")
+
+	# Themed environment cycle.
+	var env_row := HBoxContainer.new()
+	env_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(env_row)
+	var env_btn := Button.new()
+	env_btn.text = "🌆 Environment ▶"
+	env_btn.pressed.connect(func(): environment_cycle_requested.emit())
+	env_row.add_child(env_btn)
+	_lbl_env_name = Label.new()
+	_lbl_env_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_lbl_env_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	env_row.add_child(_lbl_env_name)
+
+	# Mixed-reality passthrough portals + whiteboard.
+	var mr_row := HBoxContainer.new()
+	mr_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(mr_row)
+	_quality_label(mr_row, "Portal", 56)
+	_portal_button(mr_row, "▭", "Add a rectangular passthrough portal", 0)
+	_portal_button(mr_row, "■", "Add a square passthrough portal", 1)
+	_portal_button(mr_row, "●", "Add a circular passthrough portal", 2)
+	var kbp_btn := Button.new()
+	kbp_btn.text = "⌨"
+	kbp_btn.tooltip_text = "Keyboard passthrough portal (see your real keyboard)"
+	kbp_btn.pressed.connect(func(): keyboard_portal_requested.emit())
+	mr_row.add_child(kbp_btn)
+	var wb_btn := Button.new()
+	wb_btn.text = "📝 Whiteboard"
+	wb_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	wb_btn.pressed.connect(func(): whiteboard_toggle_requested.emit())
+	mr_row.add_child(wb_btn)
+
+	# Multi-user room: signaling server URL, room id, display name.
+	var url_row := HBoxContainer.new()
+	url_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(url_row)
+	_quality_label(url_row, "Server", 56)
+	_input_room_url = LineEdit.new()
+	_input_room_url.placeholder_text = "ws://192.168.1.100:19810"
+	_input_room_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	url_row.add_child(_input_room_url)
+
+	var room_row := HBoxContainer.new()
+	room_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(room_row)
+	_quality_label(room_row, "Room", 56)
+	_input_room_id = LineEdit.new()
+	_input_room_id.placeholder_text = "lobby"
+	_input_room_id.text = "lobby"
+	_input_room_id.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	room_row.add_child(_input_room_id)
+	_input_room_name = LineEdit.new()
+	_input_room_name.placeholder_text = "Name"
+	_input_room_name.text = "Guest"
+	_input_room_name.custom_minimum_size = Vector2(120, 0)
+	room_row.add_child(_input_room_name)
+
+	var join_row := HBoxContainer.new()
+	join_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(join_row)
+	_btn_room_join = Button.new()
+	_btn_room_join.text = "🤝 Join room"
+	_btn_room_join.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_room_join.pressed.connect(_on_room_join_pressed)
+	join_row.add_child(_btn_room_join)
+	_lbl_room_status = Label.new()
+	_lbl_room_status.text = "Not in a room"
+	_lbl_room_status.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
+	join_row.add_child(_lbl_room_status)
+
+func _portal_button(parent: HBoxContainer, label: String, tip: String, shape: int) -> void:
+	var b := Button.new()
+	b.text = label
+	b.tooltip_text = tip
+	b.pressed.connect(func(): portal_add_requested.emit(shape))
+	parent.add_child(b)
+
+func _on_room_join_pressed() -> void:
+	if _in_room:
+		room_leave_requested.emit()
+		return
+	var url := _input_room_url.text.strip_edges()
+	if url.is_empty():
+		url = "ws://127.0.0.1:19810"
+	room_join_requested.emit(url, _input_room_id.text.strip_edges(), _input_room_name.text.strip_edges())
+
+## Reflect room membership from main.gd.
+func set_room_state(in_room: bool, info: String = "") -> void:
+	_in_room = in_room
+	if _btn_room_join:
+		_btn_room_join.text = "🚪 Leave room" if in_room else "🤝 Join room"
+	if _lbl_room_status:
+		_lbl_room_status.text = info if not info.is_empty() else ("In room" if in_room else "Not in a room")
+
+## Reflect the active environment name from main.gd.
+func set_environment_name(env_name: String) -> void:
+	if _lbl_env_name:
+		_lbl_env_name.text = env_name
 
 # ---------------------------------------------------------------------------
 # Section separator helper

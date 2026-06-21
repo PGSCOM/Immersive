@@ -419,7 +419,7 @@ func test_main_gd_remote_user_lifecycle(passed: Array, failed: Array, _tree: Sce
 			"local-only joined event does not create remote users", passed, failed)
 
 	if main.has_method("on_user_presence"):
-		main.on_user_presence(5554, "Alice", false, true)
+		main.on_user_presence(5554, "Alice", true)
 		_assert(main.remote_users.has(5554),
 			"presence(remote, online=true) creates remote user", passed, failed)
 		var u_alice = main.remote_users.get(5554)
@@ -429,14 +429,14 @@ func test_main_gd_remote_user_lifecycle(passed: Array, failed: Array, _tree: Sce
 			_assert(u_alice.get_display_name() == "Alice",
 				"display_name propagated to remote user", passed, failed)
 
-		main.on_user_presence(7777, "Bob", false, true)
+		main.on_user_presence(7777, "Bob", true)
 		_assert(main.remote_users.has(7777),
 			"second remote user also created", passed, failed)
 		_assert_eq_int(main.remote_users.size(), 2,
 			"two remote users tracked", passed, failed)
 
 		# Remote user goes offline → entry is removed.
-		main.on_user_presence(5554, "Alice", false, false)
+		main.on_user_presence(5554, "Alice", false)
 		_assert(not main.remote_users.has(5554),
 			"user 5554 removed after presence(offline)", passed, failed)
 		_assert_eq_int(main.remote_users.size(), 1,
@@ -445,7 +445,7 @@ func test_main_gd_remote_user_lifecycle(passed: Array, failed: Array, _tree: Sce
 		if main.has_method("on_room_left"):
 			main.on_room_left(7777)
 		else:
-			main.on_user_presence(7777, "Bob", false, false)
+			main.on_user_presence(7777, "Bob", false)
 		_assert_eq_int(main.remote_users.size(), 0,
 			"final user removed after room_left", passed, failed)
 	else:
@@ -469,7 +469,7 @@ func test_main_gd_pose_propagation(passed: Array, failed: Array, _tree: SceneTre
 	if main.has_method("set_local_user_id"):
 		main.set_local_user_id(0)
 	if main.has_method("on_user_presence"):
-		main.on_user_presence(1234, "Cara", false, true)
+		main.on_user_presence(1234, "Cara", true)
 	var user: Node3D = main.remote_users.get(1234, null)
 	_assert(user != null, "user 1234 present", passed, failed)
 
@@ -514,7 +514,7 @@ func test_main_gd_peer_join_leave(passed: Array, failed: Array, _tree: SceneTree
 	if main.has_method("set_local_user_id"):
 		main.set_local_user_id(42)
 	elif main.has_method("on_user_presence"):
-		main.on_user_presence(42, "Me", true, true)
+		main.on_user_presence(42, "Me", true)
 
 	if not main.has_method("on_room_joined"):
 		failed.append("main exposes on_room_joined()")
@@ -544,11 +544,11 @@ func test_main_gd_peer_join_leave(passed: Array, failed: Array, _tree: SceneTree
 	_assert_eq_int(main.remote_users.size(), 3,
 		"remote_users has exactly 3 entries", passed, failed)
 
-	main.on_user_presence(400, "Dave", false, true)
+	main.on_user_presence(400, "Dave", true)
 	_assert_eq_int(main.remote_users.size(), 4,
 		"4 remote users after Dave joins", passed, failed)
 
-	main.on_user_presence(400, "Dave", false, false)
+	main.on_user_presence(400, "Dave", false)
 	_assert_eq_int(main.remote_users.size(), 3,
 		"back to 3 after Dave leaves", passed, failed)
 
@@ -572,7 +572,7 @@ func test_mode_switching_does_not_break_remote_users(passed: Array, failed: Arra
 	elif "client_mode" in main:
 		main.set("client_mode", "flat")
 
-	main.on_user_presence(7000, "Alice", false, true)
+	main.on_user_presence(7000, "Alice", true)
 	_assert(main.remote_users.has(7000), "user 7000 created under flat mode",
 		passed, failed)
 
@@ -587,7 +587,7 @@ func test_mode_switching_does_not_break_remote_users(passed: Array, failed: Arra
 		_assert_eq_int(user.get_screen_panels().size(), 2,
 			"2 panels under flat mode", passed, failed)
 
-	main.on_user_presence(7000, "Alice", false, false)
+	main.on_user_presence(7000, "Alice", false)
 	_assert_eq_int(main.remote_users.size(), 0,
 		"user 7000 cleaned up under flat mode", passed, failed)
 

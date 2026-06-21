@@ -73,6 +73,13 @@ var _key_nodes: Dictionary = {}
 ## Currently hovered key.
 var _hovered_key: MeshInstance3D = null
 
+## Edge-detection latch so a held press types a key only once (not every frame).
+var _press_was_active: bool = false
+
+## Whether the key meshes have been built yet (lazy, so the keyboard is usable
+## the first time it is shown or pointed at, regardless of _ready() timing).
+var _built: bool = false
+
 # Materials
 var _mat_normal:  StandardMaterial3D
 var _mat_hover:   StandardMaterial3D
@@ -84,9 +91,17 @@ var _mat_active:  StandardMaterial3D  # Shift/Ctrl when latched
 # ---------------------------------------------------------------------------
 
 func _ready() -> void:
+	_ensure_built()
+	visible = false
+
+## Build the key meshes once (idempotent). Called from _ready() and lazily from
+## the first interaction so the keyboard works even if _ready() has not run yet.
+func _ensure_built() -> void:
+	if _built:
+		return
+	_built = true
 	_build_materials()
 	_build_keyboard()
-	visible = false
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -94,6 +109,7 @@ func _ready() -> void:
 
 ## Show or hide the keyboard.
 func toggle_visibility() -> void:
+	_ensure_built()
 	visible = not visible
 	if visible:
 		_reposition_in_front_of_camera()
@@ -102,12 +118,17 @@ func toggle_visibility() -> void:
 ## left-hand index finger / pointer.
 ## Returns the vk_code of any key that was triggered, or -1.
 func pointer_update(world_pos: Vector3, is_pressing: bool) -> int:
+	_ensure_built()
+	# Compare in the keyboard's local frame: keys are positioned locally, so this
+	# is independent of where the keyboard sits in the world (and robust in tests
+	# where global transforms are not propagated).
+	var local: Vector3 = global_transform.affine_inverse() * world_pos
 	var best_key: MeshInstance3D = null
 	var best_dist: float = 0.04  # max hit radius in metres
 
 	for key_node in _key_nodes.keys():
 		if not is_instance_valid(key_node): continue
-		var d: float = key_node.global_position.distance_to(world_pos)
+		var d: float = key_node.position.distance_to(local)
 		if d < best_dist:
 			best_dist = d
 			best_key  = key_node
@@ -117,15 +138,41 @@ func pointer_update(world_pos: Vector3, is_pressing: bool) -> int:
 		_set_key_material(_hovered_key, _mat_normal)
 		_hovered_key = null
 
+	var triggered: int = -1
 	if best_key != null:
 		_hovered_key = best_key
-		if is_pressing:
+		# Only fire on the press edge so a held trigger/pinch types a key once.
+		if is_pressing and not _press_was_active:
 			_set_key_material(best_key, _mat_pressed)
-			return _activate_key(best_key)
-		else:
+			triggered = _activate_key(best_key)
+		elif not is_pressing:
 			_set_key_material(best_key, _mat_hover)
 
-	return -1
+	_press_was_active = is_pressing
+	return triggered
+
+## Ray-based interaction for the controller / hand pointer.
+## Intersects the ray with the keyboard's plane and drives the same hover/press
+## logic as pointer_update(). Returns { valid: bool, distance: float, vk: int };
+## valid is true when the ray is over a key (so the caller should not also act on
+## a panel behind the keyboard).
+func ray_update(ray_origin: Vector3, ray_direction: Vector3, is_pressing: bool) -> Dictionary:
+	if not visible:
+		return {"valid": false}
+
+	# Plane through the keyboard origin with the keyboard's local +Z as normal.
+	var normal: Vector3 = global_transform.basis.z.normalized()
+	var denom: float = ray_direction.dot(normal)
+	if absf(denom) < 0.0001:
+		return {"valid": false}
+	var t: float = (global_transform.origin - ray_origin).dot(normal) / denom
+	if t < 0.0:
+		return {"valid": false}
+
+	var hit_point: Vector3 = ray_origin + ray_direction * t
+	var vk: int = pointer_update(hit_point, is_pressing)
+	# pointer_update() leaves _hovered_key set only when the hit was within a key.
+	return {"valid": _hovered_key != null, "distance": t, "vk": vk}
 
 # ---------------------------------------------------------------------------
 # Building the keyboard
@@ -253,6 +300,10 @@ func _activate_key(key_node: MeshInstance3D) -> int:
 	return vk_code
 
 func _animate_key_press(key_node: MeshInstance3D) -> void:
+	# Tweens require the node to be inside the tree; skip the cosmetic animation
+	# when it is not (e.g. headless tests) rather than dereference a null tween.
+	if not is_inside_tree():
+		return
 	# Move key down slightly, then restore after 80 ms
 	key_node.position.z -= KEY_Z_PRESS
 	var tween := create_tween()
@@ -268,7 +319,10 @@ func _set_key_material(key_node: MeshInstance3D, mat: StandardMaterial3D) -> voi
 		key_node.material_override = mat
 
 func _reposition_in_front_of_camera() -> void:
-	var camera := get_viewport().get_camera_3d()
+	var vp := get_viewport()
+	if vp == null:
+		return
+	var camera := vp.get_camera_3d()
 	if camera == null:
 		return
 	var forward: Vector3 = -camera.global_transform.basis.z

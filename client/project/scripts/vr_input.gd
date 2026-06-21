@@ -83,6 +83,22 @@ func _update_pointer() -> void:
 
 	_ui_hovered = false
 
+	# In-VR keyboard takes priority over the monitor panels behind it.
+	if main_scene.has_method("is_virtual_keyboard_visible") and main_scene.is_virtual_keyboard_visible():
+		var kb_hit: Dictionary = main_scene.keyboard_ray_update(ray_origin, ray_direction, _trigger_pressed)
+		if kb_hit.get("valid", false):
+			_active_panel = null
+			_last_uv = Vector2(-1, -1)
+			return
+
+	# Whiteboard drawing also takes priority over the panels behind it.
+	if main_scene.has_method("is_whiteboard_active") and main_scene.is_whiteboard_active():
+		var wb_hit: Dictionary = main_scene.draw_on_whiteboard(ray_origin, ray_direction, _trigger_pressed)
+		if wb_hit.get("valid", false):
+			_active_panel = null
+			_last_uv = Vector2(-1, -1)
+			return
+
 	var hit: Dictionary = main_scene.get_panel_hit_from_ray(ray_origin, ray_direction)
 	if not hit.get("valid", false):
 		_active_panel = null
@@ -124,8 +140,8 @@ func _on_button_pressed(button_name: String) -> void:
 		"primary_click":
 			_send_click(0x04)
 		"ax_button":
-			if main_scene and main_scene.has_method("toggle_ui_overlay"):
-				main_scene.toggle_ui_overlay()
+			if main_scene and main_scene.has_method("toggle_virtual_keyboard"):
+				main_scene.toggle_virtual_keyboard()
 		"by_button":
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()

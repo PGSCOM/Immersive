@@ -28,6 +28,7 @@ const WORKSPACE_PATH := "user://immersive2_workspace.json"
 @onready var left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var right_controller: XRController3D = $XROrigin3D/RightController
 @onready var right_aim: XRController3D = $XROrigin3D/RightAim
+@onready var virtual_keyboard: VirtualKeyboard = get_node_or_null("VirtualKeyboard") as VirtualKeyboard
 
 # ---------------------------------------------------------------------------
 # State
@@ -129,13 +130,22 @@ var _pending_workspace_restore: bool = false
 # Lifecycle
 # ---------------------------------------------------------------------------
 
+## Guard so _ready() runs its one-time setup exactly once even if invoked manually
+## (e.g. headless tests force it because the engine defers _ready in that harness).
+var _ready_done: bool = false
+
 func _ready() -> void:
+	if _ready_done:
+		return
+	_ready_done = true
 	_load_config()
 	_load_workspace_layout()
 	_init_eye_gaze_controller()
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
+	_init_world_features()
+	_init_multiuser()
 	if _autoconnect_on_start:
 		print("[Immersive-2][TEST] Autoconnect enabled -> %s:%d (capture=%s)" %
 			[host_ip, host_tcp_port, str(_debug_capture)])
@@ -151,6 +161,8 @@ func _process(delta: float) -> void:
 	_handle_keyframe_retries()
 	_handle_debug_capture(delta)
 	_update_decoders()
+	_broadcast_local_pose(delta)
+	_handle_locomotion()
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -385,6 +397,18 @@ func _init_ui_overlay() -> void:
 		ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
 	if ui_overlay.has_signal("auto_quality_requested"):
 		ui_overlay.auto_quality_requested.connect(_on_overlay_auto_quality_requested)
+	if ui_overlay.has_signal("environment_cycle_requested"):
+		ui_overlay.environment_cycle_requested.connect(_on_overlay_environment_cycle)
+	if ui_overlay.has_signal("portal_add_requested"):
+		ui_overlay.portal_add_requested.connect(_on_overlay_portal_add)
+	if ui_overlay.has_signal("keyboard_portal_requested"):
+		ui_overlay.keyboard_portal_requested.connect(_on_overlay_keyboard_portal)
+	if ui_overlay.has_signal("whiteboard_toggle_requested"):
+		ui_overlay.whiteboard_toggle_requested.connect(_on_overlay_whiteboard_toggle)
+	if ui_overlay.has_signal("room_join_requested"):
+		ui_overlay.room_join_requested.connect(_on_overlay_room_join)
+	if ui_overlay.has_signal("room_leave_requested"):
+		ui_overlay.room_leave_requested.connect(_on_overlay_room_leave)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -993,6 +1017,28 @@ func _on_overlay_workspace_save_requested() -> void:
 func _on_overlay_workspace_restore_requested() -> void:
 	restore_workspace_layout()
 
+func _on_overlay_environment_cycle() -> void:
+	cycle_environment()
+	if ui_overlay and ui_overlay.has_method("set_environment_name") and environment_manager:
+		ui_overlay.set_environment_name(environment_manager.get_current_name())
+
+func _on_overlay_portal_add(shape: int) -> void:
+	add_passthrough_portal(shape)
+
+func _on_overlay_keyboard_portal() -> void:
+	create_keyboard_portal()
+
+func _on_overlay_whiteboard_toggle() -> void:
+	toggle_whiteboard()
+
+func _on_overlay_room_join(url: String, room_id: String, display_name: String) -> void:
+	join_room(url, room_id, display_name)
+
+func _on_overlay_room_leave() -> void:
+	leave_room()
+	if ui_overlay and ui_overlay.has_method("set_room_state"):
+		ui_overlay.set_room_state(false)
+
 # ---------------------------------------------------------------------------
 # Input handling
 # ---------------------------------------------------------------------------
@@ -1010,6 +1056,32 @@ func send_keyboard_input(monitor_id: int, scancode: int, pressed: bool, modifier
 func toggle_ui_overlay() -> void:
 	if ui_overlay and ui_overlay.has_method("toggle_visibility"):
 		ui_overlay.toggle_visibility()
+
+## Show/hide the in-VR QWERTY keyboard (called from vr_input.gd, A/X button).
+func toggle_virtual_keyboard() -> void:
+	if not is_instance_valid(virtual_keyboard) or not virtual_keyboard.has_method("toggle_visibility"):
+		return
+	virtual_keyboard.toggle_visibility()
+	if virtual_keyboard.visible:
+		virtual_keyboard.active_monitor_id = _keyboard_target_monitor()
+
+func is_virtual_keyboard_visible() -> bool:
+	return is_instance_valid(virtual_keyboard) and virtual_keyboard.visible
+
+## Drive the in-VR keyboard with a world-space ray (controller or hand pointer).
+## Returns { valid, distance }; valid=true means the ray is over a key, so the
+## caller should not also act on a panel/overlay behind the keyboard.
+func keyboard_ray_update(ray_origin: Vector3, ray_direction: Vector3, is_pressing: bool) -> Dictionary:
+	if not is_virtual_keyboard_visible() or not virtual_keyboard.has_method("ray_update"):
+		return {"valid": false}
+	virtual_keyboard.active_monitor_id = _keyboard_target_monitor()
+	return virtual_keyboard.ray_update(ray_origin, ray_direction, is_pressing)
+
+## Monitor the keyboard types into: the first active stream, or 0 if none.
+func _keyboard_target_monitor() -> int:
+	if not active_monitor_ids.is_empty():
+		return int(active_monitor_ids[0])
+	return 0
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
@@ -1213,6 +1285,11 @@ func _apply_passthrough_settings() -> void:
 
 	viewport.transparent_bg = passthrough_enabled
 
+	# Swap the themed sky for a transparent background so the real world shows
+	# through the portals / full passthrough (otherwise the sky occludes it).
+	if environment_manager:
+		environment_manager.set_passthrough(passthrough_enabled)
+
 	if ui_overlay and ui_overlay.has_method("set_passthrough_settings"):
 		ui_overlay.set_passthrough_settings(passthrough_enabled, passthrough_supported)
 
@@ -1311,18 +1388,296 @@ var remote_users: Dictionary = {}
 ## Local user ID from the signaling server
 var _local_user_id: int = -1
 
+# ---------------------------------------------------------------------------
+# World features (mixed-reality portals, themed environments, locomotion,
+# whiteboard) and multi-user session. All created null-safe so main.gd still
+# instantiates headlessly (the test harness builds it without the full scene).
+# ---------------------------------------------------------------------------
+
+var portal_manager: PortalManager = null
+var environment_manager: EnvironmentManager = null
+var locomotion: Locomotion = null
+var whiteboard: Whiteboard = null
+
+var signaling_client: Node = null
+var webrtc_manager: WebRTCManager = null
+var multiuser: MultiuserManager = null
+
+const POSE_BROADCAST_INTERVAL := 0.05  ## 20 Hz pose updates to the room
+var _pose_broadcast_accum: float = 0.0
+
+func _init_world_features() -> void:
+	portal_manager = PortalManager.new()
+	portal_manager.name = "PortalManager"
+	add_child(portal_manager)
+
+	environment_manager = EnvironmentManager.new()
+	environment_manager.name = "EnvironmentManager"
+	add_child(environment_manager)
+	var world_env := get_node_or_null("Environment") as WorldEnvironment
+	if world_env:
+		environment_manager.set_world_environment(world_env)
+
+	locomotion = Locomotion.new()
+	locomotion.name = "Locomotion"
+	add_child(locomotion)
+	if is_instance_valid(xr_origin) and is_instance_valid(xr_camera):
+		locomotion.configure(xr_origin, xr_camera)
+
+	if ui_overlay and ui_overlay.has_method("set_environment_name"):
+		ui_overlay.set_environment_name(environment_manager.get_current_name())
+
+func _init_multiuser() -> void:
+	signaling_client = preload("res://scripts/signaling_client.gd").new()
+	signaling_client.name = "SignalingClient"
+	add_child(signaling_client)
+
+	webrtc_manager = WebRTCManager.new()
+	webrtc_manager.name = "WebRTCManager"
+	add_child(webrtc_manager)
+
+	multiuser = MultiuserManager.new()
+	multiuser.name = "MultiuserManager"
+	add_child(multiuser)
+	multiuser.setup(signaling_client, webrtc_manager)
+	multiuser.remote_pose.connect(apply_user_pose)
+	multiuser.remote_presence.connect(on_user_presence)
+	multiuser.user_left.connect(on_room_left)
+	multiuser.room_state.connect(_on_room_state)
+	multiuser.remote_whiteboard_stroke.connect(_on_remote_whiteboard_stroke)
+	multiuser.remote_whiteboard_clear.connect(_on_remote_whiteboard_clear)
+
+## Join a shared VR room via the signaling server (called from the overlay).
+func join_room(url: String, room_id: String, display_name: String) -> void:
+	if multiuser:
+		multiuser.join(url, room_id, display_name)
+
+## Leave the room and drop every remote avatar.
+func leave_room() -> void:
+	if multiuser:
+		multiuser.leave()
+	for uid in remote_users.keys():
+		if is_instance_valid(remote_users[uid]):
+			remote_users[uid].queue_free()
+	remote_users.clear()
+	_local_user_id = -1
+
+func _on_room_state(room_id: String, user_id: int, mode: String) -> void:
+	_local_user_id = user_id
+	print("[Immersive-2] Joined room '%s' as user %d (%s mode)" % [room_id, user_id, mode])
+	if ui_overlay and ui_overlay.has_method("set_room_state"):
+		ui_overlay.set_room_state(true, "In '%s' · %s" % [room_id, mode])
+
+## Send the local head + hands pose to the room, throttled to POSE_BROADCAST_INTERVAL.
+func _broadcast_local_pose(delta: float) -> void:
+	if multiuser == null or multiuser.get_local_user_id() < 0:
+		return
+	_pose_broadcast_accum += delta
+	if _pose_broadcast_accum < POSE_BROADCAST_INTERVAL:
+		return
+	_pose_broadcast_accum = 0.0
+	if not is_instance_valid(xr_camera):
+		return
+	var head := _node_pose_dict(xr_camera)
+	var lh := _node_pose_dict(left_controller) if is_instance_valid(left_controller) else {}
+	var rh := _node_pose_dict(right_controller) if is_instance_valid(right_controller) else {}
+	multiuser.broadcast_pose(head, lh, rh)
+
+## Serialise a node's world transform to the protocol pose dict (pos + quaternion).
+func _node_pose_dict(node: Node3D) -> Dictionary:
+	var t := node.global_transform
+	var q := t.basis.get_rotation_quaternion()
+	return {
+		"pos_x": t.origin.x, "pos_y": t.origin.y, "pos_z": t.origin.z,
+		"rot_w": q.w, "rot_x": q.x, "rot_y": q.y, "rot_z": q.z,
+	}
+
+# ---------------------------------------------------------------------------
+# World-feature actions (driven by the overlay / controller input)
+# ---------------------------------------------------------------------------
+
+## Cycle to the next themed environment.
+func cycle_environment() -> int:
+	if environment_manager:
+		return environment_manager.next_environment()
+	return 0
+
+## Add a passthrough portal ~1 m in front of the user. Returns the portal or null.
+func add_passthrough_portal(shape: int = Im2Portal.Shape.RECTANGLE) -> Im2Portal:
+	if portal_manager == null:
+		return null
+	return portal_manager.add_portal(shape, Vector2.ZERO, _front_of_camera(1.0))
+
+## Create the dedicated keyboard portal (anchored low, where the keyboard sits).
+func create_keyboard_portal() -> Im2Portal:
+	if portal_manager == null:
+		return null
+	return portal_manager.create_keyboard_portal(_front_of_camera(0.55, -0.45))
+
+## Show / hide the shared whiteboard (created on first use, in front of the user).
+func toggle_whiteboard() -> void:
+	var was_visible := is_instance_valid(whiteboard) and whiteboard.visible
+	_ensure_whiteboard()
+	whiteboard.visible = not was_visible
+
+## Create the whiteboard (hidden) on first use; returns it.
+func _ensure_whiteboard() -> Whiteboard:
+	if not is_instance_valid(whiteboard):
+		whiteboard = Whiteboard.new()
+		whiteboard.name = "Whiteboard"
+		add_child(whiteboard)
+		whiteboard.transform = _front_of_camera(1.6)
+	return whiteboard
+
+func is_whiteboard_active() -> bool:
+	return is_instance_valid(whiteboard) and whiteboard.visible
+
+# Local whiteboard drawing state.
+var _wb_drawing: bool = false
+
+## Draw on the whiteboard with a world-space ray while `is_drawing` (trigger /
+## pinch). Returns { valid } — valid=true means the ray is on the board (consumed,
+## so the caller should not also click a panel behind it). Finished strokes are
+## broadcast to the room.
+func draw_on_whiteboard(ray_origin: Vector3, ray_direction: Vector3, is_drawing: bool) -> Dictionary:
+	if not is_whiteboard_active():
+		return {"valid": false}
+	var hit: Dictionary = whiteboard.ray_to_uv(ray_origin, ray_direction)
+	if not hit.get("valid", false):
+		if _wb_drawing:
+			_wb_finish_stroke()
+		return {"valid": false}
+	var uid := _wb_local_id()
+	if is_drawing:
+		if not _wb_drawing:
+			whiteboard.begin_stroke(uid, hit["uv"])
+			_wb_drawing = true
+		else:
+			whiteboard.append_point(uid, hit["uv"])
+	elif _wb_drawing:
+		_wb_finish_stroke()
+	return {"valid": true, "distance": hit.get("distance", 0.0)}
+
+func _wb_local_id() -> int:
+	return _local_user_id if _local_user_id >= 0 else 0
+
+func _wb_finish_stroke() -> void:
+	if not is_instance_valid(whiteboard):
+		_wb_drawing = false
+		return
+	whiteboard.end_stroke(_wb_local_id())
+	_wb_drawing = false
+	if multiuser and multiuser.get_local_user_id() >= 0:
+		multiuser.broadcast_whiteboard_stroke(whiteboard.last_stroke_serialized())
+
+func _on_remote_whiteboard_stroke(_user_id: int, stroke: Dictionary) -> void:
+	_ensure_whiteboard().visible = true
+	whiteboard.apply_remote_stroke(Whiteboard.stroke_from_dict(stroke))
+
+func _on_remote_whiteboard_clear(_user_id: int) -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.clear_board()
+
+## Comfortable snap-turn (called from controller input).
+func snap_turn(degrees: float) -> void:
+	if locomotion:
+		locomotion.snap_turn(degrees)
+
+## Teleport to a world-space floor point (called from controller input).
+func teleport_to(point: Vector3) -> void:
+	if locomotion:
+		locomotion.teleport_to(point)
+
+# Locomotion input state (left controller thumbstick: X = snap-turn, forward =
+# aim teleport, release = go). All reads are guarded so this is inert in tests.
+var _turn_latched: bool = false
+var _teleport_aiming: bool = false
+var _teleport_marker: MeshInstance3D = null
+
+func _handle_locomotion() -> void:
+	if locomotion == null or not is_instance_valid(left_controller):
+		return
+	var stick: Vector2 = left_controller.get_vector2("primary")
+
+	# Snap-turn on a horizontal flick (latched so one flick = one turn).
+	if absf(stick.x) > 0.7:
+		if not _turn_latched:
+			snap_turn(Locomotion.SNAP_TURN_DEGREES * signf(stick.x))
+			_turn_latched = true
+	elif absf(stick.x) < 0.3:
+		_turn_latched = false
+
+	# Teleport: hold the stick forward to aim, release to commit.
+	if stick.y < -0.7:
+		_teleport_aiming = true
+		_update_teleport_marker()
+	elif _teleport_aiming and stick.y > -0.3:
+		_teleport_aiming = false
+		_commit_teleport()
+
+## World-space floor point the left controller is currently aiming at, or null dict.
+func _teleport_aim() -> Dictionary:
+	if not is_instance_valid(left_controller) or locomotion == null:
+		return {"valid": false}
+	var t := left_controller.global_transform
+	return locomotion.aim_floor(t.origin, -t.basis.z)
+
+func _update_teleport_marker() -> void:
+	var aim := _teleport_aim()
+	if not aim.get("valid", false):
+		_hide_teleport_marker()
+		return
+	if not is_instance_valid(_teleport_marker):
+		_teleport_marker = MeshInstance3D.new()
+		var disc := CylinderMesh.new()
+		disc.top_radius = 0.25
+		disc.bottom_radius = 0.25
+		disc.height = 0.02
+		_teleport_marker.mesh = disc
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(0.3, 0.85, 1.0, 0.7)
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_teleport_marker.material_override = mat
+		add_child(_teleport_marker)
+	_teleport_marker.visible = true
+	_teleport_marker.global_position = aim["point"]
+
+func _hide_teleport_marker() -> void:
+	if is_instance_valid(_teleport_marker):
+		_teleport_marker.visible = false
+
+func _commit_teleport() -> void:
+	var aim := _teleport_aim()
+	if aim.get("valid", false):
+		teleport_to(aim["point"])
+	_hide_teleport_marker()
+
+## A transform `dist` metres in front of the camera (facing the user), with an
+## optional vertical offset. Falls back to a fixed pose when no camera (headless).
+func _front_of_camera(dist: float, y_offset: float = 0.0) -> Transform3D:
+	if not is_instance_valid(xr_camera):
+		return Transform3D(Basis(), Vector3(0.0, 1.5 + y_offset, -dist))
+	var cam := xr_camera.global_transform
+	var fwd := -cam.basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3(0.0, 0.0, -1.0)
+	var pos := cam.origin + fwd * dist + Vector3(0.0, y_offset, 0.0)
+	# Face the user: the panel's front (-Z) should point back toward the camera.
+	var basis := Basis.looking_at(-fwd, Vector3.UP)
+	return Transform3D(basis, pos)
+
 ## Called when we successfully join a room.
 func on_room_joined(room_id: String, user_id: int, participants: Array) -> void:
 	_local_user_id = user_id
 	for p in participants:
 		var pid: int = p.get("user_id", 0)
 		if pid != _local_user_id:
-			on_user_presence(pid, p.get("display_name", ""), false, true)
+			on_user_presence(pid, p.get("display_name", ""), true)
 
-## Called when a user presence update arrives.
-func on_user_presence(user_id: int, display_name: String, is_local: bool, is_online: bool) -> void:
-	if is_local:
-		return
+## Called when a user presence update arrives. The signaling server only relays
+## presence for *other* users (it excludes the sender), so every update is remote.
+func on_user_presence(user_id: int, display_name: String, is_online: bool) -> void:
 	if is_online:
 		if not remote_users.has(user_id):
 			var user = preload("res://scripts/remote_user.gd").new()

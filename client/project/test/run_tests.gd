@@ -13,6 +13,13 @@ const EXTERNAL_SUITES := [
 	"res://test/test_remote_users.gd",
 	"res://test/test_privacy.gd",
 	"res://test/test_hw_decode.gd",
+	"res://test/test_portals.gd",
+	"res://test/test_environments.gd",
+	"res://test/test_locomotion.gd",
+	"res://test/test_whiteboard.gd",
+	"res://test/test_multiuser.gd",
+	"res://test/test_keyboard_avatars.gd",
+	"res://test/test_main_integration.gd",
 ]
 
 # Aggregate result counters across all suites.

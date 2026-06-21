@@ -126,6 +126,23 @@ func _process_right_hand_pointer() -> void:
 		_on_overlay = false
 		_pinch_active = false
 
+	# In-VR keyboard takes priority over the monitor panels behind it.
+	if main_scene and main_scene.has_method("is_virtual_keyboard_visible") \
+			and main_scene.is_virtual_keyboard_visible():
+		var kb_hit: Dictionary = main_scene.keyboard_ray_update(origin, direction, should_press)
+		if kb_hit.get("valid", false):
+			_pinch_active = should_press
+			_update_pointer_visual(origin, direction, kb_hit.get("distance", MAX_RAY_LENGTH), true)
+			return
+
+	# Whiteboard drawing with the pinch, also above the panels.
+	if main_scene and main_scene.has_method("is_whiteboard_active") and main_scene.is_whiteboard_active():
+		var wb_hit: Dictionary = main_scene.draw_on_whiteboard(origin, direction, should_press)
+		if wb_hit.get("valid", false):
+			_pinch_active = should_press
+			_update_pointer_visual(origin, direction, wb_hit.get("distance", MAX_RAY_LENGTH), true)
+			return
+
 	# 2) Streamed monitor panels.
 	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
 		_hide_pointer_visual()
