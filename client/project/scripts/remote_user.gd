@@ -93,29 +93,31 @@ func _apply_pose(node: Node3D, pose: Dictionary) -> void:
 	node.transform.basis = Basis(rot)
 
 ## Apply screen layout from REMOTE_SCREEN_LAYOUT message.
+## Panels are parented to the head node so their local-transform offsets
+## (which are head-relative from the sender) follow the avatar as it moves.
 func apply_screen_layout(entries: Array) -> void:
 	# Remove panels for monitors no longer in layout
 	var new_ids: Array = []
 	for entry in entries:
 		new_ids.append(entry.get("monitor_id", -1))
-	
+
 	for existing_id in _screen_panels.keys():
 		if not new_ids.has(existing_id):
 			_screen_panels[existing_id].queue_free()
 			_screen_panels.erase(existing_id)
-	
-	# Add or update panels
+
+	# Add or update panels (parented to head so they move with the avatar).
 	for entry in entries:
 		var mid: int = entry.get("monitor_id", -1)
 		if mid < 0:
 			continue
-		
+
 		if not _screen_panels.has(mid):
 			var panel = preload("res://scripts/remote_screen_panel.gd").new()
 			panel.name = "ScreenPanel_%d" % mid
-			add_child(panel)
+			_head.add_child(panel)
 			_screen_panels[mid] = panel
-		
+
 		_screen_panels[mid].apply_layout_metadata(entry)
 
 ## Get all screen panels.

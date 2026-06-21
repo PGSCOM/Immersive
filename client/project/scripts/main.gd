@@ -1676,19 +1676,25 @@ func _push_screen_layout() -> void:
 	multiuser.broadcast_screen_layout(_build_shared_layout())
 
 ## Build the layout entries for the currently shared monitors from their live
-## panels. Coordinates are world-space (the room shares one origin), so a remote
-## client places each panel exactly where the sharer positioned it.
+## panels.  Coordinates are expressed **relative to the local head** so that
+## remote clients can anchor each panel to the sharer's avatar head node —
+## independent of each user's play-space guardian origin.  When xr_camera is
+## absent (headless / no XR session) we fall back to world-space so the
+## function remains callable from tests.
 func _build_shared_layout() -> Array:
 	var entries: Array = []
+	var head_inv := Transform3D.IDENTITY
+	if is_instance_valid(xr_camera):
+		head_inv = xr_camera.global_transform.affine_inverse()
 	for mid in get_shared_monitor_ids():
 		var panel := _find_panel_for_monitor(mid)
 		if panel == null:
 			continue
-		var t := panel.global_transform
-		var q := t.basis.get_rotation_quaternion()
+		var rel := head_inv * panel.global_transform
+		var q := rel.basis.get_rotation_quaternion()
 		entries.append({
 			"monitor_id": mid,
-			"pos_x": t.origin.x, "pos_y": t.origin.y, "pos_z": t.origin.z,
+			"pos_x": rel.origin.x, "pos_y": rel.origin.y, "pos_z": rel.origin.z,
 			"rot_w": q.w, "rot_x": q.x, "rot_y": q.y, "rot_z": q.z,
 			"width": panel.panel_width, "height": panel.panel_height,
 			"resolution_w": panel.screen_width, "resolution_h": panel.screen_height,

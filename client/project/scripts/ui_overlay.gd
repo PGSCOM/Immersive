@@ -1566,6 +1566,10 @@ func _on_workspace_restore_pressed() -> void:
 
 func _save_config() -> void:
 	var cfg := ConfigFile.new()
+	# Load existing data first so sections owned by main.gd ([stream], [test],
+	# display/environment_index) survive an overlay save.  Missing file is fine
+	# — load() returns ERR_FILE_NOT_FOUND and the object stays empty.
+	cfg.load(CONFIG_PATH)
 	cfg.set_value("network", "host_ip",           _host_ip)
 	cfg.set_value("network", "tcp_port",           _tcp_port)
 	cfg.set_value("network", "udp_port",           _udp_port)

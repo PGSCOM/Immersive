@@ -25,7 +25,7 @@ detail, or hardware/OS capability that cannot exist in this open-source client).
 | Telepresence (multiple people in one room) | ✅ | `multiuser_manager.gd` + signaling server, wired into `main.gd` |
 | Private rooms (by room id) | ✅ | overlay "Room" field → `join_room()` |
 | Avatars (see each other) | ✅ | `remote_user.gd` (head + hands meshes + nameplate) |
-| Multi-screen sharing in a room | ✅ | opt-in `privacy_manager.gd` → `main.gd` pushes `screen_share_state` + `monitor_layout_update` → server fans out → `multiuser_manager.gd` re-emits → `remote_user.gd` / `remote_screen_panel.gd` place the panels; share toggles live in the overlay's Monitors tab |
+| Multi-screen sharing in a room | ✅ | opt-in `privacy_manager.gd` → `main.gd` pushes `screen_share_state` + `monitor_layout_update` → server fans out → `multiuser_manager.gd` re-emits → `remote_user.gd` / `remote_screen_panel.gd` place the panels around the sharer's avatar head (head-relative coordinates); share toggles live in the overlay's Monitors tab |
 | Shared whiteboards + high-res save | ✅ | `whiteboard.gd` (collaborative strokes, snapshot PNG) |
 | Audio chat between users (headset mic → others) | ✅ | `voice_chat.gd` mic capture → `multiuser_manager.broadcast_voice` (P2P voice channel / SFU relay) → spatial `voice_playback.gd` on each avatar |
 | Public co-working / VIP spaces | ✅ | public lobby: `public` flag on join, `lobby_list`/`lobby_update` wire protocol, overlay "Public Lobby" section with one-click join (`ui_overlay.gd`, `signaling/server.py`) |
@@ -96,7 +96,7 @@ suite:
 
 ```
 godot --headless --xr-mode off --path client/project -s res://test/run_tests.gd
-#   → Total Passed: 399 / Total Failed: 0
+#   → Total Passed: 405 / Total Failed: 0
 python -m unittest discover -s signaling
 #   → Ran 15 tests … OK
 ```
