@@ -16,6 +16,8 @@ signal peer_connected(user_id: int)
 signal peer_disconnected(user_id: int)
 ## A pose (or other JSON) payload arrived over a peer's data channel.
 signal pose_received(user_id: int, payload: String)
+## A binary voice frame arrived over a peer's voice data channel.
+signal voice_received(user_id: int, frame: PackedByteArray)
 
 # --- State ---
 
@@ -23,6 +25,8 @@ signal pose_received(user_id: int, payload: String)
 var _peers: Dictionary = {}
 ## user_id -> WebRTCDataChannel ("pose", negotiated id 1)
 var _channels: Dictionary = {}
+## user_id -> WebRTCDataChannel ("voice", negotiated id 2, unreliable/unordered)
+var _voice_channels: Dictionary = {}
 
 ## Injected signaling client (duck-typed: send_webrtc_offer/answer/ice_candidate).
 var _signaling: Node = null
@@ -54,6 +58,15 @@ func create_peer(user_id: int) -> WebRTCPeerConnection:
 	if channel:
 		channel.message_received.connect(_on_data_channel_message.bind(user_id))
 		_channels[user_id] = channel
+
+	# Voice rides a separate negotiated channel (id 2). Audio favours freshness
+	# over completeness, so it is unordered with a short packet lifetime — a late
+	# voice frame is worse than a dropped one.
+	var voice := peer.create_data_channel("voice",
+		{"id": 2, "negotiated": true, "ordered": false, "maxPacketLifeTime": 100})
+	if voice:
+		voice.message_received.connect(_on_voice_channel_message.bind(user_id))
+		_voice_channels[user_id] = voice
 
 	return peer
 
@@ -97,6 +110,17 @@ func broadcast_pose(payload: String) -> int:
 			sent += 1
 	return sent
 
+## Send a binary voice frame over every OPEN voice channel. Returns the number of
+## peers it reached (0 = no live P2P voice link, caller should use the SFU relay).
+func broadcast_voice(frame: PackedByteArray) -> int:
+	var sent := 0
+	for user_id in _voice_channels:
+		var channel: WebRTCDataChannel = _voice_channels[user_id]
+		if channel and channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
+			channel.put_packet(frame)
+			sent += 1
+	return sent
+
 ## Number of peers whose data channel is currently open.
 func open_channel_count() -> int:
 	var n := 0
@@ -116,6 +140,8 @@ func poll() -> void:
 func close_peer(user_id: int) -> void:
 	if _channels.has(user_id):
 		_channels.erase(user_id)
+	if _voice_channels.has(user_id):
+		_voice_channels.erase(user_id)
 	if _peers.has(user_id):
 		_peers[user_id].close()
 		_peers.erase(user_id)
@@ -153,3 +179,6 @@ func _on_ice_candidate_created(media: String, index: int, name: String, user_id:
 
 func _on_data_channel_message(message: PackedByteArray, user_id: int) -> void:
 	pose_received.emit(user_id, message.get_string_from_utf8())
+
+func _on_voice_channel_message(message: PackedByteArray, user_id: int) -> void:
+	voice_received.emit(user_id, message)

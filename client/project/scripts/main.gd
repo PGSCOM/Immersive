@@ -161,6 +161,7 @@ func _process(delta: float) -> void:
 	_handle_keyframe_retries()
 	_handle_debug_capture(delta)
 	_update_decoders()
+	_pump_multiuser()
 	_broadcast_local_pose(delta)
 	_handle_locomotion()
 
@@ -409,6 +410,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.room_join_requested.connect(_on_overlay_room_join)
 	if ui_overlay.has_signal("room_leave_requested"):
 		ui_overlay.room_leave_requested.connect(_on_overlay_room_leave)
+	if ui_overlay.has_signal("mic_mute_toggled"):
+		ui_overlay.mic_mute_toggled.connect(toggle_mic_mute)
 
 	if ui_overlay.has_method("set_screen_curvature"):
 		ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
@@ -1093,6 +1096,8 @@ func _input(event: InputEvent) -> void:
 				disconnect_from_host()
 			KEY_O:
 				toggle_ui_overlay()
+			KEY_M:
+				toggle_mic_mute()
 			KEY_ESCAPE:
 				get_tree().quit()
 
@@ -1402,6 +1407,7 @@ var whiteboard: Whiteboard = null
 var signaling_client: Node = null
 var webrtc_manager: WebRTCManager = null
 var multiuser: MultiuserManager = null
+var voice_chat: VoiceChat = null
 
 const POSE_BROADCAST_INTERVAL := 0.05  ## 20 Hz pose updates to the room
 var _pose_broadcast_accum: float = 0.0
@@ -1446,16 +1452,30 @@ func _init_multiuser() -> void:
 	multiuser.room_state.connect(_on_room_state)
 	multiuser.remote_whiteboard_stroke.connect(_on_remote_whiteboard_stroke)
 	multiuser.remote_whiteboard_clear.connect(_on_remote_whiteboard_clear)
+	multiuser.remote_voice.connect(_on_remote_voice)
+
+	# Voice chat: capture the headset mic and play remote users back spatially.
+	voice_chat = VoiceChat.new()
+	voice_chat.name = "VoiceChat"
+	add_child(voice_chat)
+	voice_chat.voice_frame_ready.connect(_on_local_voice_frame)
+	voice_chat.mute_changed.connect(_on_voice_mute_changed)
 
 ## Join a shared VR room via the signaling server (called from the overlay).
 func join_room(url: String, room_id: String, display_name: String) -> void:
 	if multiuser:
 		multiuser.join(url, room_id, display_name)
+	# Start recording the mic so the room can hear us (mute toggle still applies).
+	if voice_chat:
+		voice_chat.start_capture()
 
 ## Leave the room and drop every remote avatar.
 func leave_room() -> void:
 	if multiuser:
 		multiuser.leave()
+	if voice_chat:
+		voice_chat.stop_capture()
+		voice_chat.clear_playbacks()
 	for uid in remote_users.keys():
 		if is_instance_valid(remote_users[uid]):
 			remote_users[uid].queue_free()
@@ -1467,6 +1487,12 @@ func _on_room_state(room_id: String, user_id: int, mode: String) -> void:
 	print("[Immersive-2] Joined room '%s' as user %d (%s mode)" % [room_id, user_id, mode])
 	if ui_overlay and ui_overlay.has_method("set_room_state"):
 		ui_overlay.set_room_state(true, "In '%s' · %s" % [room_id, mode])
+
+## Drive the WebRTC peer/ICE state machines each frame so the P2P mesh (pose +
+## voice data channels) actually progresses to OPEN. Inert until a peer exists.
+func _pump_multiuser() -> void:
+	if webrtc_manager and webrtc_manager.has_method("poll"):
+		webrtc_manager.poll()
 
 ## Send the local head + hands pose to the room, throttled to POSE_BROADCAST_INTERVAL.
 func _broadcast_local_pose(delta: float) -> void:
@@ -1491,6 +1517,32 @@ func _node_pose_dict(node: Node3D) -> Dictionary:
 		"pos_x": t.origin.x, "pos_y": t.origin.y, "pos_z": t.origin.z,
 		"rot_w": q.w, "rot_x": q.x, "rot_y": q.y, "rot_z": q.z,
 	}
+
+# ---------------------------------------------------------------------------
+# Voice chat
+# ---------------------------------------------------------------------------
+
+## A locally captured voice frame — route it to the room (P2P or SFU).
+func _on_local_voice_frame(frame: PackedByteArray) -> void:
+	if multiuser:
+		multiuser.broadcast_voice(frame)
+
+## A voice frame from a remote user — play it back on their avatar.
+func _on_remote_voice(user_id: int, frame: PackedByteArray) -> void:
+	if voice_chat:
+		voice_chat.on_remote_voice(user_id, frame)
+
+## Mute / unmute the local microphone (overlay button or M key).
+func toggle_mic_mute() -> void:
+	if voice_chat:
+		voice_chat.toggle_mute()
+
+func is_mic_muted() -> bool:
+	return voice_chat == null or voice_chat.is_muted()
+
+func _on_voice_mute_changed(muted: bool) -> void:
+	if ui_overlay and ui_overlay.has_method("set_mic_muted"):
+		ui_overlay.set_mic_muted(muted)
 
 # ---------------------------------------------------------------------------
 # World-feature actions (driven by the overlay / controller input)
@@ -1686,16 +1738,23 @@ func on_user_presence(user_id: int, display_name: String, is_online: bool) -> vo
 			user.display_name = display_name
 			add_child(user)
 			remote_users[user_id] = user
+			# Anchor this user's voice to their avatar head for spatial audio.
+			if voice_chat and user.has_method("get_head_node"):
+				voice_chat.attach_playback(user_id, user.get_head_node())
 	else:
 		if remote_users.has(user_id):
 			remote_users[user_id].queue_free()
 			remote_users.erase(user_id)
+		if voice_chat:
+			voice_chat.remove_playback(user_id)
 
 ## Called when a user leaves the room.
 func on_room_left(user_id: int) -> void:
 	if remote_users.has(user_id):
 		remote_users[user_id].queue_free()
 		remote_users.erase(user_id)
+	if voice_chat:
+		voice_chat.remove_playback(user_id)
 
 ## Apply pose update to a remote user.
 func apply_user_pose(user_id: int, head: Dictionary, left_hand: Dictionary, right_hand: Dictionary) -> void:

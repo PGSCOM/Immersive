@@ -83,10 +83,11 @@ Each connecting VR client sends JSON messages over a persistent WebSocket. The s
 3. **Relays `user_pose`** (head + hand transforms, ~20 Hz) to all other room members.
 4. **Relays WebRTC signals** (`webrtc_offer` / `webrtc_answer` / `ice_candidate`) point-to-point so clients can negotiate a direct data channel for low-latency pose delivery (P2P mode).
 5. **Relays whiteboard strokes / clears** to keep the shared canvas in sync.
-6. **Relays `screen_share_state`** so clients know which monitors a remote user is exposing.
-7. **Manages topology** — when the room crosses the P2P threshold it broadcasts `topology_changed {mode: "sfu"}` so all clients switch to routing pose data through the server relay instead of a direct channel. When the room drops back below the threshold, it sends `topology_changed {mode: "p2p"}` and clients re-establish direct connections.
+6. **Relays `voice_frame`** audio between participants in SFU mode (3+ users); 1-2 user rooms carry voice over the direct P2P data channel and never touch the server. The audio payload is forwarded verbatim and never logged.
+7. **Relays `screen_share_state`** so clients know which monitors a remote user is exposing.
+8. **Manages topology** — when the room crosses the P2P threshold it broadcasts `topology_changed {mode: "sfu"}` so all clients switch to routing pose data through the server relay instead of a direct channel. When the room drops back below the threshold, it sends `topology_changed {mode: "p2p"}` and clients re-establish direct connections.
 
-No video or audio is ever routed through the signaling server. Only lightweight JSON control messages pass through it.
+No *video* is ever routed through the signaling server, and in P2P mode (1-2 users) neither is voice — it flows directly between peers over WebRTC. Only in SFU mode (3+ users) does the server relay the lightweight pose and (opaque, never-logged) voice payloads alongside the JSON control messages.
 
 ### Message types
 
@@ -100,6 +101,7 @@ No video or audio is ever routed through the signaling server. Only lightweight 
 | client → server | `screen_share_state` | Which monitors are being shared |
 | client → server | `whiteboard_stroke` | A finished brush stroke (relayed to all others) |
 | client → server | `whiteboard_clear` | Clear the shared whiteboard |
+| client → server | `voice_frame` | Encoded mic audio, relayed to others (SFU mode only; payload never logged) |
 | client → server | `webrtc_offer` / `webrtc_answer` / `ice_candidate` | P2P WebRTC negotiation (relayed to `target_user_id`) |
 | server → all | `topology_changed` | Mode switched between `p2p` and `sfu` |
 | server → client | `error` | `ROOM_FULL` or `INVALID_JSON` |
@@ -323,6 +325,7 @@ Then open:
 | `O` | Toggle UI overlay |
 | `C` | Connect |
 | `D` | Disconnect |
+| `M` | Mute / unmute microphone (room voice chat) |
 | `Esc` | Quit |
 
 ### VR controls
@@ -342,7 +345,10 @@ Then open:
 
 The overlay's **Spaces & collaboration** section adds passthrough portals
 (rectangle/square/circle + a keyboard portal), a themed-environment cycler, the
-shared whiteboard, and the multi-user **Room** join/leave controls.
+shared whiteboard, the multi-user **Room** join/leave controls, and a **Voice**
+mic mute toggle. Once in a room your microphone is streamed to the other
+participants (P2P voice data channel for ≤2 users, SFU relay for 3+) and played
+back spatially from each remote avatar's head.
 
 ## Running Tests
 
@@ -350,13 +356,13 @@ shared whiteboard, and the multi-user **Room** join/leave controls.
 ```bash
 godot --headless --xr-mode off \
   --path client/project -s res://test/run_tests.gd
-# Expected: Total Passed: 353 / Total Failed: 0
+# Expected: Total Passed: 384 / Total Failed: 0
 ```
 
 **Python signaling tests:**
 ```bash
 python -m unittest discover -v signaling/
-# Expected: Ran 8 tests … OK
+# Expected: Ran 10 tests … OK
 ```
 
 CI runs both suites on every push before building the export artifacts.
@@ -382,6 +388,7 @@ CI runs both suites on every push before building the export artifacts.
 - H.264/HEVC/AV1 hardware decode on Android (MediaCodec zero-copy via ExternalTexture)
 - Software MJPEG decode on PC/iOS/web (WorkerThreadPool, no native plugin)
 - Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
+- Multi-user voice chat (headset mic → others, spatial per-avatar playback, P2P voice data channel / SFU relay, mute toggle)
 - Multi-client support (up to 4 simultaneous headsets, `--max-clients N`)
 - IDD virtual display driver integration
 - Passthrough/mixed-reality background mode

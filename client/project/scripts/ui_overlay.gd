@@ -29,6 +29,7 @@ signal keyboard_portal_requested
 signal whiteboard_toggle_requested
 signal room_join_requested(url: String, room_id: String, display_name: String)
 signal room_leave_requested
+signal mic_mute_toggled
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -126,6 +127,8 @@ var _input_room_name       : LineEdit
 var _btn_room_join         : Button
 var _lbl_room_status       : Label
 var _in_room               : bool = false
+var _btn_mic               : Button
+var _mic_muted             : bool = false
 
 ## Debounce timer: any quality-selector edit auto-applies a short moment later,
 ## so settings always take effect without needing the Apply button. The delay
@@ -919,6 +922,18 @@ func _build_spaces_section(vbox: VBoxContainer) -> void:
 	_lbl_room_status.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
 	join_row.add_child(_lbl_room_status)
 
+	# Microphone mute toggle for room voice chat.
+	var voice_row := HBoxContainer.new()
+	voice_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(voice_row)
+	_quality_label(voice_row, "Voice", 56)
+	_btn_mic = Button.new()
+	_btn_mic.text = "🎤 Mic on"
+	_btn_mic.tooltip_text = "Mute / unmute your microphone for the room (M)"
+	_btn_mic.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_mic.pressed.connect(func(): mic_mute_toggled.emit())
+	voice_row.add_child(_btn_mic)
+
 func _portal_button(parent: HBoxContainer, label: String, tip: String, shape: int) -> void:
 	var b := Button.new()
 	b.text = label
@@ -947,6 +962,14 @@ func set_room_state(in_room: bool, info: String = "") -> void:
 func set_environment_name(env_name: String) -> void:
 	if _lbl_env_name:
 		_lbl_env_name.text = env_name
+
+## Reflect the local microphone mute state from main.gd.
+func set_mic_muted(muted: bool) -> void:
+	_mic_muted = muted
+	if _btn_mic:
+		_btn_mic.text = "🔇 Mic muted" if muted else "🎤 Mic on"
+		_btn_mic.add_theme_color_override("font_color",
+			Color(0.95, 0.45, 0.45) if muted else Color(0.55, 0.92, 0.6))
 
 # ---------------------------------------------------------------------------
 # Section separator helper

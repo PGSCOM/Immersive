@@ -27,7 +27,7 @@ detail, or hardware/OS capability that cannot exist in this open-source client).
 | Avatars (see each other) | ✅ | `remote_user.gd` (head + hands meshes + nameplate) |
 | Multi-screen sharing in a room | ✅ | `REMOTE_SCREEN_LAYOUT` + `remote_screen_panel.gd`, opt-in via `privacy_manager.gd` |
 | Shared whiteboards + high-res save | ✅ | `whiteboard.gd` (collaborative strokes, snapshot PNG) |
-| Audio chat between users (headset mic → others) | ❌ | no mic capture; only host-PC audio → headset is implemented |
+| Audio chat between users (headset mic → others) | ✅ | `voice_chat.gd` mic capture → `multiuser_manager.broadcast_voice` (P2P voice channel / SFU relay) → spatial `voice_playback.gd` on each avatar |
 | Public co-working / VIP spaces | 🟡 | room model supports it; no curated public lobby list |
 | P2P mesh (≤2) / SFU relay (3+) with migration | ✅ | server topology + `webrtc_manager.gd`; tested both directions |
 
@@ -58,7 +58,7 @@ detail, or hardware/OS capability that cannot exist in this open-source client).
 | Immersed feature | Status | Where |
 |---|---|---|
 | PC audio → headset | ✅ | WASAPI loopback → UDP → `audio_receiver.gd` |
-| Headset mic mute toggle | ❌ | no mic capture path |
+| Headset mic mute toggle | ✅ | `VoiceChat.toggle_mute()` — overlay "Voice" button + `M` key, gates capture instantly |
 | Immersed virtual webcam | ❌ | OS virtual-camera driver, out of scope |
 
 ## Multi-device & phone mirroring
@@ -96,13 +96,14 @@ suite:
 
 ```
 godot --headless --xr-mode off --path client/project -s res://test/run_tests.gd
-#   → Total Passed: 353 / Total Failed: 0
+#   → Total Passed: 384 / Total Failed: 0
 python -m unittest discover -s signaling
-#   → Ran 8 tests … OK
+#   → Ran 10 tests … OK
 ```
 
 The runtime-only glue that cannot be asserted headlessly (live WebRTC ICE
-handshake, controller/hand input events, on-device passthrough compositing) is
-kept thin and delegates to pure helpers that *are* unit-tested
-(`MultiuserManager` routing, `WebRTCManager.parse_ice_candidate`, the portal /
-whiteboard / locomotion geometry, keyboard edge-detection).
+handshake, controller/hand input events, on-device passthrough compositing, live
+microphone capture) is kept thin and delegates to pure helpers that *are*
+unit-tested (`MultiuserManager` pose/voice routing, `WebRTCManager.parse_ice_candidate`,
+the portal / whiteboard / locomotion geometry, keyboard edge-detection, the
+`VoiceChat` PCM frame codec + mute gate + per-user playback buffering).

@@ -19,6 +19,7 @@ signal webrtc_answer_received(from_user_id: int, sdp: String)
 signal ice_candidate_received(from_user_id: int, candidate: String)
 signal whiteboard_stroke_received(from_user_id: int, stroke: Dictionary)
 signal whiteboard_clear_received(from_user_id: int)
+signal voice_frame_received(from_user_id: int, frame: PackedByteArray)
 
 # --- State ---
 
@@ -136,6 +137,10 @@ func _handle_message(data: Dictionary) -> void:
 			whiteboard_stroke_received.emit(data.get("from_user_id", 0), data.get("stroke", {}))
 		"whiteboard_clear":
 			whiteboard_clear_received.emit(data.get("from_user_id", 0))
+		"voice_frame":
+			var b64: String = data.get("audio", "")
+			if not b64.is_empty():
+				voice_frame_received.emit(data.get("from_user_id", 0), Marshalls.base64_to_raw(b64))
 
 # --- Outbound messages ---
 
@@ -165,6 +170,13 @@ func send_whiteboard_stroke(stroke: Dictionary) -> void:
 
 func send_whiteboard_clear() -> void:
 	_send_json({"type": "whiteboard_clear", "payload": {}})
+
+## Relay an encoded voice frame to the room (SFU path; base64 over JSON). The
+## server never logs or stores the payload — it only fans it out to the room.
+func send_voice_frame(frame: PackedByteArray) -> void:
+	if frame.is_empty():
+		return
+	_send_json({"type": "voice_frame", "payload": {"audio": Marshalls.raw_to_base64(frame)}})
 
 func _send_json(data: Dictionary) -> void:
 	if _connected:

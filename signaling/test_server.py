@@ -248,6 +248,48 @@ class SignalingTestCase(unittest.IsolatedAsyncioTestCase):
         await ws1.close()
         await ws2.close()
 
+    async def test_voice_relay(self) -> None:
+        """A user sends a voice frame; verify it is relayed to others in the room."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+        await self._send(ws1, "room_join", {"room_id": "voice", "display_name": "A"})
+        await self._recv(ws1)
+        await self._send(ws2, "room_join", {"room_id": "voice", "display_name": "B"})
+        await self._recv(ws2)
+        await self._recv(ws1)  # presence for B
+
+        await self._send(ws1, "voice_frame", {"audio": "QUJDRA=="})  # opaque base64
+        msg = await self._recv_until(ws2, "voice_frame")
+        self.assertEqual(msg["from_user_id"], 1)
+        self.assertEqual(msg["audio"], "QUJDRA==")
+
+        # The sender must not receive its own voice back.
+        await self._send(ws2, "voice_frame", {"audio": "WFlaWg=="})
+        echo = await self._recv_until(ws1, "voice_frame")
+        self.assertEqual(echo["from_user_id"], 2)
+
+        await ws1.close()
+        await ws2.close()
+
+    async def test_voice_frame_without_audio_is_ignored(self) -> None:
+        """A voice_frame with no audio payload must not be relayed."""
+        ws1 = await self._connect()
+        ws2 = await self._connect()
+        await self._send(ws1, "room_join", {"room_id": "voice-empty", "display_name": "A"})
+        await self._recv(ws1)
+        await self._send(ws2, "room_join", {"room_id": "voice-empty", "display_name": "B"})
+        await self._recv(ws2)
+        await self._recv(ws1)  # presence for B
+
+        await self._send(ws1, "voice_frame", {})  # no audio key → dropped
+        # Followed by a real pose, which should be the next thing ws2 sees.
+        await self._send(ws1, "user_pose", {"head": {}, "left_hand": {}, "right_hand": {}})
+        msg = await self._recv(ws2)
+        self.assertEqual(msg["type"], "user_pose")
+
+        await ws1.close()
+        await ws2.close()
+
     async def test_webrtc_signal_relay(self) -> None:
         """Peer sends WebRTC offer; verify relay to target."""
         ws1 = await self._connect()

@@ -19,6 +19,7 @@ const EXTERNAL_SUITES := [
 	"res://test/test_whiteboard.gd",
 	"res://test/test_multiuser.gd",
 	"res://test/test_keyboard_avatars.gd",
+	"res://test/test_voice_chat.gd",
 	"res://test/test_main_integration.gd",
 ]
 

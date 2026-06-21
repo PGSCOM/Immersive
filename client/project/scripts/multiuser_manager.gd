@@ -23,6 +23,7 @@ signal user_left(user_id: int)
 signal mode_changed(mode: String)
 signal remote_whiteboard_stroke(user_id: int, stroke: Dictionary)
 signal remote_whiteboard_clear(user_id: int)
+signal remote_voice(user_id: int, frame: PackedByteArray)
 
 ## Mirrors signaling/server.py P2P_MAX_USERS (the locked topology threshold).
 const P2P_MAX_USERS := 2
@@ -56,11 +57,13 @@ func setup(signaling: Node, webrtc: Node = null) -> void:
 		_connect_if(signaling, "ice_candidate_received", _on_ice_candidate)
 		_connect_if(signaling, "whiteboard_stroke_received", _on_whiteboard_stroke)
 		_connect_if(signaling, "whiteboard_clear_received", _on_whiteboard_clear)
+		_connect_if(signaling, "voice_frame_received", _on_relay_voice)
 
 	if webrtc:
 		if webrtc.has_method("initialize"):
 			webrtc.initialize(signaling, _local_user_id)
 		_connect_if(webrtc, "pose_received", _on_p2p_pose)
+		_connect_if(webrtc, "voice_received", _on_p2p_voice)
 
 func _connect_if(obj: Object, sig: String, callable: Callable) -> void:
 	if obj.has_signal(sig) and not obj.is_connected(sig, callable):
@@ -100,6 +103,21 @@ func broadcast_pose(head: Dictionary, left_hand: Dictionary, right_hand: Diction
 			return "p2p"
 	if _signaling and _signaling.has_method("send_user_pose"):
 		_signaling.send_user_pose(head, left_hand, right_hand)
+		return "sfu"
+	return "none"
+
+## Send an encoded voice frame to the room. Mirrors broadcast_pose: it rides the
+## low-latency P2P voice channel in a 1-2 user mesh when one is open, otherwise
+## (or in SFU mode) it goes through the signaling relay. Returns "p2p", "sfu" or
+## "none".
+func broadcast_voice(frame: PackedByteArray) -> String:
+	if frame.is_empty():
+		return "none"
+	if _mode == "p2p" and _webrtc and _webrtc.has_method("broadcast_voice"):
+		if int(_webrtc.broadcast_voice(frame)) > 0:
+			return "p2p"
+	if _signaling and _signaling.has_method("send_voice_frame"):
+		_signaling.send_voice_frame(frame)
 		return "sfu"
 	return "none"
 
@@ -184,6 +202,12 @@ func _on_webrtc_answer(from_user_id: int, sdp: String) -> void:
 func _on_ice_candidate(from_user_id: int, candidate: String) -> void:
 	if _webrtc and _webrtc.has_method("handle_ice_candidate"):
 		_webrtc.handle_ice_candidate(from_user_id, candidate)
+
+func _on_relay_voice(user_id: int, frame: PackedByteArray) -> void:
+	remote_voice.emit(user_id, frame)
+
+func _on_p2p_voice(user_id: int, frame: PackedByteArray) -> void:
+	remote_voice.emit(user_id, frame)
 
 func _on_whiteboard_stroke(from_user_id: int, stroke: Dictionary) -> void:
 	remote_whiteboard_stroke.emit(from_user_id, stroke)

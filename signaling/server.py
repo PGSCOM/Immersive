@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Immersive-2 WebSocket Signaling Server.
 
-Manages rooms, user presence, pose relay, whiteboard sync, and WebRTC
-signaling.  Network topology switches automatically:
+Manages rooms, user presence, pose relay, whiteboard sync, voice relay, and
+WebRTC signaling.  Network topology switches automatically:
   ≤2 users → P2P mesh (direct WebRTC data channels, server only carries signals)
-  3+ users → SFU relay (server fans out pose data to every participant)
+  3+ users → SFU relay (server fans out pose + voice data to every participant)
 
 Free deployment — no credit card required
 =========================================
@@ -302,6 +302,28 @@ class SignalingServer:
 		else:
 			await self._broadcast(room, self._build_msg("whiteboard_clear", user_id=user_id), exclude=user_id)
 
+	async def handle_voice_frame(self, ws: Any, payload: dict) -> None:
+		"""Relay an opaque voice frame (base64 PCM) to the rest of the room.
+
+		Used only in SFU mode (3+ users); 1-2 user rooms carry voice over the
+		direct P2P WebRTC channel and never reach here. The audio payload is
+		forwarded verbatim and never logged or stored (privacy: §4)."""
+		user_id = getattr(ws, "user_id", None)
+		room_id = getattr(ws, "room_id", None)
+		if user_id is None or room_id is None:
+			return
+		room = self.rooms.get(room_id)
+		if not room:
+			return
+		audio = payload.get("audio")
+		if not audio:
+			return
+		await self._broadcast(
+			room,
+			self._build_msg("voice_frame", from_user_id=user_id, audio=audio),
+			exclude=user_id,
+		)
+
 	async def handle_webrtc_signal(self, ws: Any, msg_type: str, payload: dict) -> None:
 		user_id = getattr(ws, "user_id", None)
 		room_id = getattr(ws, "room_id", None)
@@ -353,6 +375,8 @@ class SignalingServer:
 					await self.handle_monitor_layout_update(ws, payload)
 				elif msg_type in ("whiteboard_stroke", "whiteboard_clear"):
 					await self.handle_whiteboard(ws, msg_type, payload)
+				elif msg_type == "voice_frame":
+					await self.handle_voice_frame(ws, payload)
 				elif msg_type in ("webrtc_offer", "webrtc_answer", "ice_candidate"):
 					await self.handle_webrtc_signal(ws, msg_type, payload)
 				else:
