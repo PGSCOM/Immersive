@@ -44,7 +44,7 @@ var curved_screen_enabled: bool = false
 var curved_screen_amount: float = 0.18
 var foveation_enabled: bool = false
 var foveation_strength: float = 0.55
-var passthrough_enabled: bool = false
+var passthrough_enabled: bool = true
 
 ## Persisted environment index (loaded from config, applied after env_manager init).
 var _saved_environment_index: int = 0
@@ -811,10 +811,13 @@ func _on_frame_gap(monitor_id: int) -> void:
 	if not _decoders.has(monitor_id):
 		return
 	# Cold start: still waiting for the first IDR. Flush stale decoder buffers so
-	# they don't delay the clean intra we're about to accept; the host's periodic
-	# IDR (~1 s) supplies one without us flooding REQUEST_KEYFRAME.
+	# they don't delay the clean intra we're about to accept. The startup IDR may
+	# have been lost (two-monitor congestion bursting two large IDRs back-to-back),
+	# so actively request a new one rather than waiting silently for the host's ~1 s
+	# periodic IDR — that wait is what causes the first monitor to stay black.
 	if _awaiting_idr.get(monitor_id, false):
 		_decoders[monitor_id].flush()
+		_request_keyframe(monitor_id, 600)
 		return
 	# Steady state: request an IDR, throttled so a burst of losses can't trigger
 	# an IDR storm that congests Wi-Fi. We do NOT set _awaiting_idr (which would
@@ -841,11 +844,11 @@ func _request_keyframe(monitor_id: int, min_interval_ms: int = 250) -> bool:
 	return false
 
 ## On cold-start, track freshly-opened decoders so we know an IDR is needed.
-## We send NO request on open; the host forces an IDR on the first frame of every
-## stream and emits a periodic one (~1 s), so a fresh decoder gets its intra
-## without us flooding REQUEST_KEYFRAME (which would trigger oversized forced IDRs
-## that congest WiFi). Clear the pending flag once the IDR has been seen (or after
-## a generous timeout).
+## After a short grace window (~500 ms) we actively retry REQUEST_KEYFRAME so a
+## lost startup IDR (common when two monitors blast simultaneous IDRs and congest
+## the UDP buffer) does not leave the first monitor permanently black. The retry is
+## throttled so we never flood the host. Clear the pending flag once the IDR has
+## been seen (or after a hard 10 s timeout).
 func _handle_keyframe_retries() -> void:
 	if _decoder_pending_first.is_empty():
 		return
@@ -858,6 +861,11 @@ func _handle_keyframe_retries() -> void:
 		# Give up waiting after 10 s; the host's auto-GOP will supply an IDR.
 		if now - int(_decoder_pending_first[mid]) > 10000:
 			_decoder_pending_first.erase(mid)
+			continue
+		# After 500 ms with no IDR, the startup IDR was likely lost. Actively
+		# request a new one (throttled) so the monitor is not stuck black.
+		if now - int(_decoder_pending_first[mid]) > 500:
+			_request_keyframe(mid, 750)
 
 ## Test-harness frame capture: every 2 s, dump the latest decoded panel image
 ## (so a screenshot can be pulled over adb `run-as` and inspected without a
@@ -1441,7 +1449,7 @@ func _load_config() -> void:
 		curved_screen_amount = cfg.get_value("display", "curved_amount", 0.18)
 		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
 		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
-		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
+		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", true)
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 8000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
@@ -1538,6 +1546,15 @@ func _init_world_features() -> void:
 			ui_overlay.set_environment_index(environment_manager.get_current_index())
 		elif ui_overlay.has_method("set_environment_name"):
 			ui_overlay.set_environment_name(environment_manager.get_current_name())
+
+	# Apply passthrough once the XR session is fully focused (OpenXR must be
+	# initialized before set_environment_blend_mode / transparent_bg can work).
+	# Connecting here — after environment_manager is ready — ensures all the
+	# pieces _apply_passthrough_settings() needs are in place when it fires.
+	var xr_starter := get_node_or_null("XRStarter")
+	if xr_starter and xr_starter.has_signal("xr_started"):
+		if not xr_starter.xr_started.is_connected(_apply_passthrough_settings):
+			xr_starter.xr_started.connect(_apply_passthrough_settings)
 
 func _init_multiuser() -> void:
 	signaling_client = preload("res://scripts/signaling_client.gd").new()

@@ -396,6 +396,19 @@ int main(int argc, char* argv[]) {
         if (scaling) scaled.resize(static_cast<size_t>(out_w) * out_h * 4);
 
         live_stream_count++;
+        // Stagger startup: if another stream is already running, sleep briefly so
+        // its startup IDR (~150 chunks, ~210 KB) can drain through the shared UDP
+        // send buffer before we burst our own. Without this delay the two large IDRs
+        // collide in the buffer, causing chunk loss that leaves the first monitor
+        // black until the client's retry logic (REQUEST_KEYFRAME) recovers it.
+        // 80 ms per already-running peer stream is enough for the OS to flush a
+        // full IDR over a typical WiFi link before the next one starts.
+        {
+            const uint32_t stagger_ms = (live_stream_count - 1) * 80;
+            for (uint32_t i = 0; i < stagger_ms / 10 && g_running && !ctx->stop; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
         uint32_t frame_number = 0;
         auto last_sent = std::chrono::steady_clock::time_point{};
 
@@ -404,6 +417,10 @@ int main(int argc, char* argv[]) {
         // corruption can persist; the client's on-demand REQUEST_KEYFRAME clears
         // it faster (within a round-trip) when loss is actually detected.
         const uint32_t keyframe_interval = std::max(1u, fps_cap);
+        // Force an IDR on the first frame. For additional monitors the startup
+        // stagger above already separates their IDRs in time; the periodic IDRs
+        // will naturally remain offset because the streams start at different wall
+        // times, so no extra phase shift is required here.
         uint32_t frames_since_keyframe = keyframe_interval;  // force one promptly
 
         while (g_running && !ctx->stop) {

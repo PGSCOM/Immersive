@@ -41,16 +41,13 @@ func _setup_for_openxr() -> bool:
 	xr_interface.connect("session_visible", _on_openxr_visible_state)
 	xr_interface.connect("session_focussed", _on_openxr_focused_state)
 
-	# Check for passthrough
-	var enable_passthrough: bool = false
-	if enable_passthrough and xr_interface.is_passthrough_supported():
-		xr_interface.start_passthrough()
-
 	# Disable vsync
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 
-	# Switch the viewport to XR
-	get_viewport().transparent_bg = enable_passthrough
+	# Switch the viewport to XR. transparent_bg is managed by main.gd
+	# (_apply_passthrough_settings) once the session is focused so that the
+	# correct OpenXR blend mode (ALPHA_BLEND vs OPAQUE) can be negotiated at
+	# runtime. Do not override it here.
 	get_viewport().use_xr = true
 
 	print("OpenXR: Initialized successfully")

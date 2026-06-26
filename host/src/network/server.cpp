@@ -116,8 +116,12 @@ public:
             return false;
         }
 
-        // Aumentar el buffer de envío UDP a 2 MB
-        int sndbuf = 2 * 1024 * 1024;
+        // UDP send buffer: 8 MB matches the client's receive buffer (network_client.gd).
+        // Two simultaneous monitors each sending a ~210 KB IDR burst (~150 chunks at
+        // 1400 B) need ~420 KB of drain capacity. 8 MB gives generous headroom so
+        // back-to-back IDRs from two monitors do not overflow the kernel send queue
+        // and cause chunk loss that leaves the first monitor black on cold start.
+        int sndbuf = 8 * 1024 * 1024;
         setsockopt(udp_socket_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
 
         // The UDP socket is SEND-ONLY: the host transmits video to
