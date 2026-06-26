@@ -30,6 +30,15 @@ const EXTERNAL_SUITES := [
 var _results: Dictionary = {"passed": 0, "failed": 0, "suites": {}}
 
 func _init() -> void:
+	# Defer the actual run until the first processed frame. During SceneTree._init()
+	# the root viewport is not yet inside the tree, so nodes added to tree.root never
+	# receive NOTIFICATION_READY (their _ready() never fires, leaving @onready-style
+	# state null). Waiting one frame puts the root in-tree so add_child() triggers
+	# _ready(), and also lets the resource importer finish registering global
+	# class_names before scripts are compiled on a fresh import.
+	process_frame.connect(_run, CONNECT_ONE_SHOT)
+
+func _run() -> void:
 	print("=== Immersive-2 Test Suite ===\n")
 
 	_run_inline_suites()

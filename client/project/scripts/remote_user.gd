@@ -6,6 +6,12 @@
 
 extends Node3D
 
+## Preloaded so the type resolves even when this script is compiled before the
+## global class registry is populated (e.g. running the headless test suite on a
+## fresh import, where the bare class_name fails with "Could not find type").
+## Shadows the global SoftwareVideoDecoder class_name with an equivalent ref.
+const SoftwareVideoDecoder := preload("res://scripts/software_video_decoder.gd")
+
 ## User ID from the signaling server.
 var user_id: int = -1
 
