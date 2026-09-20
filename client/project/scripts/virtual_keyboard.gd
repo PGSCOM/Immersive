@@ -73,6 +73,15 @@ var _key_nodes: Dictionary = {}
 ## Currently hovered key.
 var _hovered_key: MeshInstance3D = null
 
+## Latches a press so holding the trigger types one character, not one per
+## rendered frame.
+var _press_latched: bool = false
+
+## Half extents of the key field, used by pointer_ray() to reject rays that
+## cross the keyboard's plane outside the keys.
+var _board_half_w: float = 0.0
+var _board_half_h: float = 0.0
+
 # Materials
 var _mat_normal:  StandardMaterial3D
 var _mat_hover:   StandardMaterial3D
@@ -97,9 +106,38 @@ func toggle_visibility() -> void:
 	visible = not visible
 	if visible:
 		_reposition_in_front_of_camera()
+	else:
+		_clear_hover()
 
-## Called from vr_input.gd with the world-space tip position of the
-## left-hand index finger / pointer.
+## Point at the keyboard with a ray (controller laser or hand ray). Intersects
+## the keyboard's own plane and reuses the proximity hit test below.
+## Returns true when the ray is on the board, so the caller stops routing that
+## ray to the desktop panels.
+func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, is_pressing: bool) -> bool:
+	if not visible:
+		return false
+	var inv := global_transform.affine_inverse()
+	var local_origin: Vector3 = inv * ray_origin
+	var local_dir: Vector3 = global_transform.basis.inverse() * ray_direction
+	if absf(local_dir.z) < 0.0001:
+		return false
+	var t: float = -local_origin.z / local_dir.z
+	if t < 0.0:
+		return false
+	var local_hit: Vector3 = local_origin + local_dir * t
+	if absf(local_hit.x) > _board_half_w or absf(local_hit.y) > _board_half_h:
+		_clear_hover()
+		return false
+	pointer_update(global_transform * Vector3(local_hit.x, local_hit.y, 0.0), is_pressing)
+	return true
+
+func _clear_hover() -> void:
+	if _hovered_key != null:
+		_set_key_material(_hovered_key, _mat_normal)
+		_hovered_key = null
+	_press_latched = false
+
+## Called with the world-space position of a fingertip or of a ray/plane hit.
 ## Returns the vk_code of any key that was triggered, or -1.
 func pointer_update(world_pos: Vector3, is_pressing: bool) -> int:
 	var best_key: MeshInstance3D = null
@@ -117,10 +155,18 @@ func pointer_update(world_pos: Vector3, is_pressing: bool) -> int:
 		_set_key_material(_hovered_key, _mat_normal)
 		_hovered_key = null
 
+	if not is_pressing:
+		_press_latched = false
+
 	if best_key != null:
 		_hovered_key = best_key
 		if is_pressing:
 			_set_key_material(best_key, _mat_pressed)
+			# Edge-triggered: a held trigger types one character, not one per
+			# rendered frame.
+			if _press_latched:
+				return -1
+			_press_latched = true
 			return _activate_key(best_key)
 		else:
 			_set_key_material(best_key, _mat_hover)
@@ -154,6 +200,7 @@ func _build_materials() -> void:
 func _build_keyboard() -> void:
 	var total_rows: int = KEY_ROWS.size()
 	var start_y: float  = (total_rows - 1) * (KEY_HEIGHT + KEY_GAP) / 2.0
+	var widest: float   = 0.0
 
 	for row_idx in range(total_rows):
 		var row: Array = KEY_ROWS[row_idx]
@@ -164,6 +211,8 @@ func _build_keyboard() -> void:
 			var mult: float = float(key_def[2]) if key_def.size() >= 3 else 1.0
 			total_width += KEY_WIDTH * mult + KEY_GAP
 		total_width -= KEY_GAP
+
+		widest = maxf(widest, total_width)
 
 		var x: float = -total_width / 2.0
 		var y: float = start_y - row_idx * (KEY_HEIGHT + KEY_GAP)
@@ -179,6 +228,10 @@ func _build_keyboard() -> void:
 			add_child(key_node)
 
 			x += kw + KEY_GAP
+
+	# Half extents (plus a small margin) for pointer_ray()'s plane test.
+	_board_half_w = widest / 2.0 + KEY_GAP
+	_board_half_h = start_y + KEY_HEIGHT / 2.0 + KEY_GAP
 
 ## Create a single key MeshInstance3D.
 func _make_key(label: String, vk_code: int, width: float, cx: float, cy: float) -> MeshInstance3D:

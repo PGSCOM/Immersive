@@ -35,6 +35,22 @@ to Windows that DXGI can capture like any physical display.
    # Reboot
    ```
 
+   Alternative, instead of test-signing: the host can install a self-signed
+   code-signing certificate into the machine's `Root` and `TrustedPublisher`
+   stores, which lets the unsigned driver install without rebooting.
+
+   ```powershell
+   # Run as Administrator
+   .\immersive2_host.exe --install-idd-cert
+   ```
+
+   Understand what this does before running it: it makes the machine trust
+   **anything** signed with that key, permanently, until you remove the
+   certificate. It is never run automatically — normal streaming does not need
+   it, and neither does IDD detection. To undo it, delete the
+   "Immersive IDD Auth" certificate from `certlm.msc` → *Trusted Root
+   Certification Authorities* and *Trusted Publishers*.
+
 4. Right-click `VirtualDisplayDriver.inf` → **Install**.
 
 5. Accept the unsigned-driver warning prompt.

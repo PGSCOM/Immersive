@@ -11,6 +11,8 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <set>
+#include <vector>
 #include <cstring>
 #include <chrono>
 #include <limits>
@@ -21,6 +23,8 @@
 #pragma comment(lib, "ws2_32.lib")
 using SocketType = SOCKET;
 constexpr SocketType INVALID_SOCK = INVALID_SOCKET;
+constexpr int SHUTDOWN_BOTH = SD_BOTH;
+constexpr int SEND_FLAGS = 0;  // Winsock has no SIGPIPE to suppress
 // Windows headers define INPUT_MOUSE and INPUT_KEYBOARD as macros which
 // collide with the protocol enum values. Undefine them after all Win32
 // includes so the qualified name protocol::MessageType::INPUT_MOUSE compiles.
@@ -37,6 +41,17 @@ constexpr SocketType INVALID_SOCK = INVALID_SOCKET;
 #include <unistd.h>
 using SocketType = int;
 constexpr SocketType INVALID_SOCK = -1;
+constexpr int SHUTDOWN_BOTH = SHUT_RDWR;
+// Writing to a socket the peer has reset raises SIGPIPE, whose default action
+// kills the process. A VR client that drops off Wi-Fi mid-handshake did exactly
+// that. MSG_NOSIGNAL turns it into EPIPE; macOS has no such flag, so the
+// SO_NOSIGPIPE socket option is set per socket instead (and main() also
+// installs SIG_IGN as a backstop).
+#ifdef MSG_NOSIGNAL
+constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+#else
+constexpr int SEND_FLAGS = 0;
+#endif
 inline void closesocket(int fd) { close(fd); }
 #endif
 
@@ -66,6 +81,12 @@ public:
     }
 
     static constexpr uint32_t kMaxInFlightFrames = 6;
+
+    /// Hard ceiling on a control-message payload. Every message defined in
+    /// protocol.h is a few dozen bytes; anything larger is a corrupt stream or a
+    /// hostile peer, and allocating on an attacker-chosen 32-bit length would
+    /// throw bad_alloc (or thrash) instead of just dropping the connection.
+    static constexpr uint32_t kMaxControlPayload = 64 * 1024;
 
     bool start(const ServerConfig& config) override {
         if (running_) return false;
@@ -156,17 +177,46 @@ public:
         if (!running_) return;
         running_ = false;
 
+        // Unblock accept().
         closesocket(tcp_socket_);
-        closesocket(udp_socket_);
+        tcp_socket_ = INVALID_SOCK;
+
+        // shutdown() (not closesocket()) so each handler thread's blocking
+        // recv() returns while its descriptor stays valid — the thread closes
+        // and erases its own entry. Closing here instead would let the OS
+        // recycle the descriptor number under a thread still using it.
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            for (auto& [id, client] : clients_) {
+                shutdown(client.tcp_socket, SHUTDOWN_BOTH);
+            }
+        }
 
         if (tcp_thread_.joinable()) tcp_thread_.join();
 
-        // Close all client sockets
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        for (auto& [id, client] : clients_) {
-            closesocket(client.tcp_socket);
+        // Join the handler threads before returning: they invoke the
+        // disconnect callback, which captures objects owned by main(). A
+        // detached thread firing that callback after main() unwound was a
+        // use-after-free on every shutdown.
+        // Move them out first: a finishing handler thread takes threads_mutex_
+        // on its way out, so joining while holding it would deadlock.
+        std::vector<std::thread> pending;
+        {
+            std::lock_guard<std::mutex> lock(threads_mutex_);
+            pending.swap(client_threads_);
+            finished_threads_.clear();
         }
-        clients_.clear();
+        for (auto& t : pending) {
+            if (t.joinable()) t.join();
+        }
+
+        closesocket(udp_socket_);
+        udp_socket_ = INVALID_SOCK;
+
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            clients_.clear();
+        }
 
 #ifdef _WIN32
         WSACleanup();
@@ -212,66 +262,77 @@ public:
                            uint32_t frame_number,
                            const uint8_t* data,
                            uint32_t size) override {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto it = clients_.find(client_id);
-        if (it == clients_.end() || !it->second.udp_addr_set) return;
+        // Flow-control bookkeeping needs the client map; the sendto() burst
+        // does not. One 1080p frame is ~100-200 chunks, so holding
+        // clients_mutex_ across the whole burst serialised every monitor's
+        // worker (and the ACK handler) behind one stream. Take the lock only
+        // long enough to copy the destination out.
+        struct sockaddr_in dest;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = clients_.find(client_id);
+            if (it == clients_.end() || !it->second.udp_addr_set) return;
+            dest = it->second.udp_addr;
 
-        auto& flow = it->second.flow_state[monitor_id];
-        if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
-            flow.ack_seen = false;
-            flow.last_ack = frame_number;
-        }
-        if (flow.ack_seen) {
-            uint32_t backlog = (frame_number >= flow.last_ack)
-                ? (frame_number - flow.last_ack)
-                : 0;
-            if (backlog > kMaxInFlightFrames) {
-                // The client has fallen behind (slow decode or Wi-Fi chunk
-                // loss). Do NOT stop sending: catching up requires frames we'd
-                // be refusing to send, so a `return` here deadlocks the stream
-                // into a permanent black screen (the client can never ACK, so
-                // last_ack stays frozen and every future frame is dropped).
-                // Instead resync the flow window to the present and keep
-                // streaming the freshest frame — live video degrades to fewer
-                // frames under loss rather than freezing.
-                auto now = std::chrono::steady_clock::now();
-                if (flow.last_log.time_since_epoch().count() == 0 ||
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
-                    std::cout << "[Server] Client " << client_id
-                              << " monitor " << static_cast<int>(monitor_id)
-                              << " lagging (backlog " << backlog << " > "
-                              << kMaxInFlightFrames << "), resyncing flow window\n";
-                    flow.last_log = now;
-                }
+            auto& flow = it->second.flow_state[monitor_id];
+            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+                flow.ack_seen = false;
                 flow.last_ack = frame_number;
+            }
+            if (flow.ack_seen) {
+                uint32_t backlog = (frame_number >= flow.last_ack)
+                    ? (frame_number - flow.last_ack)
+                    : 0;
+                if (backlog > kMaxInFlightFrames) {
+                    // The client has fallen behind (slow decode or Wi-Fi chunk
+                    // loss). Do NOT stop sending: catching up requires frames
+                    // we'd be refusing to send, so a `return` here deadlocks
+                    // the stream into a permanent black screen (the client can
+                    // never ACK, so last_ack stays frozen and every future
+                    // frame is dropped). Instead resync the flow window to the
+                    // present and keep streaming the freshest frame.
+                    auto now = std::chrono::steady_clock::now();
+                    if (flow.last_log.time_since_epoch().count() == 0 ||
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
+                        std::cout << "[Server] Client " << client_id
+                                  << " monitor " << static_cast<int>(monitor_id)
+                                  << " lagging (backlog " << backlog << " > "
+                                  << kMaxInFlightFrames << "), resyncing flow window\n";
+                        flow.last_log = now;
+                    }
+                    flow.last_ack = frame_number;
+                }
             }
         }
 
-        uint16_t chunk_count = protocol::compute_chunk_count(size);
+        const uint16_t chunk_count = protocol::compute_chunk_count(size);
+
+        // One reusable packet buffer per sending thread (each monitor has its
+        // own worker), instead of a heap allocation per chunk — ~150 malloc/free
+        // pairs per frame, per monitor, at up to 60 fps.
+        thread_local std::vector<uint8_t> packet;
+        packet.resize(sizeof(protocol::VideoPacketHeader) + protocol::MAX_UDP_PAYLOAD);
+
+        protocol::VideoPacketHeader vph;
+        vph.monitor_id   = monitor_id;
+        vph.frame_number = frame_number;
+        vph.chunk_count  = chunk_count;
 
         for (uint16_t i = 0; i < chunk_count; ++i) {
-            uint32_t offset = i * protocol::MAX_UDP_PAYLOAD;
-            uint32_t chunk_size = std::min(
+            const uint32_t offset = static_cast<uint32_t>(i) * protocol::MAX_UDP_PAYLOAD;
+            const uint32_t chunk_size = std::min(
                 static_cast<uint32_t>(protocol::MAX_UDP_PAYLOAD),
                 size - offset);
 
-            // Build UDP packet: header + payload
-            std::vector<uint8_t> packet(sizeof(protocol::VideoPacketHeader) + chunk_size);
-
-            protocol::VideoPacketHeader vph;
-            vph.monitor_id = monitor_id;
-            vph.frame_number = frame_number;
             vph.chunk_index = i;
-            vph.chunk_count = chunk_count;
-
             std::memcpy(packet.data(), &vph, sizeof(vph));
             std::memcpy(packet.data() + sizeof(vph), data + offset, chunk_size);
 
             sendto(udp_socket_,
                    reinterpret_cast<const char*>(packet.data()),
-                   static_cast<int>(packet.size()), 0,
-                   reinterpret_cast<struct sockaddr*>(&it->second.udp_addr),
-                   sizeof(it->second.udp_addr));
+                   static_cast<int>(sizeof(vph) + chunk_size), 0,
+                   reinterpret_cast<struct sockaddr*>(&dest),
+                   sizeof(dest));
         }
     }
 
@@ -364,6 +425,29 @@ public:
 private:
     void tcp_accept_loop() {
         while (running_) {
+            // Wait for a pending connection with a timeout instead of blocking
+            // in accept(). Closing the listening socket from stop() does NOT
+            // wake a thread already blocked in accept() (Linux leaves it parked
+            // in inet_csk_accept), so the join in stop() hung forever and the
+            // host never exited on Ctrl+C. Polling means stop() is noticed
+            // within one tick, whatever the platform does with the descriptor.
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(tcp_socket_, &readable);
+            struct timeval tv;
+            tv.tv_sec  = 0;
+            tv.tv_usec = 200000;  // 200 ms
+
+            int ready = select(static_cast<int>(tcp_socket_) + 1,
+                               &readable, nullptr, nullptr, &tv);
+            if (!running_) break;
+            if (ready == 0) continue;           // nothing pending, re-check running_
+            if (ready < 0) {
+                std::cerr << "[Server] Accept wait failed\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
 
@@ -371,12 +455,44 @@ private:
                 reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
 
             if (client_sock == INVALID_SOCK) {
-                if (running_) {
-                    std::cerr << "[Server] Accept failed\n";
-                }
+                if (!running_) break;
+                // A persistent failure (descriptor exhaustion, for instance)
+                // would otherwise spin this loop at 100% CPU forever.
+                std::cerr << "[Server] Accept failed\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
 
+            // Enforce the configured client limit (--max-clients). Without
+            // this the option was purely decorative.
+            {
+                std::lock_guard<std::mutex> lock(clients_mutex_);
+                if (clients_.size() >= config_.max_clients) {
+                    std::cerr << "[Server] Rejecting connection from "
+                              << inet_ntoa(client_addr.sin_addr)
+                              << ": client limit (" << config_.max_clients
+                              << ") reached\n";
+                    closesocket(client_sock);
+                    continue;
+                }
+            }
+
+            // Reap handler threads of clients that already went away, so the
+            // vector doesn't grow for the lifetime of the process.
+            {
+                std::lock_guard<std::mutex> lock(threads_mutex_);
+                for (auto it = client_threads_.begin(); it != client_threads_.end();) {
+                    if (it->joinable() && finished_threads_.count(it->get_id())) {
+                        finished_threads_.erase(it->get_id());
+                        it->join();
+                        it = client_threads_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
+            suppress_sigpipe(client_sock);
             uint32_t client_id = next_client_id_++;
 
             {
@@ -395,10 +511,15 @@ private:
 
             if (on_connected_) on_connected_(client_id);
 
-            // Start a client handler thread
-            std::thread([this, client_id]() {
-                handle_client(client_id);
-            }).detach();
+            // Tracked (not detached) so stop() can join it — see stop().
+            {
+                std::lock_guard<std::mutex> lock(threads_mutex_);
+                client_threads_.emplace_back([this, client_id]() {
+                    handle_client(client_id);
+                    std::lock_guard<std::mutex> l(threads_mutex_);
+                    finished_threads_.insert(std::this_thread::get_id());
+                });
+            }
         }
     }
 
@@ -414,6 +535,13 @@ private:
         while (running_) {
             protocol::ControlHeader header;
             if (!recv_exact(sock, &header, sizeof(header))) break;
+
+            if (header.length > kMaxControlPayload) {
+                std::cerr << "[Server] Client " << client_id
+                          << " sent an oversized control message ("
+                          << header.length << " bytes), dropping connection\n";
+                break;
+            }
 
             // Read payload
             std::vector<uint8_t> payload(header.length);
@@ -604,12 +732,23 @@ private:
         const char* ptr = reinterpret_cast<const char*>(data);
         size_t remaining = size;
         while (remaining > 0) {
-            int sent = send(sock, ptr, static_cast<int>(remaining), 0);
+            int sent = send(sock, ptr, static_cast<int>(remaining), SEND_FLAGS);
             if (sent <= 0) return false;
             ptr += sent;
             remaining -= static_cast<size_t>(sent);
         }
         return true;
+    }
+
+    /// Per-socket SIGPIPE suppression for platforms without MSG_NOSIGNAL
+    /// (macOS/BSD). No-op elsewhere.
+    static void suppress_sigpipe(SocketType sock) {
+#if defined(SO_NOSIGPIPE)
+        int on = 1;
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+        (void)sock;
+#endif
     }
 
     ServerConfig config_;
@@ -620,6 +759,12 @@ private:
     SocketType udp_socket_ = INVALID_SOCK;
 
     std::thread tcp_thread_;
+
+    // Per-client handler threads, joined in stop(). finished_threads_ marks the
+    // ones that have run to completion so the accept loop can reap them.
+    std::mutex                    threads_mutex_;
+    std::vector<std::thread>      client_threads_;
+    std::set<std::thread::id>     finished_threads_;
 
     mutable std::mutex clients_mutex_;
     std::unordered_map<uint32_t, ClientState> clients_;

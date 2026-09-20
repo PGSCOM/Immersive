@@ -9,6 +9,8 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <algorithm>
+#include <string>
 
 #ifdef _WIN32
 #include <d3d11.h>
@@ -18,6 +20,20 @@ using Microsoft::WRL::ComPtr;
 #endif
 
 namespace immersive {
+
+#ifndef _WIN32
+/// Fake monitor layout for the portable (non-Windows) stub backend.
+namespace {
+struct StubDisplay { uint16_t width; uint16_t height; int32_t origin_x; };
+constexpr StubDisplay kStubDisplays[] = {
+    {1920, 1080,    0},
+    {1920, 1200, 1920},
+    {1280,  720, 3840},
+};
+constexpr uint8_t kStubDisplayCount =
+    static_cast<uint8_t>(sizeof(kStubDisplays) / sizeof(kStubDisplays[0]));
+}  // namespace
+#endif
 
 class DxgiCapture : public IScreenCapture {
 public:
@@ -69,17 +85,24 @@ public:
             }
         }
 #else
-        // Stub for non-Windows platforms (development only)
-        DisplayInfo stub;
-        stub.id = 0;
-        stub.width = 1920;
-        stub.height = 1080;
-        stub.refresh_rate = 60;
-        stub.origin_x = 0;
-        stub.origin_y = 0;
-        stub.name = "Stub Display (non-Windows)";
-        stub.is_primary = true;
-        displays.push_back(stub);
+        // Stub for non-Windows platforms (development only). Three displays,
+        // not one: multi-monitor selection, per-monitor workers and the input
+        // scaling map are the parts most likely to regress, and a single stub
+        // display meant host/tools/smoke_client.py could never exercise them.
+        for (uint8_t i = 0; i < kStubDisplayCount; ++i) {
+            const auto& m = kStubDisplays[i];
+            DisplayInfo stub;
+            stub.id           = i;
+            stub.width        = m.width;
+            stub.height       = m.height;
+            stub.refresh_rate = 60;
+            stub.origin_x     = m.origin_x;
+            stub.origin_y     = 0;
+            stub.name         = std::string("Stub Display ") + char('0' + i)
+                              + " (non-Windows)";
+            stub.is_primary   = (i == 0);
+            displays.push_back(stub);
+        }
 #endif
 
         return displays;
@@ -189,6 +212,8 @@ public:
         capturing_ = false;
 
 #ifdef _WIN32
+        staging_.Reset();
+        staging_desc_ = {};
         duplication_.Reset();
         d3d_context_.Reset();
         d3d_device_.Reset();
@@ -234,18 +259,31 @@ public:
         D3D11_TEXTURE2D_DESC tex_desc;
         desktop_texture->GetDesc(&tex_desc);
 
-        // Create a staging texture for CPU read
+        // Staging texture for CPU read. Kept between frames — allocating one
+        // per frame is a GPU allocation on every captured frame of every
+        // monitor, and the descriptor only changes on a display mode change.
         tex_desc.Usage = D3D11_USAGE_STAGING;
         tex_desc.BindFlags = 0;
         tex_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         tex_desc.MiscFlags = 0;
 
-        ComPtr<ID3D11Texture2D> staging;
-        d3d_device_->CreateTexture2D(&tex_desc, nullptr, &staging);
-        d3d_context_->CopyResource(staging.Get(), desktop_texture.Get());
+        if (!staging_ ||
+            staging_desc_.Width  != tex_desc.Width ||
+            staging_desc_.Height != tex_desc.Height ||
+            staging_desc_.Format != tex_desc.Format) {
+            staging_.Reset();
+            if (FAILED(d3d_device_->CreateTexture2D(&tex_desc, nullptr, &staging_))) {
+                duplication_->ReleaseFrame();
+                return nullptr;
+            }
+            staging_desc_ = tex_desc;
+        }
+
+        ID3D11Texture2D* staging = staging_.Get();
+        d3d_context_->CopyResource(staging, desktop_texture.Get());
 
         D3D11_MAPPED_SUBRESOURCE mapped;
-        hr = d3d_context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+        hr = d3d_context_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
 
         if (FAILED(hr)) {
             duplication_->ReleaseFrame();
@@ -271,18 +309,29 @@ public:
             std::chrono::duration_cast<std::chrono::microseconds>(
                 now.time_since_epoch()).count());
 
-        d3d_context_->Unmap(staging.Get(), 0);
+        d3d_context_->Unmap(staging, 0);
         duplication_->ReleaseFrame();
 
         return frame;
 #else
-        // Non-Windows stub: generate a solid-color test frame
+        // Non-Windows stub: generate a solid-color test frame. Sleep for the
+        // caller's timeout first — a stub that returns instantly turns the
+        // stream worker into a busy loop allocating a full frame buffer as fast
+        // as the CPU allows.
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(std::max(1u, std::min(timeout_ms, 33u))));
+
+        const uint8_t idx = (target_display_id_ < kStubDisplayCount)
+                                ? target_display_id_ : 0;
         auto frame = std::make_unique<CapturedFrame>();
         frame->monitor_id = target_display_id_;
-        frame->width = 1920;
-        frame->height = 1080;
-        frame->pitch = frame->width * 4;
-        frame->pixels.resize(frame->pitch * frame->height, 128);
+        frame->width  = kStubDisplays[idx].width;
+        frame->height = kStubDisplays[idx].height;
+        frame->pitch  = frame->width * 4;
+        // A distinct shade per display, so a decoded test frame identifies
+        // which monitor it came from.
+        frame->pixels.resize(static_cast<size_t>(frame->pitch) * frame->height,
+                             static_cast<uint8_t>(64 + idx * 48));
 
         auto now = std::chrono::steady_clock::now();
         frame->timestamp_us = static_cast<uint64_t>(
@@ -302,6 +351,8 @@ private:
     ComPtr<ID3D11Device>          d3d_device_;
     ComPtr<ID3D11DeviceContext>   d3d_context_;
     ComPtr<IDXGIOutputDuplication> duplication_;
+    ComPtr<ID3D11Texture2D>       staging_;       ///< reused CPU-readback target
+    D3D11_TEXTURE2D_DESC          staging_desc_{};
 
     // Cached hardware-cursor state (Desktop Duplication reports it separately
     // from the desktop image and only when it changes).

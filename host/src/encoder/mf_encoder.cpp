@@ -139,6 +139,7 @@ public:
         _shutdown();
 
         config_ = cfg;
+        header_annexb_.clear();  // parameter sets belong to the old session
 
         // Initialize COM on this thread (required before MFStartup)
         HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -603,12 +604,24 @@ private:
         }
     }
 
-    /// True if the access unit already contains an SPS NAL (type 7) near its
-    /// start, so we don't insert a duplicate. Scans Annex-B start codes.
-    static bool _au_has_sps(const std::vector<uint8_t>& d) {
+    /// True if the access unit already carries its parameter sets near the
+    /// start, so we don't insert a duplicate copy. Scans Annex-B start codes.
+    /// H.264 and HEVC number their NAL types differently (HEVC: 6 bits at
+    /// byte>>1; VPS/SPS/PPS = 32/33/34) — checking only the H.264 layout made
+    /// every HEVC access unit look header-less and get a redundant prefix.
+    /// AV1 has no start codes at all, so the check does not apply.
+    bool _au_has_parameter_sets(const std::vector<uint8_t>& d) const {
+        if (config_.codec == VideoCodec::AV1) return true;
+        const bool hevc = (config_.codec == VideoCodec::H265);
         for (size_t i = 0; i + 4 < d.size() && i < 96; ++i) {
             if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
-                if ((d[i + 3] & 0x1f) == 7) return true;
+                const uint8_t b = d[i + 3];
+                if (hevc) {
+                    const uint8_t t = (b >> 1) & 0x3f;
+                    if (t >= 32 && t <= 34) return true;
+                } else if ((b & 0x1f) == 7) {
+                    return true;
+                }
             }
         }
         return false;
@@ -772,7 +785,7 @@ private:
             if (header_annexb_.empty()) _capture_sequence_header();
             // Re-insert SPS/PPS in-band when missing, so any frame the client
             // happens to receive first can configure the decoder.
-            if (!header_annexb_.empty() && !_au_has_sps(pkt.data)) {
+            if (!header_annexb_.empty() && !_au_has_parameter_sets(pkt.data)) {
                 pkt.data.insert(pkt.data.begin(),
                                 header_annexb_.begin(), header_annexb_.end());
             }

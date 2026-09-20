@@ -19,6 +19,8 @@ signal foveation_settings_changed(enabled: bool, strength: float)
 signal passthrough_toggled(enabled: bool)
 signal workspace_save_requested
 signal workspace_restore_requested
+## Show/hide the in-VR QWERTY keyboard.
+signal keyboard_toggle_requested
 ## codec: 0xFF auto, 0 H.264, 2 MJPEG · res_percent: 100/75/50, -1 auto · fps: 0 auto
 signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int, res_percent: int, fps: int)
 signal auto_quality_requested
@@ -99,6 +101,7 @@ var _lbl_foveation_value   : Label
 var _chk_passthrough       : CheckBox
 var _btn_workspace_save    : Button
 var _btn_workspace_restore : Button
+var _btn_keyboard          : Button
 var _kbd_container         : VBoxContainer  ## In-viewport numeric keyboard
 
 # Stream quality controls
@@ -128,6 +131,8 @@ func _ready() -> void:
 	hide()
 
 func _process(_delta: float) -> void:
+	if not _visible_overlay:
+		return  # nothing on screen to update
 	_update_labels()
 	# The overlay stays where it was opened; it only moves while being grabbed.
 	if _is_dragging and is_instance_valid(_drag_controller):
@@ -147,6 +152,12 @@ func toggle_visibility() -> void:
 		_reposition_in_front_of_camera()
 	else:
 		hide()
+	# A SubViewport is not a Node3D, so hiding this node does NOT stop it
+	# rendering: the 900x880 UI kept being redrawn every frame on the headset
+	# GPU for an overlay nobody was looking at.
+	if _viewport:
+		_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS \
+			if _visible_overlay else SubViewport.UPDATE_DISABLED
 
 func set_state(state: ConnectionState) -> void:
 	_state = state
@@ -396,7 +407,8 @@ func _build_ui() -> void:
 	_viewport                          = SubViewport.new()
 	_viewport.size                     = Vector2i(900, 880)
 	_viewport.transparent_bg           = true
-	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# Starts hidden (see _ready) — toggle_visibility() turns rendering on.
+	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	add_child(_viewport)
 
 	_canvas = CanvasLayer.new()
@@ -592,6 +604,10 @@ func _build_ui() -> void:
 	_btn_workspace_restore.text = "↩ Restore"
 	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
 	mon_hdr.add_child(_btn_workspace_restore)
+	_btn_keyboard = Button.new()
+	_btn_keyboard.text = "⌨ Keyboard"
+	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
+	mon_hdr.add_child(_btn_keyboard)
 
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical  = Control.SIZE_EXPAND_FILL
@@ -661,9 +677,10 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	codec_row.add_theme_constant_override("separation", 6)
 	vbox.add_child(codec_row)
 	_quality_label(codec_row, "Codec")
-	# Hardware-decoded codecs only — the MJPEG software path has been removed.
+	# MJPEG belongs here: it is the decode path on PC / iOS / web (no MediaCodec
+	# plugin), and main.gd resolves any hardware codec down to it there.
 	_codec_buttons = _make_segmented_row(codec_row,
-		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3]],
+		[["Auto", 0xFF], ["H.264", 0], ["H.265", 1], ["AV1", 3], ["MJPEG", 2]],
 		_on_codec_chosen)
 
 	# Resolution row
@@ -1074,7 +1091,11 @@ func _on_workspace_restore_pressed() -> void:
 # ---------------------------------------------------------------------------
 
 func _save_config() -> void:
+	# Load first. main.gd writes [stream] (and adb writes [test]) to this same
+	# file, so a fresh ConfigFile here erased the user's codec/bitrate/
+	# resolution settings every time a checkbox or the Connect button moved.
 	var cfg := ConfigFile.new()
+	cfg.load(CONFIG_PATH)
 	cfg.set_value("network", "host_ip",           _host_ip)
 	cfg.set_value("network", "tcp_port",           _tcp_port)
 	cfg.set_value("network", "udp_port",           _udp_port)

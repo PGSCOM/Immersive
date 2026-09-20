@@ -362,18 +362,32 @@ function onUdpPacket(packet) {
   const chunkCnt = packet.readUInt16LE(7);
   const chunkData = packet.subarray(VIDEO_HEADER_SIZE);
 
-  if (!frameBuffer.has(frameNum)) {
-    frameBuffer.set(frameNum, {
+  // Reject a header that cannot describe a real chunk before it is used to
+  // index the chunk array.
+  if (chunkCnt === 0 || chunkIdx >= chunkCnt) {
+    return;
+  }
+
+  // Key on monitor AND frame number: the host numbers frames per monitor, so
+  // keying on the frame number alone interleaves chunks from two monitors into
+  // one corrupt frame as soon as more than one stream is running.
+  const key = `${monitorId}:${frameNum}`;
+
+  let entry = frameBuffer.get(key);
+  if (entry && entry.total !== chunkCnt) {
+    // Stale entry from a restarted stream that reused this frame number.
+    frameBuffer.delete(key);
+    entry = undefined;
+  }
+  if (!entry) {
+    entry = {
       monitorId,
       total: chunkCnt,
       chunks: new Array(chunkCnt),
       received: 0,
-    });
-  }
-
-  const entry = frameBuffer.get(frameNum);
-  if (!entry) {
-    return;
+      createdMs: Date.now(),
+    };
+    frameBuffer.set(key, entry);
   }
 
   if (!entry.chunks[chunkIdx]) {
@@ -383,7 +397,7 @@ function onUdpPacket(packet) {
 
   if (entry.received >= entry.total) {
     const fullFrame = Buffer.concat(entry.chunks.filter(Boolean));
-    frameBuffer.delete(frameNum);
+    frameBuffer.delete(key);
 
     if (isJpegFrame(fullFrame)) {
       // MJPEG: feeds the 2D preview (<img>/multipart) and /frame.jpg.
@@ -395,7 +409,7 @@ function onUdpPacket(packet) {
       pushFrameToVideoClients(fullFrame, isAnnexBKeyframe(fullFrame) ? 1 : 0);
     }
 
-    cleanupFrameBuffer(frameNum);
+    cleanupFrameBuffer();
   }
 }
 
@@ -414,9 +428,13 @@ function isAnnexBKeyframe(buffer) {
   return false;
 }
 
-function cleanupFrameBuffer(currentFrame) {
-  for (const key of frameBuffer.keys()) {
-    if (key < currentFrame - 20) {
+// Drop partial frames that will never complete. Age-based rather than
+// frame-number based: keys are now per monitor, and a stream that dies
+// mid-frame would otherwise leak its chunks for the life of the process.
+function cleanupFrameBuffer() {
+  const cutoff = Date.now() - 5000;
+  for (const [key, entry] of frameBuffer) {
+    if (entry.createdMs < cutoff) {
       frameBuffer.delete(key);
     }
   }

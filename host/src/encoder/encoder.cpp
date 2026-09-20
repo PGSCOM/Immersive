@@ -32,10 +32,9 @@ namespace immersive {
 class MjpegEncoder : public IVideoEncoder {
 public:
     bool initialize(const EncoderConfig& config) override {
-        config_       = config;
-        initialized_  = true;
-        frame_count_  = 0;
-        force_keyframe_ = true;  // MJPEG frames are always independently decodable
+        config_      = config;
+        initialized_ = true;
+        frame_count_ = 0;
 
         quality_ = static_cast<int>(
             std::max(10u, std::min(95u, config_.jpeg_quality)));
@@ -53,27 +52,32 @@ public:
             uint32_t       height,
             uint32_t       pitch,
             uint64_t       timestamp_us) override {
-        if (!initialized_ || !bgra_data) return {};
+        if (!initialized_ || !bgra_data || width == 0 || height == 0) return {};
 
         // Frame pacing is handled by the stream worker (configurable FPS cap).
 
-        // stb_image_write expects RGB or RGBA (not BGRA).
-        // Convert BGRA → RGBA in-place into a temporary buffer.
-        std::vector<uint8_t> rgba(width * height * 4);
+        // stb_image_write wants R,G,B in ascending byte order; the capture
+        // gives BGRA. Convert into a buffer that lives across calls — a fresh
+        // (zero-initialised) vector per frame was an 8 MB allocation + memset
+        // per frame, per monitor, at up to 60 fps. Dropping alpha at the same
+        // time cuts a quarter off what the JPEG encoder then walks.
+        const size_t rgb_size = static_cast<size_t>(width) * height * 3;
+        if (rgb_buf_.size() != rgb_size) rgb_buf_.resize(rgb_size);
+
         for (uint32_t y = 0; y < height; ++y) {
             const uint8_t* src_row = bgra_data + static_cast<size_t>(y) * pitch;
-            uint8_t*       dst_row = rgba.data() + static_cast<size_t>(y) * width * 4;
+            uint8_t*       dst_row = rgb_buf_.data() + static_cast<size_t>(y) * width * 3;
             for (uint32_t x = 0; x < width; ++x) {
-                dst_row[x * 4 + 0] = src_row[x * 4 + 2]; // R ← B
-                dst_row[x * 4 + 1] = src_row[x * 4 + 1]; // G ← G
-                dst_row[x * 4 + 2] = src_row[x * 4 + 0]; // B ← R
-                dst_row[x * 4 + 3] = src_row[x * 4 + 3]; // A ← A
+                dst_row[x * 3 + 0] = src_row[x * 4 + 2]; // R ← B
+                dst_row[x * 3 + 1] = src_row[x * 4 + 1]; // G ← G
+                dst_row[x * 3 + 2] = src_row[x * 4 + 0]; // B ← R
             }
         }
 
-        // Encode to JPEG via stb_image_write callback
-        std::vector<uint8_t> jpeg_data;
-        jpeg_data.reserve(width * height);  // rough upper bound
+        // Encode to JPEG via stb_image_write callback. jpeg_buf_ keeps its
+        // capacity between frames so the output never reallocates in steady
+        // state either.
+        jpeg_buf_.clear();
 
         auto write_cb = [](void* ctx, void* data, int size) {
             auto* out = reinterpret_cast<std::vector<uint8_t>*>(ctx);
@@ -83,14 +87,14 @@ public:
 
         int ok = stbi_write_jpg_to_func(
             write_cb,
-            &jpeg_data,
+            &jpeg_buf_,
             static_cast<int>(width),
             static_cast<int>(height),
-            4,                  // channels (RGBA — JPEG ignores alpha internally)
-            rgba.data(),
+            3,                  // channels (RGB)
+            rgb_buf_.data(),
             quality_);
 
-        if (!ok || jpeg_data.empty()) {
+        if (!ok || jpeg_buf_.empty()) {
             std::cerr << "[MjpegEncoder] JPEG encode failed for frame "
                       << frame_count_ << "\n";
             return {};
@@ -99,10 +103,9 @@ public:
         EncodedPacket pkt;
         pkt.timestamp_us = timestamp_us;
         pkt.is_keyframe  = true;  // MJPEG: every frame is a keyframe
-        pkt.data         = std::move(jpeg_data);
+        pkt.data.assign(jpeg_buf_.begin(), jpeg_buf_.end());
 
         frame_count_++;
-        force_keyframe_ = false;
 
         return {std::move(pkt)};
     }
@@ -112,7 +115,7 @@ public:
     }
 
     void request_keyframe() override {
-        force_keyframe_ = true;  // no-op for MJPEG (always key), kept for API compat
+        // No-op: every MJPEG frame is already independently decodable.
     }
 
     EncoderBackend backend() const override {
@@ -124,11 +127,12 @@ public:
     }
 
 private:
-    EncoderConfig config_;
-    bool          initialized_   = false;
-    uint32_t      frame_count_   = 0;
-    bool          force_keyframe_ = true;
-    int           quality_        = 80;
+    EncoderConfig        config_;
+    bool                 initialized_ = false;
+    uint32_t             frame_count_ = 0;
+    int                  quality_     = 80;
+    std::vector<uint8_t> rgb_buf_;   ///< reused BGRA→RGB scratch
+    std::vector<uint8_t> jpeg_buf_;  ///< reused JPEG output scratch
 };
 
 // ---------------------------------------------------------------------------

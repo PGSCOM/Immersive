@@ -28,6 +28,7 @@ const WORKSPACE_PATH := "user://immersive2_workspace.json"
 @onready var left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var right_controller: XRController3D = $XROrigin3D/RightController
 @onready var right_aim: XRController3D = $XROrigin3D/RightAim
+@onready var virtual_keyboard: Node3D = get_node_or_null("VirtualKeyboard")
 
 # ---------------------------------------------------------------------------
 # State
@@ -93,6 +94,10 @@ var _codec_fallback_sent: bool = false
 ## Monitors awaiting an IDR keyframe after a frame gap (Fase 3 recovery).
 var _awaiting_idr: Dictionary = {}
 
+## Last [monitor_id, x, y, buttons] actually sent, so an unchanged pointer does
+## not re-send the same event every frame. See send_mouse_input().
+var _last_mouse_state: Array = []
+
 # ---------------------------------------------------------------------------
 # Test/debug harness — driven from immersive2_config.cfg [test] section or
 # --im2-host=/--im2-port=/--im2-capture command-line args (adb am ... --esa
@@ -136,6 +141,10 @@ func _ready() -> void:
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
+	# The saved passthrough preference was loaded but never applied, so the
+	# setting silently reverted to opaque on every launch. XR initialises in
+	# XRStarter._ready(); defer one frame so the interface is up.
+	_apply_passthrough_settings.call_deferred()
 	if _autoconnect_on_start:
 		print("[Immersive-2][TEST] Autoconnect enabled -> %s:%d (capture=%s)" %
 			[host_ip, host_tcp_port, str(_debug_capture)])
@@ -381,6 +390,8 @@ func _init_ui_overlay() -> void:
 		ui_overlay.workspace_save_requested.connect(_on_overlay_workspace_save_requested)
 	if ui_overlay.has_signal("workspace_restore_requested"):
 		ui_overlay.workspace_restore_requested.connect(_on_overlay_workspace_restore_requested)
+	if ui_overlay.has_signal("keyboard_toggle_requested"):
+		ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
 	if ui_overlay.has_signal("stream_settings_changed"):
 		ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
 	if ui_overlay.has_signal("auto_quality_requested"):
@@ -617,6 +628,10 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 	current_state = State.STREAMING
 	_update_overlay_state()
 	print("[Immersive-2] Streaming monitor %d (%dx%d) codec=%d" % [monitor_id, width, height, codec])
+
+	# A restarted stream can change the pixel scale, so the de-dup memory in
+	# send_mouse_input() must not suppress the first move at the same UV.
+	_last_mouse_state.clear()
 
 	# Keep the local selection in sync (covers workspace-restore startups)
 	if not active_monitor_ids.has(monitor_id):
@@ -997,10 +1012,19 @@ func _on_overlay_workspace_restore_requested() -> void:
 # Input handling
 # ---------------------------------------------------------------------------
 
-## Called from vr_input.gd.
+## Called from vr_input.gd and hand_input.gd — both of which call it once per
+## rendered frame while pointing at a panel. Identical repeats are dropped here
+## (one place, both callers): at 90 Hz that was ~90 TCP control messages and
+## ~90 SendInput calls a second for a cursor that had not moved.
 func send_mouse_input(monitor_id: int, x: int, y: int, buttons: int, scroll: int, scroll_h: int = 0) -> void:
-	if current_state == State.STREAMING and network_client:
-		network_client.send_mouse_input(monitor_id, x, y, buttons, scroll, scroll_h)
+	if current_state != State.STREAMING or not network_client:
+		return
+	if scroll == 0 and scroll_h == 0:
+		var state := [monitor_id, x, y, buttons]
+		if state == _last_mouse_state:
+			return
+		_last_mouse_state = state
+	network_client.send_mouse_input(monitor_id, x, y, buttons, scroll, scroll_h)
 
 func send_keyboard_input(monitor_id: int, scancode: int, pressed: bool, modifiers: int) -> void:
 	if current_state == State.STREAMING and network_client:
@@ -1010,6 +1034,26 @@ func send_keyboard_input(monitor_id: int, scancode: int, pressed: bool, modifier
 func toggle_ui_overlay() -> void:
 	if ui_overlay and ui_overlay.has_method("toggle_visibility"):
 		ui_overlay.toggle_visibility()
+
+## Show/hide the in-VR QWERTY keyboard (overlay button, or K on desktop).
+func toggle_virtual_keyboard() -> void:
+	if not is_instance_valid(virtual_keyboard):
+		return
+	if not active_monitor_ids.is_empty():
+		virtual_keyboard.active_monitor_id = active_monitor_ids[0]
+	virtual_keyboard.toggle_visibility()
+
+func is_virtual_keyboard_visible() -> bool:
+	return is_instance_valid(virtual_keyboard) and virtual_keyboard.visible
+
+## Route a pointer ray at the VR keyboard. Returns true when the keyboard
+## consumed it, so the caller stops sending that ray to the desktop panels.
+## Shared by the controller (vr_input.gd) and hand-tracking (hand_input.gd)
+## paths so both drive the keyboard the same way.
+func send_keyboard_pointer(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> bool:
+	if not is_instance_valid(virtual_keyboard):
+		return false
+	return virtual_keyboard.pointer_ray(ray_origin, ray_direction, pressing)
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
@@ -1021,6 +1065,8 @@ func _input(event: InputEvent) -> void:
 				disconnect_from_host()
 			KEY_O:
 				toggle_ui_overlay()
+			KEY_K:
+				toggle_virtual_keyboard()
 			KEY_ESCAPE:
 				get_tree().quit()
 
@@ -1221,7 +1267,11 @@ func _apply_passthrough_settings() -> void:
 # ---------------------------------------------------------------------------
 
 func _save_config() -> void:
+	# Load first: ui_overlay.gd writes its own keys to the same file, and the
+	# [test] section is written externally over adb. A fresh ConfigFile here
+	# silently dropped every key this function does not set.
 	var cfg := ConfigFile.new()
+	cfg.load(CONFIG_PATH)
 	cfg.set_value("network", "host_ip", host_ip)
 	cfg.set_value("network", "tcp_port", host_tcp_port)
 	cfg.set_value("network", "udp_port", host_udp_port)

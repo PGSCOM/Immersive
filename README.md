@@ -64,7 +64,7 @@ Immersive-2/
 │   └── src/
 │       ├── capture/         # dxgi_capture.cpp
 │       ├── encoder/         # encoder.cpp (MJPEG + hw stubs)
-│       ├── network/         # server.cpp, tcp_control.cpp, udp_stream.cpp
+│       ├── network/         # server.cpp (TCP control + UDP video/audio)
 │       ├── input/           # input_injector.cpp
 │       ├── driver/          # idd_manager.cpp
 │       └── main.cpp

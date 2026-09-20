@@ -39,7 +39,7 @@ var _udp: PacketPeerUDP
 ## Whether we are currently listening.
 var _running: bool = false
 
-## Circular jitter buffer: Array of PackedFloat32Array frames.
+## Jitter buffer entries: { seq: int, frames: PackedVector2Array } sorted by seq.
 var _jitter_buffer: Array = []  # sorted by seq number
 var _next_seq: int = -1          # next expected sequence number
 
@@ -77,7 +77,8 @@ func start(host_ip: String, audio_port: int) -> bool:
 		push_warning("[AudioReceiver] Failed to bind UDP port %d: %d" % [audio_port, err])
 		return false
 
-	# Set filter so we only accept packets from the host
+	# Default send target (used only if we ever reply); PacketPeerUDP has no
+	# inbound source filter, so this is not a filter despite the old comment.
 	_udp.set_dest_address(host_ip, audio_port)
 
 	_running          = true
@@ -98,6 +99,7 @@ func stop() -> void:
 		_udp = null
 	if _player:
 		_player.stop()
+	_playback = null
 	_playback_started = false
 	_jitter_buffer.clear()
 	print("[AudioReceiver] Stopped")
@@ -129,21 +131,22 @@ func _parse_audio_packet(raw: PackedByteArray) -> void:
 	if raw.size() < expected_bytes:
 		return  # truncated packet
 
-	# Decode PCM-16 LE to float32
-	var frames := PackedFloat32Array()
-	frames.resize(n_samples * n_ch)
+	# Decode PCM-16 LE straight into the interleaved stereo form the generator
+	# wants. Doing it in one pass (instead of PCM→float32 array here and
+	# float32→Vector2 again at push time) halves the per-sample GDScript work,
+	# which at 48 kHz stereo is ~96k iterations a second on the main thread.
+	var stereo := PackedVector2Array()
+	stereo.resize(n_samples)
 	var offset := 8
-	for i in range(n_samples * n_ch):
-		var lo:  int = raw[offset]       & 0xFF
-		var hi:  int = raw[offset + 1]   & 0xFF
-		var s16: int = (hi << 8) | lo
-		if s16 >= 32768:
-			s16 -= 65536
-		frames[i] = float(s16) / 32768.0
-		offset += 2
+	var stride := n_ch * 2
+	for i in range(n_samples):
+		var l: float = raw.decode_s16(offset) / 32768.0
+		var r: float = (raw.decode_s16(offset + 2) / 32768.0) if n_ch >= 2 else l
+		stereo[i] = Vector2(l, r)
+		offset += stride
 
 	# Insert into jitter buffer sorted by seq
-	_jitter_buffer.append({"seq": seq, "channels": n_ch, "frames": frames})
+	_jitter_buffer.append({"seq": seq, "frames": stereo})
 	_jitter_buffer.sort_custom(func(a, b): return a["seq"] < b["seq"])
 
 	# Trim buffer: drop the OLDEST packets so latency stays bounded
@@ -158,7 +161,7 @@ func _push_to_generator() -> void:
 	if not _playback_started:
 		var total_frames := 0
 		for entry in _jitter_buffer:
-			total_frames += entry["frames"].size() / int(entry["channels"])
+			total_frames += entry["frames"].size()
 		if total_frames < MIN_BUFFER:
 			return
 		_player.play()
@@ -179,25 +182,14 @@ func _push_to_generator() -> void:
 		if entry["seq"] > _next_seq + JITTER_WINDOW:
 			_next_seq = entry["seq"]
 
-		var frames: PackedFloat32Array = entry["frames"]
-		var n_ch:   int = int(entry["channels"])
-		var n_samp: int = frames.size() / n_ch
+		var stereo: PackedVector2Array = entry["frames"]
 
 		# Don't overflow the generator's internal buffer
-		if _playback.get_frames_available() < n_samp:
+		if _playback.get_frames_available() < stereo.size():
 			break
 
 		_jitter_buffer.pop_front()
 		_next_seq = entry["seq"] + 1
-
-		# Re-interleave to stereo (duplicate if mono)
-		var stereo := PackedVector2Array()
-		stereo.resize(n_samp)
-		for i in range(n_samp):
-			var l: float = frames[i * n_ch]
-			var r: float = frames[i * n_ch + 1] if n_ch >= 2 else l
-			stereo[i] = Vector2(l, r)
-
 		_playback.push_buffer(stereo)
 
 # ---------------------------------------------------------------------------

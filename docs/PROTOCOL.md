@@ -12,6 +12,11 @@ All multi-byte integers are **little-endian** unless noted otherwise.
 |---------|----------|-------------|--------------|-------------------|
 | Control | TCP      | 19800       | Bidirectional| Handshake, control, input |
 | Video   | UDP      | 19801       | Host → Client| Video frame chunks |
+| Audio   | UDP      | 19802       | Host → Client| PCM-16 stereo 48 kHz system audio |
+
+The host's UDP socket is send-only and binds an ephemeral port; the client owns
+19801/19802 for receiving. (Binding them on the host too would stop a client on
+the same machine from receiving video at all.)
 
 ---
 
@@ -143,6 +148,31 @@ Clients should treat an empty payload (legacy) as "all streams stopped".
 
 ---
 
+### `0x07` AUDIO_START — Host → Client
+
+Sent right after the client connects, when host audio capture is running.
+
+```
+ 0             2         3            5
+ +-------------+---------+------------+
+ | sample_rate | channels| audio_port |
+ +-------------+---------+------------+
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| sample_rate | uint16 LE | Always 48000 |
+| channels | uint8 | 1 or 2 |
+| audio_port | uint16 LE | UDP port the audio packets arrive on |
+
+---
+
+### `0x08` AUDIO_STOP — Host → Client
+
+Empty payload. The audio stream has ended.
+
+---
+
 ### `0x10` INPUT_MOUSE — Client → Host
 
 Mouse input event on a specific monitor.
@@ -246,6 +276,29 @@ Acknowledges receipt of a video frame. Used for flow control.
 
 ---
 
+### `0x31` REQUEST_KEYFRAME — Client → Host
+
+Asks the host to encode an IDR for one monitor. Used by an inter-frame codec
+(H.264/HEVC/AV1) to recover the decode chain after packet loss instead of
+waiting for the host's periodic keyframe. No-op for MJPEG, where every frame is
+already independently decodable.
+
+```
+ 0         1
+ +---------+
+ | mon_id  |
+ +---------+
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| monitor_id | uint8 | Monitor whose stream should emit an IDR |
+
+The client throttles these (≥250 ms apart per monitor) so a burst of losses
+cannot trigger an IDR storm.
+
+---
+
 ### `0x40` LATENCY_PROBE — Client → Host
 
 Round-trip latency measurement. The host echoes it back as `LATENCY_RESPONSE`.
@@ -319,20 +372,57 @@ Video frames are split into UDP datagrams of at most **1400 bytes** each.
 
 ### Frame Reassembly
 
-A frame is complete when `chunks_received == chunk_count`.
-Frames that are never completed (due to packet loss) should be discarded after
-receiving a frame with a higher `frame_number`.
+Frame numbers are **per monitor**, so a reassembly buffer must be keyed on
+`(monitor_id, frame_number)` — keying on the frame number alone interleaves
+chunks from two monitors into one corrupt frame.
+
+A frame is complete when `chunks_received == chunk_count`. Incomplete frames are
+discarded on a timeout (the reference client uses 5 s) rather than as soon as a
+higher `frame_number` arrives: a large IDR can take longer to transmit than the
+next few frames, and dropping it early loses the one frame a recovering decoder
+needs.
 
 ### Video Codecs
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 0 | H.264 | Hardware encoder (NVENC/AMF/QSV) — not yet implemented |
-| 1 | H.265 | Hardware encoder — not yet implemented |
-| 2 | MJPEG | Software encoder (stb_image_write); default in CI builds |
+| 0 | H.264 | Media Foundation MFT (NVENC/AMF/QSV, or the Windows software MFT) |
+| 1 | H.265 | Media Foundation MFT, hardware only |
+| 2 | MJPEG | Software encoder (stb_image_write); always available, default |
+| 3 | AV1   | Media Foundation MFT, hardware only (recent GPUs) |
+
+The host resolves the request through a fallback chain (requested → H.264 →
+MJPEG) and announces what it actually used in `STREAM_START.codec`, which may
+differ from what was asked for.
 
 MJPEG frames are valid JPEG files. The client decodes them with
-`Image.load_jpg_from_buffer()` (Godot) or `stb_image.h` (C++).
+`Image.load_jpg_from_buffer()` (Godot) or `stb_image.h` (C++). H.264/HEVC are
+Annex-B; the host re-inserts SPS/PPS in-band on any access unit that lacks them,
+so a client can start decoding from whichever frame it receives first.
+
+---
+
+## Audio Channel (UDP)
+
+Raw PCM-16 stereo 48 kHz, one datagram per ~10 ms packet.
+
+```
+ 0         4         6         7         8         8+N
+ +---------+---------+---------+---------+--- ...---+
+ | seq     | samples | channels| reserved| PCM data |
+ +---------+---------+---------+---------+--- ...---+
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| seq | 4 bytes LE | Monotonic packet sequence number |
+| samples | 2 bytes LE | Samples per channel in this packet |
+| channels | 1 byte | 1 = mono, 2 = stereo |
+| reserved | 1 byte | Padding / future use |
+| PCM data | `samples * channels * 2` bytes | Interleaved signed 16-bit LE |
+
+The host resamples and downmixes the WASAPI endpoint's mix format (often
+44.1 kHz, sometimes 6 or 8 channels) to this fixed format before sending.
 
 ---
 
@@ -345,6 +435,7 @@ Client                                   Host
   |--- HELLO (0x01) ---------------------->|
   |<-- HELLO_ACK (0x02) -------------------|
   |<-- MONITOR_LIST (0x03) ----------------|
+  |<-- AUDIO_START (0x07) -----------------|   (if host audio is enabled)
   |                                        |
   |--- MONITOR_SELECT (0x04, id=1) ------->|
   |<-- STREAM_START (0x05, id=1) ----------|
@@ -354,6 +445,8 @@ Client                                   Host
   |                                        |
   |--- LATENCY_PROBE (0x40) ------------->|
   |<-- LATENCY_RESPONSE (0x41) ------------|
+  |                                        |
+  |--- REQUEST_KEYFRAME (0x31) ---------->|   (after packet loss)
   |                                        |
   |--- INPUT_MOUSE (0x10) --------------->|
   |--- INPUT_KEYBOARD (0x11) ------------>|
@@ -368,4 +461,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | Initial protocol: HELLO handshake, monitor list, single-monitor stream, mouse/keyboard input, MJPEG video, latency probing, multi-monitor select, frame ACK |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request |

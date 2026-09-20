@@ -126,14 +126,17 @@ static bool find_detached_virtual_monitor(std::wstring& device_name) {
 #endif  // _WIN32
 
 // ---------------------------------------------------------------------------
-// VirtualDisplayManagerImpl (Auto Self-Signer)
+// Opt-in driver-signature trust bypass (see --install-idd-cert)
 // ---------------------------------------------------------------------------
 
-static void ensure_ids_certificate_installed() {
+void install_idd_signing_certificate() {
 #ifdef _WIN32
-    // Programmatically create and install a self-signed certificate into Root & TrustedPublisher
-    // to bypass the IDD driver signature requirement (WHQL/TestSigning).
-    std::cout << "[IDDManager] Verifying automatic driver signature bypass...\n";
+    // Create and install a self-signed certificate into Root & TrustedPublisher
+    // so an unsigned community IDD driver installs without test-signing mode.
+    std::cout << "[IDDManager] Installing a self-signed code-signing certificate into\n"
+              << "             LocalMachine\\Root and LocalMachine\\TrustedPublisher.\n"
+              << "             This trusts anything signed with that key and needs\n"
+              << "             an elevated process. See docs/IDD_DRIVER.md.\n";
     const char* ps1 = 
         "$certName = 'Immersive IDD Auth'; "
         "$certThumb = (Get-ChildItem -Path Cert:\\LocalMachine\\My | Where-Object { $_.Subject -match $certName }).Thumbprint; "
@@ -149,8 +152,11 @@ static void ensure_ids_certificate_installed() {
     std::string cmd = "powershell -WindowStyle Hidden -NoProfile -NonInteractive -Command \"";
     cmd += ps1;
     cmd += "\" > NUL 2>&1";
-    // We launch it hidden via system. In a real desktop app, CreateProcess without a window would be better.
-    system(cmd.c_str());
+    // Hidden PowerShell; a real desktop app would use CreateProcess directly.
+    if (system(cmd.c_str()) != 0) {
+        std::cerr << "[IDDManager] Certificate install failed "
+                  << "(is the host running as administrator?)\n";
+    }
 #endif
 }
 
@@ -158,7 +164,11 @@ class VirtualDisplayManagerImpl : public IVirtualDisplayManager {
 public:
     bool is_driver_installed() const override {
 #ifdef _WIN32
-        ensure_ids_certificate_installed();
+        // NOTE: this is a query and nothing else. It used to install a
+        // self-signed CA into the machine Root store on every call — i.e. on
+        // every host startup — which is both a silent, permanent change to the
+        // user's trust configuration and a hidden PowerShell spawn at launch.
+        // That now lives behind --install-idd-cert.
 
         // 1. Check for the itsmikethetech VDD hardware ID prefix
         if (device_present_by_hwid(L"Root\\VID_IDD")) {

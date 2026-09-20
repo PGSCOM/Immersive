@@ -143,7 +143,9 @@ public:
             return false;
         }
 
-        capturing_ = true;
+        capturing_    = true;
+        resample_pos_ = 0.0;
+        accumulator_.clear();
 
         // Start capture thread
         capture_thread_ = std::thread([this]() { _capture_loop(); });
@@ -206,6 +208,11 @@ private:
     bool                        com_owned_       = false;
 
     void _capture_loop() {
+        // WASAPI interfaces are MTA; a thread that never entered an apartment
+        // is not a legal caller for them.
+        const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool thread_com = SUCCEEDED(com_hr);
+
         // Boost thread priority
         DWORD task_index = 0;
         HANDLE task = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
@@ -238,32 +245,48 @@ private:
         }
 
         if (task) AvRevertMmThreadCharacteristics(task);
+        if (thread_com) CoUninitialize();
+    }
+
+    /// Read one channel of one source frame as a normalised float.
+    inline float _sample_at(const BYTE* raw, UINT32 frame, uint8_t ch) const {
+        const size_t idx = static_cast<size_t>(frame) * mix_channels_ + ch;
+        if (mix_bits_ == 32) {
+            return reinterpret_cast<const float*>(raw)[idx];
+        }
+        return reinterpret_cast<const int16_t*>(raw)[idx] / 32768.0f;
     }
 
     void _enqueue_samples(const BYTE* raw, UINT32 num_frames, DWORD /*flags*/) {
-        // Convert captured frames to PCM-16 stereo 48 kHz
-        // We handle float32 (most common WASAPI mix format) and PCM-16 natively.
-        std::vector<int16_t> pcm;
+        if (mix_bits_ != 32 && mix_bits_ != 16) return;  // unsupported depth
+        if (mix_channels_ == 0 || num_frames == 0) return;
 
-        if (mix_bits_ == 32) {
-            // Float32 → PCM-16
-            const float* fsrc = reinterpret_cast<const float*>(raw);
-            for (UINT32 i = 0; i < num_frames * mix_channels_; ++i) {
-                float s = fsrc[i];
-                if (s >  1.0f) s =  1.0f;
-                if (s < -1.0f) s = -1.0f;
-                pcm.push_back(static_cast<int16_t>(s * 32767.0f));
+        // The wire format is fixed at PCM-16 stereo 48 kHz (see AudioStart), but
+        // the WASAPI mix format is whatever the endpoint runs at — very often
+        // 44.1 kHz, and sometimes 6 or 8 channels. Relabelling those samples as
+        // 48 kHz stereo (what this used to do) plays them at the wrong pitch and
+        // shuffles the channels. Downmix to 2 channels and resample linearly.
+        const uint8_t use_ch = (mix_channels_ >= 2) ? 2 : 1;
+        const double step = static_cast<double>(mix_sample_rate_) / TARGET_SAMPLE_RATE;
+
+        while (resample_pos_ < num_frames) {
+            const UINT32 i0 = static_cast<UINT32>(resample_pos_);
+            const UINT32 i1 = (i0 + 1 < num_frames) ? i0 + 1 : i0;
+            const float  t  = static_cast<float>(resample_pos_ - i0);
+
+            for (uint8_t ch = 0; ch < 2; ++ch) {
+                const uint8_t src_ch = (ch < use_ch) ? ch : 0;
+                float v = _sample_at(raw, i0, src_ch) * (1.0f - t)
+                        + _sample_at(raw, i1, src_ch) * t;
+                if (v >  1.0f) v =  1.0f;
+                if (v < -1.0f) v = -1.0f;
+                accumulator_.push_back(static_cast<int16_t>(v * 32767.0f));
             }
-        } else if (mix_bits_ == 16) {
-            const int16_t* isrc = reinterpret_cast<const int16_t*>(raw);
-            pcm.assign(isrc, isrc + num_frames * mix_channels_);
-        } else {
-            // Unsupported bit depth; skip
-            return;
+            resample_pos_ += step;
         }
-
-        // Accumulate into internal buffer, emit packets of PACKET_SAMPLES
-        accumulator_.insert(accumulator_.end(), pcm.begin(), pcm.end());
+        // Carry the fractional remainder into the next WASAPI buffer so the
+        // output stays continuous across packet boundaries.
+        resample_pos_ -= num_frames;
 
         const size_t samples_per_packet = PACKET_SAMPLES * TARGET_CHANNELS;
         while (accumulator_.size() >= samples_per_packet) {
@@ -285,6 +308,7 @@ private:
     }
 
     std::vector<int16_t> accumulator_;
+    double               resample_pos_ = 0.0;  ///< fractional read cursor
 #endif  // _WIN32
 };
 

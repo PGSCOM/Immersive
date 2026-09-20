@@ -43,6 +43,7 @@
 #include <cstring>
 #include <vector>
 #include <atomic>
+#include <memory>
 
 #pragma comment(lib, "windowsapp")
 
@@ -136,6 +137,23 @@ public:
     // ------------------------------------------------------------------
     // start_capture
     // ------------------------------------------------------------------
+    /// Hand this capture over to DXGI Desktop Duplication. WGC is the
+    /// preferred backend (non-exclusive, coexists with AnyDesk/Sunshine), but
+    /// it needs Windows 10 1803+ and a D3D11 device; when either is missing
+    /// this is the documented fallback. Without it the stream worker just
+    /// retried start_capture() every 3 s forever and nothing was ever streamed.
+    bool _fall_back_to_dxgi(uint8_t display_id, const char* why) {
+        std::cerr << "[WgcCapture] " << why
+                  << " — falling back to DXGI Desktop Duplication\n";
+        fallback_ = create_dxgi_capture();
+        if (fallback_ && fallback_->start_capture(display_id)) {
+            capturing_ = true;
+            return true;
+        }
+        fallback_.reset();
+        return false;
+    }
+
     bool start_capture(uint8_t display_id) override {
         if (capturing_) stop_capture();
 
@@ -157,14 +175,14 @@ public:
             if (e.code() != static_cast<winrt::hresult>(RPC_E_CHANGED_MODE)) {
                 std::cerr << "[WgcCapture] init_apartment failed: "
                           << winrt::to_string(e.message()) << "\n";
-                return false;
+                return _fall_back_to_dxgi(display_id, "WinRT apartment unavailable");
             }
         }
 
         // Check WGC is supported at runtime (Win10 1803 / build 17134).
         if (!wgc::GraphicsCaptureSession::IsSupported()) {
-            std::cerr << "[WgcCapture] Windows.Graphics.Capture not supported on this OS\n";
-            return false;
+            return _fall_back_to_dxgi(
+                display_id, "Windows.Graphics.Capture not supported on this OS");
         }
 
         try {
@@ -178,8 +196,8 @@ public:
                 &d3d_device_, &feature_level, &d3d_context_);
             if (FAILED(hr)) {
                 std::cerr << "[WgcCapture] D3D11CreateDevice failed (0x"
-                          << std::hex << hr << ")\n";
-                return false;
+                          << std::hex << hr << std::dec << ")\n";
+                return _fall_back_to_dxgi(display_id, "no D3D11 device for WGC");
             }
 
             winrt_device_ = create_winrt_device(d3d_device_.Get());
@@ -231,7 +249,7 @@ public:
             std::cerr << "[WgcCapture] start_capture failed: "
                       << winrt::to_string(e.message()) << "\n";
             stop_capture();
-            return false;
+            return _fall_back_to_dxgi(display_id, "WGC session could not start");
         }
 
         std::cout << "[WgcCapture] Started capture on display "
@@ -247,6 +265,17 @@ public:
         if (!capturing_) return;
         capturing_ = false;
 
+        if (fallback_) {
+            fallback_->stop_capture();
+            fallback_.reset();
+            std::cout << "[WgcCapture] Stopped capture (DXGI fallback)\n";
+            return;
+        }
+
+        // Release a thread parked in acquire_frame()'s condition wait instead
+        // of making it sit out the full timeout.
+        frame_cv_.notify_all();
+
         frame_arrived_revoker_ = {};
 
         try { if (session_) session_.Close(); } catch (...) {}
@@ -257,6 +286,8 @@ public:
 
         item_         = nullptr;
         winrt_device_ = nullptr;
+        staging_.Reset();
+        staging_desc_ = {};
         d3d_context_.Reset();
         d3d_device_.Reset();
 
@@ -268,6 +299,7 @@ public:
     // ------------------------------------------------------------------
     std::unique_ptr<CapturedFrame> acquire_frame(uint32_t timeout_ms) override {
         if (!capturing_) return nullptr;
+        if (fallback_) return fallback_->acquire_frame(timeout_ms);
 
         // Wait for a frame signal from the FrameArrived callback.
         {
@@ -295,22 +327,36 @@ public:
             D3D11_TEXTURE2D_DESC src_desc;
             src_tex->GetDesc(&src_desc);
 
-            // Staging texture for CPU readback.
+            // Staging texture for CPU readback. Reused across frames: creating
+            // one per frame is a GPU allocation at the capture frame rate, on
+            // every streamed monitor.
             D3D11_TEXTURE2D_DESC staging_desc = src_desc;
             staging_desc.Usage          = D3D11_USAGE_STAGING;
             staging_desc.BindFlags      = 0;
             staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             staging_desc.MiscFlags      = 0;
 
-            ComPtr<ID3D11Texture2D> staging;
-            HRESULT hr = d3d_device_->CreateTexture2D(&staging_desc, nullptr, &staging);
-            if (FAILED(hr)) return nullptr;
+            if (!staging_ ||
+                staging_desc_.Width  != staging_desc.Width ||
+                staging_desc_.Height != staging_desc.Height ||
+                staging_desc_.Format != staging_desc.Format) {
+                staging_.Reset();
+                if (FAILED(d3d_device_->CreateTexture2D(&staging_desc, nullptr, &staging_))) {
+                    wgc_frame.Close();
+                    return nullptr;
+                }
+                staging_desc_ = staging_desc;
+            }
+            ID3D11Texture2D* staging = staging_.Get();
 
-            d3d_context_->CopyResource(staging.Get(), src_tex.Get());
+            d3d_context_->CopyResource(staging, src_tex.Get());
 
             D3D11_MAPPED_SUBRESOURCE mapped;
-            hr = d3d_context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-            if (FAILED(hr)) return nullptr;
+            HRESULT hr = d3d_context_->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+            if (FAILED(hr)) {
+                wgc_frame.Close();
+                return nullptr;
+            }
 
             auto frame          = std::make_unique<CapturedFrame>();
             frame->monitor_id   = target_display_id_;
@@ -325,7 +371,7 @@ public:
             frame->pixels.resize(copy_size);
             std::memcpy(frame->pixels.data(), mapped.pData, copy_size);
 
-            d3d_context_->Unmap(staging.Get(), 0);
+            d3d_context_->Unmap(staging, 0);
             wgc_frame.Close();
 
             return frame;
@@ -341,13 +387,21 @@ public:
     bool is_capturing() const override { return capturing_; }
 
 private:
-    bool    capturing_ = false;
+    /// Read from the FrameArrived callback thread as well as the capture
+    /// thread, so it must not be a plain bool.
+    std::atomic<bool> capturing_{false};
     uint8_t target_display_id_ = 0;
+
+    /// Set when WGC is unusable on this machine; every call is then forwarded
+    /// to a DXGI Desktop Duplication capture instead.
+    std::unique_ptr<IScreenCapture> fallback_;
 
     std::vector<HMONITOR> monitors_;
 
     ComPtr<ID3D11Device>        d3d_device_;
     ComPtr<ID3D11DeviceContext> d3d_context_;
+    ComPtr<ID3D11Texture2D>     staging_;        ///< reused CPU-readback target
+    D3D11_TEXTURE2D_DESC        staging_desc_{};
     wgdd::IDirect3DDevice       winrt_device_{nullptr};
 
     wgc::GraphicsCaptureItem                          item_{nullptr};

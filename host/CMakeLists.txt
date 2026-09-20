@@ -27,8 +27,6 @@ set(ENCODER_SOURCES
 
 set(NETWORK_SOURCES
     src/network/server.cpp
-    src/network/tcp_control.cpp
-    src/network/udp_stream.cpp
 )
 
 set(INPUT_SOURCES

@@ -64,8 +64,20 @@ var _udp_port: int = 0
 
 ## Frame reassembly buffer: frame_number -> { chunks: Dictionary, total: int }
 var _frame_buffer: Dictionary = {}
-var _stream_width: int = 0
-var _stream_height: int = 0
+
+## Stream resolution per monitor id -> Vector2i. One shared pair of globals was
+## wrong as soon as a second monitor started: the latest STREAM_START overwrote
+## it, so every other monitor's frames were reported at the wrong size.
+var _stream_size: Dictionary = {}
+
+## Connection-attempt deadline (ms). StreamPeerTCP can sit in STATUS_CONNECTING
+## for the whole OS SYN timeout, which left the client stuck on "Connecting…"
+## with auto-reconnect never firing.
+const CONNECT_TIMEOUT_MS: int = 8000
+var _connect_deadline_ms: int = 0
+
+## Throttle for the stale-partial-frame sweep.
+var _next_cleanup_ms: int = 0
 
 ## Highest completed frame number per monitor, for loss/gap detection.
 var _last_completed_frame: Dictionary = {}
@@ -84,11 +96,13 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
 	_connected = false
 	_frame_buffer.clear()
 	_last_completed_frame.clear()
+	_stream_size.clear()
 
 	_host_ip = ip
 	_tcp_port = tcp_port
 	_udp_port = udp_port
 
+	_connect_deadline_ms = Time.get_ticks_msec() + CONNECT_TIMEOUT_MS
 	tcp_client.connect_to_host(ip, tcp_port)
 	set_process(true)
 
@@ -108,19 +122,36 @@ func _process(_delta: float) -> void:
 			_read_tcp_messages()
 
 		StreamPeerTCP.STATUS_CONNECTING:
-			pass  # Still connecting
+			# A host that is off or unreachable never reaches STATUS_ERROR
+			# quickly — without this deadline the client stayed in CONNECTING
+			# forever and main.gd's auto-reconnect (which only runs while
+			# DISCONNECTED) never got a chance to retry.
+			if Time.get_ticks_msec() > _connect_deadline_ms:
+				_fail_connection("connection to %s:%d timed out" % [_host_ip, _tcp_port])
 
 		StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
-			if _connected:
-				_connected = false
-				udp_client.close()
-				disconnected_from_host.emit()
-				set_process(false)
-				print("[Network] Disconnected")
+			# Also covers a connect that was refused before it ever succeeded,
+			# which previously left the client silently wedged.
+			_fail_connection("disconnected" if _connected else
+				"could not connect to %s:%d" % [_host_ip, _tcp_port])
 
 	# Read UDP video packets
 	if _connected:
 		_read_udp_packets()
+
+## Tear the connection down and tell the rest of the app, so the reconnect
+## logic and the UI both see a DISCONNECTED state.
+func _fail_connection(reason: String) -> void:
+	_connected = false
+	_tcp_buffer.clear()
+	_frame_buffer.clear()
+	_last_completed_frame.clear()
+	_stream_size.clear()
+	tcp_client.disconnect_from_host()
+	udp_client.close()
+	set_process(false)
+	print("[Network] %s" % reason)
+	disconnected_from_host.emit()
 
 func _on_tcp_connected() -> void:
 	print("[Network] TCP connected, sending HELLO")
@@ -179,13 +210,15 @@ func send_keyboard_input(monitor_id: int, scancode: int, pressed: bool, modifier
 
 func _send_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	# Build TLV header: type (1 byte) + length (4 bytes LE)
-	var header := PackedByteArray()
-	header.resize(5)
-	header[0] = msg_type
-	header.encode_u32(1, payload.size())
-
-	tcp_client.put_data(header)
-	tcp_client.put_data(payload)
+	var msg := PackedByteArray()
+	msg.resize(5)
+	msg[0] = msg_type
+	msg.encode_u32(1, payload.size())
+	if payload.size() > 0:
+		msg.append_array(payload)
+	# One write, not two: FRAME_ACK alone is one message per decoded frame per
+	# monitor, so halving the socket writes matters at 3 x 60 fps.
+	tcp_client.put_data(msg)
 
 func _read_tcp_messages() -> void:
 	# Leer todos los bytes disponibles y guardarlos en el buffer seguro
@@ -202,8 +235,7 @@ func _read_tcp_messages() -> void:
 
 		# Filtro de seguridad
 		if msg_length > 1048576:
-			print("[Network] Rejecting oversized message: %d bytes" % msg_length)
-			disconnect_from_server() # Evita bucles infinitos
+			_fail_connection("rejecting oversized message: %d bytes" % msg_length)
 			return
 
 		# Si el buffer aún no tiene el mensaje completo, esperamos al siguiente fotograma
@@ -248,15 +280,16 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 		MSG_STREAM_START:
 			if payload.size() >= 6:
 				var monitor_id: int = payload[0]
-				_stream_width = payload.decode_u16(1)
-				_stream_height = payload.decode_u16(3)
+				var w: int = payload.decode_u16(1)
+				var h: int = payload.decode_u16(3)
 				var codec: int = payload[5]
+				_stream_size[monitor_id] = Vector2i(w, h)
 				print("[Network] STREAM_START: monitor=%d %dx%d codec=%d" %
-					[monitor_id, _stream_width, _stream_height, codec])
+					[monitor_id, w, h, codec])
 				# Fresh stream: frame numbers restart at 0, so forget the old
 				# high-water mark to avoid a false gap on the first frame.
 				_last_completed_frame.erase(monitor_id)
-				stream_started.emit(monitor_id, _stream_width, _stream_height, codec)
+				stream_started.emit(monitor_id, w, h, codec)
 
 		MSG_STREAM_STOP:
 			var stopped_monitor: int = payload[0] if payload.size() >= 1 else -1
@@ -267,8 +300,10 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 					_frame_buffer.erase(key)
 			if stopped_monitor < 0:
 				_last_completed_frame.clear()
+				_stream_size.clear()
 			else:
 				_last_completed_frame.erase(stopped_monitor)
+				_stream_size.erase(stopped_monitor)
 			stream_stopped.emit(stopped_monitor)
 
 		MSG_AUDIO_START:
@@ -318,6 +353,11 @@ func _read_udp_packets() -> void:
 		# Store chunk in frame buffer (key combines monitor and frame number
 		# so simultaneous monitor streams cannot collide)
 		var frame_key: int = (monitor_id << 32) | frame_num
+		# A restarted stream reuses low frame numbers; if a late chunk from the
+		# previous stream shares a key but reports a different chunk count, the
+		# stale entry would never complete. Start over on a mismatch.
+		if _frame_buffer.has(frame_key) and int(_frame_buffer[frame_key]["total"]) != chunk_cnt:
+			_frame_buffer.erase(frame_key)
 		if not _frame_buffer.has(frame_key):
 			_frame_buffer[frame_key] = {
 				"chunks": {},
@@ -333,8 +373,7 @@ func _read_udp_packets() -> void:
 		if _frame_buffer[frame_key]["chunks"].size() == chunk_cnt:
 			_assemble_frame(frame_key)
 
-			# Clean up old frames periodically
-			_cleanup_old_frames(monitor_id, frame_num)
+	_cleanup_old_frames()
 
 var _frames_assembled: int = 0
 
@@ -371,28 +410,36 @@ func _assemble_frame(frame_key: int) -> void:
 		print("[Net] frames assembled=%d last: mon=%d frame=%d size=%d buf_entries=%d" % [
 				_frames_assembled, monitor_id, frame_num, frame_data.size(), _frame_buffer.size()])
 
-	video_frame_received.emit(monitor_id, frame_data, _stream_width, _stream_height)
+	var size: Vector2i = _stream_size.get(monitor_id, Vector2i.ZERO)
+	video_frame_received.emit(monitor_id, frame_data, size.x, size.y)
 	_frame_buffer.erase(frame_key)
 
 	# Acknowledge so the host's flow control can drop frames when we lag
 	send_frame_ack(monitor_id, frame_num)
 
-func _cleanup_old_frames(monitor_id: int, _current_frame: int) -> void:
-	# Time-based cleanup: remove partial frames older than 5 s.
-	# Avoids the old frame-count window (90 frames) from racing against a large
-	# IDR that takes ~0.5 s to transmit — a single delayed chunk would cause the
-	# 159-chunk IDR to be discarded before it finishes assembling.
+## Drop partial frames older than 5 s, across every monitor.
+##
+## Time-based rather than the old frame-count window (90 frames), which could
+## race a large IDR that takes ~0.5 s to transmit and discard it mid-assembly.
+## Swept once a second instead of on every completed frame: it walks the whole
+## buffer, and at 3 monitors x 60 fps that was 180 full scans a second. Sweeping
+## every monitor (not just the one that just completed) also means a stream that
+## dies mid-frame no longer leaks its chunks for the rest of the session.
+func _cleanup_old_frames() -> void:
 	var now := Time.get_ticks_msec()
+	if now < _next_cleanup_ms:
+		return
+	_next_cleanup_ms = now + 1000
+
 	var keys_to_remove: Array = []
 	for key in _frame_buffer.keys():
 		var entry = _frame_buffer[key]
-		if entry["monitor_id"] == monitor_id:
-			var age_ms: int = now - int(entry.get("created_ms", now))
-			if age_ms > 5000:
-				print("[Net] CLEANUP stale frame age=%dms: mon=%d frame=%d chunks=%d/%d" % [
-						age_ms, monitor_id, entry["frame_num"],
-						entry["chunks"].size(), entry["total"]])
-				keys_to_remove.append(key)
+		var age_ms: int = now - int(entry.get("created_ms", now))
+		if age_ms > 5000:
+			print("[Net] CLEANUP stale frame age=%dms: mon=%d frame=%d chunks=%d/%d" % [
+					age_ms, entry["monitor_id"], entry["frame_num"],
+					entry["chunks"].size(), entry["total"]])
+			keys_to_remove.append(key)
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)
 
@@ -447,11 +494,15 @@ func send_latency_probe(probe_id: int, client_timestamp_us: int) -> void:
 	payload.encode_u64(8, client_timestamp_us)
 	_send_control_message(MSG_LATENCY_PROBE, payload)
 
+## Explicit, user-initiated disconnect. No disconnected_from_host signal: the
+## caller (main.gd) already drives the state change. Use _fail_connection() for
+## a drop the app did not ask for.
 func disconnect_from_server() -> void:
 	_connected = false
 	_tcp_buffer.clear()
 	_frame_buffer.clear()
 	_last_completed_frame.clear()
+	_stream_size.clear()
 	tcp_client.disconnect_from_host()
 	udp_client.close()
 	set_process(false)

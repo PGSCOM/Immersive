@@ -43,4 +43,14 @@ public:
 /// Create an IDD virtual display manager
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager();
 
+/// Generate (if absent) a self-signed code-signing certificate and add it to
+/// the machine's Root and TrustedPublisher stores, so an unsigned community IDD
+/// driver can be installed without enabling Windows test-signing.
+///
+/// This permanently weakens the machine's trust configuration: anything signed
+/// with that key becomes trusted. It therefore happens ONLY when the user asks
+/// for it (`--install-idd-cert`), never as a side effect of checking whether a
+/// driver is present. Requires an elevated process; no-op off Windows.
+void install_idd_signing_certificate();
+
 }  // namespace immersive

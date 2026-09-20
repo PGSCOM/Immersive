@@ -24,6 +24,7 @@ const PINCH_UP_THRESHOLD := 0.42
 const MIN_PINCH_DISTANCE_M := 0.008
 const MAX_PINCH_DISTANCE_M := 0.045
 const OVERLAY_TOGGLE_HOLD_S := 0.65
+const KEYBOARD_TOGGLE_HOLD_S := 1.6
 const RAY_SMOOTHING := 0.5            ## 0 = raw, →1 = heavier low-pass on the ray
 const MAX_RAY_LENGTH := 8.0
 
@@ -47,6 +48,7 @@ var _smooth_dir: Vector3 = Vector3.FORWARD
 # Left-hand overlay-toggle state.
 var _left_hold_time: float = 0.0
 var _left_toggle_latched: bool = false
+var _left_kbd_latched: bool = false
 
 # Visual pointer (laser beam + cursor dot), created lazily in the world.
 var _laser: MeshInstance3D = null
@@ -126,7 +128,15 @@ func _process_right_hand_pointer() -> void:
 		_on_overlay = false
 		_pinch_active = false
 
-	# 2) Streamed monitor panels.
+	# 2) In-VR QWERTY keyboard, when it is open: it floats in front of the
+	#    panels, so it takes the ray before they do.
+	if main_scene and main_scene.has_method("send_keyboard_pointer") and \
+			main_scene.send_keyboard_pointer(origin, direction, should_press):
+		_pinch_active = should_press
+		_update_pointer_visual(origin, direction, 0.6, true)
+		return
+
+	# 3) Streamed monitor panels.
 	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
 		_hide_pointer_visual()
 		return
@@ -192,6 +202,7 @@ func _process_left_hand_overlay_toggle(delta: float) -> void:
 	if not _is_optical_hand_tracking(_left_hand_tracker):
 		_left_hold_time = 0.0
 		_left_toggle_latched = false
+		_left_kbd_latched = false
 		return
 
 	var pinch_strength := _compute_pinch_strength(_left_hand_tracker)
@@ -201,9 +212,20 @@ func _process_left_hand_overlay_toggle(delta: float) -> void:
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()
 			_left_toggle_latched = true
+		# Keep holding and it becomes the keyboard toggle instead — the only way
+		# to reach the in-VR keyboard with no controllers in hand. The overlay
+		# toggle that already fired at 0.65 s is undone first, so a short pinch
+		# means "overlay" and a long one means "keyboard", never both.
+		elif _left_hold_time >= KEYBOARD_TOGGLE_HOLD_S and not _left_kbd_latched:
+			if main_scene and main_scene.has_method("toggle_ui_overlay"):
+				main_scene.toggle_ui_overlay()
+			if main_scene and main_scene.has_method("toggle_virtual_keyboard"):
+				main_scene.toggle_virtual_keyboard()
+			_left_kbd_latched = true
 	elif pinch_strength <= PINCH_UP_THRESHOLD:
 		_left_hold_time = 0.0
 		_left_toggle_latched = false
+		_left_kbd_latched = false
 
 # ---------------------------------------------------------------------------
 # Ray / pinch math

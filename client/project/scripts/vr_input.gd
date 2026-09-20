@@ -27,6 +27,7 @@ var _tracking_state_known: bool = false
 var _last_tracking_active: bool = false
 var _ui_hovered: bool = false
 var _ui_dragging: bool = false
+var _kbd_hovered: bool = false
 
 func _is_trigger_action(name: String) -> bool:
 	return name == "trigger_click" or name == "trigger_value" or name == "trigger" or name == "select" or name == "select_click" or name == "select_value"
@@ -75,6 +76,7 @@ func _update_pointer() -> void:
 		var ui_hit: Dictionary = main_scene.get_ui_hit_from_ray(ray_origin, ray_direction)
 		if ui_hit.get("valid", false):
 			_ui_hovered = true
+			_kbd_hovered = false
 			_active_panel = null
 			_last_uv = Vector2(-1, -1)
 			if main_scene.has_method("send_ui_pointer_move"):
@@ -82,6 +84,17 @@ func _update_pointer() -> void:
 			return
 
 	_ui_hovered = false
+
+	# The in-VR QWERTY keyboard sits between the pointer and the panels when
+	# it is open, so it gets the ray before they do.
+	if main_scene.has_method("send_keyboard_pointer") and \
+			main_scene.send_keyboard_pointer(ray_origin, ray_direction, _trigger_pressed):
+		_kbd_hovered = true
+		_active_panel = null
+		_last_uv = Vector2(-1, -1)
+		return
+
+	_kbd_hovered = false
 
 	var hit: Dictionary = main_scene.get_panel_hit_from_ray(ray_origin, ray_direction)
 	if not hit.get("valid", false):
@@ -160,6 +173,10 @@ func _set_trigger_state(pressed: bool) -> void:
 		return
 	_trigger_pressed = pressed
 	print("[VRInput] Trigger %s" % ["DOWN" if pressed else "UP"])
+	if not main_scene:
+		return
+	if _kbd_hovered:
+		return  # the keyboard consumes the press in _update_pointer()
 	if _ui_hovered and main_scene.has_method("send_ui_pointer_button"):
 		main_scene.send_ui_pointer_button(pressed, MOUSE_BUTTON_LEFT)
 		return
@@ -217,7 +234,7 @@ func _update_tracking_debug() -> void:
 	print("[VRInput] Tracking %s tracker=%s pose=%s" % ["ACTIVE" if tracking_active else "INACTIVE", String(controller.tracker), String(controller.get("pose"))])
 
 func _send_click(button_mask: int) -> void:
-	if _last_uv.x < 0:
+	if _last_uv.x < 0 or not main_scene:
 		return
 	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
@@ -226,7 +243,7 @@ func _send_click(button_mask: int) -> void:
 		main_scene.send_mouse_input(active_monitor_id, pixel.x, pixel.y, button_mask, 0)
 
 func _send_release(_button_mask: int) -> void:
-	if _last_uv.x < 0:
+	if _last_uv.x < 0 or not main_scene:
 		return
 	if not _active_panel or not _active_panel.has_method("uv_to_pixel"):
 		return
@@ -237,7 +254,7 @@ func _send_release(_button_mask: int) -> void:
 func _on_input_vector2_changed(name: String, value: Vector2) -> void:
 	if name == "primary" or name == "thumbstick":
 		_thumbstick = value
-		if _grip_pressed:
+		if _grip_pressed or not main_scene:
 			return
 		if abs(value.y) > THUMBSTICK_SCROLL_THRESHOLD and _ui_hovered and main_scene.has_method("send_ui_pointer_scroll"):
 			main_scene.send_ui_pointer_scroll(value.y)

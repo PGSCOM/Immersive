@@ -92,6 +92,9 @@ func _process(_delta: float) -> void:
 
 ## Set the resolution and update the panel aspect ratio.
 func set_resolution(width: int, height: int, codec: int = 2) -> void:
+	if width <= 0 or height <= 0:
+		push_warning("[ScreenPanel] Ignoring invalid resolution %dx%d" % [width, height])
+		return
 	screen_width  = width
 	screen_height = height
 
@@ -104,10 +107,19 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
 	_update_latency_label_anchor()
 
+	# A stream (re)starting means a new decoder, so any ExternalTexture bound
+	# from the previous one is stale. Drop back to the CPU-texture material and
+	# let main.gd's _update_decoders() re-bind if the new decoder is hardware —
+	# otherwise the panel would keep sampling a dead OES texture and freeze.
+	if _using_external_texture:
+		_using_external_texture = false
+		material_override = null
+
 	# Create a properly-sized texture
 	screen_image = Image.create(width, height, false, Image.FORMAT_RGBA8)
 	screen_image.fill(Color(0.1, 0.1, 0.1, 1.0))
 	screen_texture = ImageTexture.create_from_image(screen_image)
+	_texture_has_mipmaps = screen_image.has_mipmaps()
 	_apply_texture()
 
 	is_active = true
@@ -405,6 +417,7 @@ func _create_placeholder_texture() -> void:
 	screen_image.fill_rect(Rect2i(screen_width - 1, 0, 1, screen_height), border_color)
 
 	screen_texture = ImageTexture.create_from_image(screen_image)
+	_texture_has_mipmaps = screen_image.has_mipmaps()
 	_apply_texture()
 
 	_create_placeholder_label()

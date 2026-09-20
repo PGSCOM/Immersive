@@ -90,6 +90,12 @@ namespace {
                   << "                      Foundation) and require a matching decoder on\n"
                   << "                      the client (Android MediaCodec plugin).\n"
                   << "  --jpeg-quality N    MJPEG quality 10-95 (default: 35)\n"
+                  << "  --install-idd-cert  Install a self-signed code-signing certificate\n"
+                  << "                      into the machine trust stores so an unsigned\n"
+                  << "                      IDD virtual-display driver can be installed,\n"
+                  << "                      then exit. Needs administrator rights and\n"
+                  << "                      permanently trusts that key — see\n"
+                  << "                      docs/IDD_DRIVER.md. Not needed for normal use.\n"
                   << "  --help              Show this message\n";
         std::exit(1);
     }
@@ -106,6 +112,13 @@ int main(int argc, char* argv[]) {
     // Register signal handlers for graceful shutdown
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+#ifdef SIGPIPE
+    // A client that vanishes (Wi-Fi drop, headset sleep) can be written to
+    // before its handler thread notices. Without this the default SIGPIPE
+    // action terminates the whole host; the send then just fails with EPIPE
+    // and the connection is cleaned up normally.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     // --- Parse command-line arguments ---
     uint32_t max_clients  = 4;
@@ -131,6 +144,9 @@ int main(int argc, char* argv[]) {
             audio_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--no-audio") {
             audio_enable = false;
+        } else if (arg == "--install-idd-cert") {
+            immersive::install_idd_signing_certificate();
+            return 0;
         } else if (arg == "--codec" && i + 1 < argc) {
             std::string codec(argv[++i]);
             if      (codec == "h264")  default_codec = 0;
@@ -519,9 +535,11 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    // Restart the active streams in place (no STREAM_STOP notifications) so
-    // a new stream configuration takes effect without dropping panels.
-	auto restart_streams = [&]() {
+    // Restart the active streams so a new stream configuration takes effect.
+    // STREAM_STOP *is* sent for each monitor first: the client rebuilds its
+    // panel and decoder from the following STREAM_START, and an Android panel
+    // that kept its old ExternalTexture would otherwise show a frozen image.
+    auto restart_streams = [&]() {
         std::vector<uint8_t> ids;
         uint32_t client_id;
         {
@@ -609,10 +627,11 @@ int main(int argc, char* argv[]) {
         [&](uint32_t client_id, const immersive::protocol::StreamConfig& cfg) {
             {
                 std::lock_guard<std::mutex> lock(streams_mutex);
-                stream_cfg = cfg;
                 if (!active_streams.empty() && client_id != streams_client_id) {
                     return;  // only the streaming client may reconfigure
                 }
+                stream_cfg = cfg;  // after the check: a bystander client must
+                                   // not poison the next restart's settings
             }
             restart_streams();
         });
