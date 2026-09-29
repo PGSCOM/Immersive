@@ -729,10 +729,14 @@ int main(int argc, char* argv[]) {
     // --- Shutdown ---
     std::cout << "[Host] Cleaning up...\n";
 
+    // Server first: its handler threads can still be inside a MONITOR_SELECT
+    // callback starting new workers. Stopping streams before that left those
+    // workers joinable in active_streams, and destroying a joinable
+    // std::thread at return is std::terminate.
+    server->stop();
     stop_all_streams(false);
     if (audio_thread.joinable()) audio_thread.join();
     if (audio_capture)            audio_capture->stop();
-    server->stop();
     vdm->remove_all_displays();
 
     std::cout << "[Host] Goodbye.\n";

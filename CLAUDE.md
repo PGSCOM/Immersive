@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Immersive-2 is an open-source "use your PC monitors in VR" system (an Immersed alternative). It has three independent pieces that talk over a custom TCP/UDP wire protocol:
 
 - **`host/`** — C++17 Windows application (portable stub mode on Linux/macOS) that captures the desktop via Windows Graphics Capture (falling back to DXGI Desktop Duplication), encodes frames (MJPEG software encoder or NVENC/AMF/QSV hardware via Media Foundation), streams them over UDP, and injects mouse/keyboard input received from the client via `SendInput`.
-- **`client/project/`** — Godot 4.6.3 + OpenXR VR client (Quest / Pico 4) that connects to the host, decodes the stream, and renders monitors as floating 3D panels.
+- **`client/project/`** — Godot 4.7 + OpenXR VR client (Quest / Pico 4) that connects to the host, decodes the stream, and renders monitors as floating 3D panels.
 - **`web/`** — experimental WebXR client; `web/bridge/bridge.js` is a Node bridge that re-exposes the native TCP/UDP protocol as HTTP/MJPEG for browsers.
 
 `protocol/protocol.h` is the single shared definition of the wire format (message types, structs) and is included by both the C++ host and conceptually mirrored by the GDScript client. **`docs/PROTOCOL.md` is the human-written reference; it is kept in sync but `protocol.h` still wins when they disagree, so read the header directly when in doubt.** (`protocol/README.md` used to hold a second, drifting copy of that reference — it is now just a pointer.)
@@ -32,7 +32,7 @@ cmake --build build
 ./build/immersive2_host
 ```
 
-CMake options `ENABLE_NVENC` / `ENABLE_AMF` / `ENABLE_QSV` default to `ON` but CI and most local dev builds set them `OFF` since the MJPEG software encoder needs no GPU SDK. The host's real entry point/orchestration logic lives in `host/src/main.cpp` (see Architecture below) — there is no separate test runner; `host/tools/smoke_client.py` is the closest thing to a test suite.
+CMake options `ENABLE_NVENC` / `ENABLE_AMF` / `ENABLE_QSV` default to `ON` but CI and most local dev builds set them `OFF` since the MJPEG software encoder needs no GPU SDK. The host's real entry point/orchestration logic lives in `host/src/main.cpp` (see Architecture below) — there is no unit-test runner; `host/tools/smoke_client.py` (host only) and `host/tools/e2e_test.py` (host + Godot client) are the test suite.
 
 Host CLI flags (see `host/src/main.cpp` `usage()`): `--codec mjpeg|h264|h265|av1`, `--jpeg-quality N` (10–95), `--no-audio`, `--max-clients N`, `--tcp-port`, `--udp-port`, `--audio-port`, `--install-idd-cert` (one-shot, admin-only: trusts a self-signed key so an unsigned IDD driver installs — see `docs/IDD_DRIVER.md`; never runs on its own).
 
@@ -46,9 +46,17 @@ Connects from `127.0.0.2` (not `127.0.0.1`) so it can bind the UDP video port lo
 
 The portable (non-Windows) capture stub reports **three** fake displays of different resolutions (1920x1080, 1920x1200, 1280x720), so this smoke test genuinely covers the multi-monitor paths — three worker threads, per-monitor encoders and the per-monitor mouse-scaling map — rather than a single stream.
 
+### End-to-end test: real host + real Godot client (no headset required)
+
+```bash
+python3 host/tools/e2e_test.py        # E2E_VERBOSE=1 to see both logs
+```
+
+Linux only. Builds the portable host if missing and runs the actual client headless (`godot` 4.7 on PATH) with the test-harness args `--im2-host=127.0.0.1 --im2-monitors=0,1,2 --im2-capture`. Checks that all three stub monitors decode onto their own panel (each stub is a distinct grey, reported by the `panel mon=N ... center=RRGGBB` harness line), that the client reconnects after the host is killed and after it freezes (SIGSTOP — exercises the client's 10 s host-silence timeout in `network_client.gd`), that the host's client sockets carry TCP keepalive, and that Ctrl+C exits the host. Run it after touching the protocol, reconnect or shutdown paths.
+
 ### VR Client (Godot)
 
-Desktop testing (no headset): open `client/project/` in Godot 4.6.3+, press F5, press `O` to open the overlay and connect.
+Desktop testing (no headset): open `client/project/` in Godot 4.7+, press F5, press `O` to open the overlay and connect.
 
 Export builds:
 
@@ -75,7 +83,7 @@ Then open `http://localhost:19810/` (controls/preview) or `/vr.html` (WebXR scen
 
 ### CI (`.github/workflows/build.yml`)
 
-Four jobs on every push: `host-windows` (MSVC), `host-linux`, `host-macos` (all build with hardware encoders OFF), and `client-build` (Ubuntu, installs Godot 4.6.3 headless + Android SDK, exports both a Windows Desktop and an Android build from a temporary `client/.ci_project` copy). Note the comment in that workflow: `xr/openxr/enabled` in `project.godot` must stay `true` even for CI exports — disabling it would bake OpenXR off into the APK. The `--xr-mode off` flag only suppresses runtime XR init inside the *export tool itself* on the headless runner.
+Four jobs on every push: `host-windows` (MSVC), `host-linux`, `host-macos` (all build with hardware encoders OFF), and `client-build` (Ubuntu, installs Godot 4.7 headless + Android SDK, exports both a Windows Desktop and an Android build from a temporary `client/.ci_project` copy). Note the comment in that workflow: `xr/openxr/enabled` in `project.godot` must stay `true` even for CI exports — disabling it would bake OpenXR off into the APK. The `--xr-mode off` flag only suppresses runtime XR init inside the *export tool itself* on the headless runner.
 
 ## Architecture
 

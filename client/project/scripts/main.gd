@@ -832,7 +832,8 @@ func _handle_debug_capture(delta: float) -> void:
 	# XR where rendering goes to the compositor; the panel image above is the
 	# reliable decode check.
 	# Viewport texture is not CPU-readable in XR/compositor mode; skip silently.
-	if not xr_interface or not xr_interface.is_initialized():
+	if (not xr_interface or not xr_interface.is_initialized()) \
+			and DisplayServer.get_name() != "headless":  # no readable texture headless
 		var vp := get_viewport()
 		if vp:
 			var tex := vp.get_texture()
@@ -842,6 +843,15 @@ func _handle_debug_capture(delta: float) -> void:
 					img.save_png("user://im2_view_%d.png" % _debug_capture_count)
 	print("[Immersive-2][TEST] debug capture #%d (panel=%s) state=%d decoders=%d" %
 		[_debug_capture_count, str(saved), current_state, _decoders.size()])
+	# One line per panel with its centre pixel, so host/tools/e2e_test.py can
+	# check each monitor's decoded image landed on that monitor's panel.
+	for mid in active_monitor_ids:
+		var panel := _find_panel_for_monitor(mid)
+		if is_instance_valid(panel) and panel.screen_image and not panel.screen_image.is_empty():
+			var img: Image = panel.screen_image
+			print("[Immersive-2][TEST] panel mon=%d %dx%d center=%s" % [mid,
+				img.get_width(), img.get_height(),
+				img.get_pixel(img.get_width() / 2, img.get_height() / 2).to_html(false)])
 
 func _close_decoder(monitor_id: int) -> void:
 	if _decoders.has(monitor_id):
@@ -1334,9 +1344,10 @@ func _load_config() -> void:
 	_apply_cmdline_overrides()
 
 ## Allow driving the client from adb without a headset:
-##   am start -n com.immersive2.vrclient/com.godot.game.GodotApp \
+##   am start -n com.immersive2.vrclient/com.godot.game.GodotAppLauncher \
 ##       --esa command_line "--im2-host=192.168.1.34,--im2-capture"
-## Recognised: --im2-host=IP, --im2-port=N, --im2-codec=N, --im2-capture.
+## Recognised: --im2-host=IP, --im2-port=N, --im2-codec=N, --im2-capture,
+## --im2-monitors=0,1,2 (monitors to stream once connected).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
@@ -1350,3 +1361,6 @@ func _apply_cmdline_overrides() -> void:
 			stream_codec = _resolve_codec(int(arg.get_slice("=", 1)))
 		elif arg == "--im2-capture":
 			_debug_capture = true
+		elif arg.begins_with("--im2-monitors="):
+			# Picked up by _on_monitor_list()'s re-request path.
+			active_monitor_ids = Array(arg.get_slice("=", 1).split_floats(",")).map(func(v): return int(v))

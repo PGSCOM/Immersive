@@ -37,6 +37,7 @@ constexpr int SEND_FLAGS = 0;  // Winsock has no SIGPIPE to suppress
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 using SocketType = int;
@@ -177,7 +178,11 @@ public:
         if (!running_) return;
         running_ = false;
 
-        // Unblock accept().
+        // The accept loop polls running_ every 200 ms, so join it BEFORE
+        // closing the listening socket: closing it underneath the loop was a
+        // data race on tcp_socket_ and could hand FD_SET() a -1 (a fortified
+        // glibc aborts on that).
+        if (tcp_thread_.joinable()) tcp_thread_.join();
         closesocket(tcp_socket_);
         tcp_socket_ = INVALID_SOCK;
 
@@ -191,8 +196,6 @@ public:
                 shutdown(client.tcp_socket, SHUTDOWN_BOTH);
             }
         }
-
-        if (tcp_thread_.joinable()) tcp_thread_.join();
 
         // Join the handler threads before returning: they invoke the
         // disconnect callback, which captures objects owned by main(). A
@@ -493,6 +496,7 @@ private:
             }
 
             suppress_sigpipe(client_sock);
+            enable_keepalive(client_sock);
             uint32_t client_id = next_client_id_++;
 
             {
@@ -748,6 +752,32 @@ private:
         setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 #else
         (void)sock;
+#endif
+    }
+
+    /// A headset that powers off or drops off Wi-Fi never sends a FIN, so its
+    /// handler thread sat in recv() forever: the ghost kept a --max-clients
+    /// slot (after a few drops every reconnect was refused until the host was
+    /// restarted) and, if it was streaming, kept the monitors busy. Keepalive
+    /// probes a silent peer after 5 s and drops it ~6 s later.
+    static void enable_keepalive(SocketType sock) {
+        int on = 1;
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE,
+                   reinterpret_cast<const char*>(&on), sizeof(on));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
+        // Linux, and Windows 10 1709+ (older Windows ignores these and keeps
+        // its default 2 h idle, which is no worse than before).
+        int idle = 5, interval = 2, count = 3;
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,
+                   reinterpret_cast<const char*>(&idle), sizeof(idle));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL,
+                   reinterpret_cast<const char*>(&interval), sizeof(interval));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,
+                   reinterpret_cast<const char*>(&count), sizeof(count));
+#elif defined(TCP_KEEPALIVE)  // macOS: idle time only
+        int idle = 5;
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPALIVE,
+                   reinterpret_cast<const char*>(&idle), sizeof(idle));
 #endif
     }
 

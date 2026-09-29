@@ -76,6 +76,14 @@ var _stream_size: Dictionary = {}
 const CONNECT_TIMEOUT_MS: int = 8000
 var _connect_deadline_ms: int = 0
 
+## The host answers main.gd's LATENCY_PROBE every 2 s, so this much silence
+## means it is gone: hung, powered off, or dropped off Wi-Fi without a FIN/RST.
+## TCP alone keeps such a socket "connected" for ~15 min, frozen panels and all,
+## and auto-reconnect never fires. (Not PING: both ends echo PING, so a
+## client-sent PING would bounce back and forth forever.)
+const HOST_TIMEOUT_MS: int = 10000
+var _last_rx_ms: int = 0
+
 ## Throttle for the stale-partial-frame sweep.
 var _next_cleanup_ms: int = 0
 
@@ -86,6 +94,12 @@ var _tcp_buffer := PackedByteArray()
 
 func _ready() -> void:
 	set_process(false)
+
+func _notification(what: int) -> void:
+	# Nothing is probed while the app is paused (headset taken off), so the
+	# silence is ours, not the host's — don't count it against the host.
+	if what == NOTIFICATION_APPLICATION_RESUMED:
+		_last_rx_ms = Time.get_ticks_msec()
 
 ## Connect to the Immersive-2 host.
 func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
@@ -118,8 +132,12 @@ func _process(_delta: float) -> void:
 		StreamPeerTCP.STATUS_CONNECTED:
 			if not _connected:
 				_connected = true
+				_last_rx_ms = Time.get_ticks_msec()
 				_on_tcp_connected()
 			_read_tcp_messages()
+			if _connected and Time.get_ticks_msec() - _last_rx_ms > HOST_TIMEOUT_MS:
+				_fail_connection("host not responding for %d s" % (HOST_TIMEOUT_MS / 1000))
+				return
 
 		StreamPeerTCP.STATUS_CONNECTING:
 			# A host that is off or unreachable never reaches STATUS_ERROR
@@ -227,6 +245,7 @@ func _read_tcp_messages() -> void:
 		var data := tcp_client.get_data(avail)
 		if data[0] == OK:
 			_tcp_buffer.append_array(data[1])
+			_last_rx_ms = Time.get_ticks_msec()
 
 	# Procesar mensajes completos
 	while _tcp_buffer.size() >= 5:

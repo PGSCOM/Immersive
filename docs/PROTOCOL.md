@@ -303,6 +303,12 @@ cannot trigger an IDR storm.
 
 Round-trip latency measurement. The host echoes it back as `LATENCY_RESPONSE`.
 
+It doubles as the liveness check. The reference client sends one every 2 s and
+drops the connection (then auto-reconnects) after 10 s with no TCP data from the
+host, so a hung host or a Wi-Fi drop without FIN/RST is noticed. The host
+detects a vanished client with TCP keepalive instead (5 s idle, 3 probes 2 s
+apart), so clients that never probe (the web bridge, test tools) still work.
+
 ```
  0                   8                   16
  +-------------------+-------------------+
@@ -343,7 +349,9 @@ rtt_ms = (Time.get_ticks_usec() - client_timestamp) / 1000.0
 
 ### `0xFF` PING
 
-Empty payload heartbeat. Either side may send; the receiver echoes it back.
+Empty payload. The receiver echoes it back — and both ends echo, so a PING
+either side originates would bounce back and forth forever. Neither side sends
+one on its own; use `LATENCY_PROBE` for liveness.
 
 ---
 

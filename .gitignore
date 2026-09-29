@@ -27,6 +27,8 @@ _codeql_detected_source_root
 # Godot
 .godot/
 *.import
+# Android Gradle build template, installed by --install-android-build-template
+client/project/android/build/
 # export_presets.cfg is tracked (needed for CI builds)
 *.translation
 
