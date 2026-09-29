@@ -16,6 +16,8 @@
 #include <cstring>
 #include <chrono>
 #include <limits>
+#include <cstddef>
+#include <string>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -64,6 +66,7 @@ struct ClientState {
     SocketType          tcp_socket;
     struct sockaddr_in  udp_addr;
     bool                udp_addr_set = false;
+    bool                tcp_media = false;  ///< HELLO_FLAG_TCP_MEDIA: video/audio in-band on TCP
     std::string         name;
     struct FlowState {
         uint32_t last_ack = 0;
@@ -277,6 +280,16 @@ public:
             if (it == clients_.end() || !it->second.udp_addr_set) return;
             dest = it->second.udp_addr;
 
+            if (it->second.tcp_media) {
+                // ponytail: the whole frame is written under clients_mutex_,
+                // serialising every monitor (they share this one socket anyway).
+                // SO_SNDTIMEO bounds the hold; a per-client send lock if it shows.
+                protocol::VideoFrameHeader vfh{monitor_id, frame_number};
+                send_media_locked(it->second, protocol::MessageType::VIDEO_FRAME,
+                                  &vfh, sizeof(vfh), data, size);
+                return;
+            }
+
             auto& flow = it->second.flow_state[monitor_id];
             if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
                 flow.ack_seen = false;
@@ -373,7 +386,12 @@ public:
                        uint16_t port) override {
         if (!data || size == 0) return;
         std::lock_guard<std::mutex> lock(clients_mutex_);
-        for (const auto& [id, client] : clients_) {
+        for (auto& [id, client] : clients_) {
+            if (client.tcp_media) {
+                send_media_locked(client, protocol::MessageType::AUDIO_DATA,
+                                  nullptr, 0, data, size);
+                continue;
+            }
             if (!client.udp_addr_set) continue;
             auto dest = client.udp_addr;
             dest.sin_port = htons(port);
@@ -557,11 +575,25 @@ private:
             auto msg_type = static_cast<protocol::MessageType>(header.type);
             switch (msg_type) {
             case protocol::MessageType::HELLO: {
-                if (payload.size() >= sizeof(protocol::Hello)) {
-                    protocol::Hello hello;
-                    std::memcpy(&hello, payload.data(), sizeof(hello));
-                    std::cout << "[Server] Client " << client_id
-                              << " says hello: " << hello.client_name << "\n";
+                // Clients older than the flags byte send one byte less.
+                if (payload.size() >= offsetof(protocol::Hello, flags)) {
+                    protocol::Hello hello{};
+                    std::memcpy(&hello, payload.data(),
+                                std::min(payload.size(), sizeof(hello)));
+                    const bool tcp_media = (hello.flags & protocol::HELLO_FLAG_TCP_MEDIA) != 0;
+                    std::cout << "[Server] Client " << client_id << " says hello: "
+                              << std::string(hello.client_name,
+                                             strnlen(hello.client_name, sizeof(hello.client_name)))
+                              << (tcp_media ? " (video/audio over TCP)" : "") << "\n";
+                    if (tcp_media) {
+                        // A client that stops reading must not wedge the
+                        // sender (and clients_mutex_) forever: a timed-out
+                        // send drops the connection instead.
+                        set_send_timeout(sock, 3);
+                        std::lock_guard<std::mutex> lock(clients_mutex_);
+                        auto it = clients_.find(client_id);
+                        if (it != clients_.end()) it->second.tcp_media = true;
+                    }
 
                     // Send HELLO_ACK de forma segura para evitar mezclar bytes
                     protocol::HelloAck ack;
@@ -742,6 +774,39 @@ private:
             remaining -= static_cast<size_t>(sent);
         }
         return true;
+    }
+
+    /// Send one host → client media message (header + optional prefix + data)
+    /// on the control socket. Caller holds clients_mutex_, which is what keeps
+    /// it from interleaving with other control messages. A failed or timed-out
+    /// write leaves a half-sent message on the stream, so the connection is
+    /// shut down; its handler thread then cleans it up as a normal disconnect.
+    static void send_media_locked(ClientState& client, protocol::MessageType type,
+                                  const void* prefix, size_t prefix_size,
+                                  const uint8_t* data, size_t size) {
+        protocol::ControlHeader header;
+        header.type   = static_cast<uint8_t>(type);
+        header.length = static_cast<uint32_t>(prefix_size + size);
+        if (!send_tcp(client.tcp_socket, &header, sizeof(header)) ||
+            (prefix_size && !send_tcp(client.tcp_socket, prefix, prefix_size)) ||
+            !send_tcp(client.tcp_socket, data, size)) {
+            std::cerr << "[Server] Client " << client.id
+                      << " media send failed, dropping connection\n";
+            client.tcp_media = false;  // stop writing to a dead stream
+            client.udp_addr_set = false;
+            shutdown(client.tcp_socket, SHUTDOWN_BOTH);
+        }
+    }
+
+    static void set_send_timeout(SocketType sock, int seconds) {
+#ifdef _WIN32
+        DWORD ms = static_cast<DWORD>(seconds) * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&ms), sizeof(ms));
+#else
+        struct timeval tv{seconds, 0};
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
     }
 
     /// Per-socket SIGPIPE suppression for platforms without MSG_NOSIGNAL

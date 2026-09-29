@@ -118,7 +118,7 @@ Immersive-2/
 ### VR Client
 - Godot Engine 4.7+
 - Meta Quest 2/3/Pro or Pico 4 (developer mode enabled)
-- Wi-Fi connection to the host machine
+- Wi-Fi connection to the host machine, **or** a USB cable (needs `adb` from Android platform-tools on the host's PATH)
 
 ### Web Client (Optional)
 - Node.js 20+
@@ -201,6 +201,11 @@ CI builds publish an `immersive2_client_android` artifact containing a debug-sig
 - Select a monitor from the list
 - The monitor streams as a floating panel in VR
 
+**Over USB instead of Wi-Fi:** enable USB debugging on the headset, plug it into
+the PC and accept the prompt, then press **USB** in the overlay. The host (with
+`adb` on its PATH) keeps an `adb reverse` tunnel armed, so no IP is needed and
+video/audio travel over the cable (in-band on TCP). `--no-usb` turns this off.
+
 ### 4. Run the Web Client (WebXR)
 
 ```bash
@@ -252,6 +257,7 @@ Then open:
 - [x] Flow control (FRAME_ACK)
 - [x] Auto-reconnect on disconnect
 - [x] Host IP config persistence
+- [x] USB connection (`adb reverse`, video/audio over TCP)
 - [x] CI/CD (GitHub Actions: Windows host + Godot export)
 - [x] Real DXGI frame capture (Desktop Duplication API)
 - [x] Input injection (mouse + keyboard via SendInput)

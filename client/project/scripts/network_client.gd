@@ -26,6 +26,9 @@ signal audio_stream_stopped
 ## Emitted when a gap in completed frame numbers is detected (frame lost or
 ## dropped). For inter-frame codecs this breaks the decode chain.
 signal frame_gap_detected(monitor_id: int)
+## Emitted per audio packet received in-band on TCP (USB mode). Same bytes as
+## one UDP audio packet; feed it to AudioReceiver.parse_packet().
+signal audio_packet_received(packet: PackedByteArray)
 
 # --- Constants (matching protocol.h) ---
 
@@ -46,11 +49,17 @@ const MSG_FRAME_ACK: int             = 0x30
 const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
 const MSG_LATENCY_RESPONSE: int      = 0x41
+const MSG_VIDEO_FRAME: int           = 0x50
+const MSG_AUDIO_DATA: int            = 0x51
 const MSG_PING: int                  = 0xFF
 
 const PROTOCOL_VERSION: int   = 1
 const MAX_UDP_PAYLOAD: int    = 1400
 const VIDEO_HEADER_SIZE: int  = 9  # 1 + 4 + 2 + 2 bytes
+const HELLO_FLAG_TCP_MEDIA: int = 0x01
+## A whole encoded frame arrives as one VIDEO_FRAME message in TCP media mode;
+## a high-quality 4K MJPEG keyframe runs to a few MB.
+const MAX_MESSAGE_SIZE: int   = 16 * 1024 * 1024
 
 # --- State ---
 
@@ -61,6 +70,9 @@ var _connected: bool = false
 var _host_ip: String = ""
 var _tcp_port: int = 0
 var _udp_port: int = 0
+## USB mode: `adb reverse` only tunnels TCP, so video and audio are asked for
+## in-band on the control socket (HELLO_FLAG_TCP_MEDIA) and UDP is unused.
+var _tcp_media: bool = false
 
 ## Frame reassembly buffer: frame_number -> { chunks: Dictionary, total: int }
 var _frame_buffer: Dictionary = {}
@@ -101,8 +113,9 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_RESUMED:
 		_last_rx_ms = Time.get_ticks_msec()
 
-## Connect to the Immersive-2 host.
-func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
+## Connect to the Immersive-2 host. tcp_media: receive video/audio on the TCP
+## control socket instead of UDP (USB via adb reverse).
+func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool = false) -> void:
 	# Cerrar conexiones previas limpiamente antes de reconectar
 	udp_client.close()
 	tcp_client.disconnect_from_host()
@@ -115,12 +128,14 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int) -> void:
 	_host_ip = ip
 	_tcp_port = tcp_port
 	_udp_port = udp_port
+	_tcp_media = tcp_media
 
 	_connect_deadline_ms = Time.get_ticks_msec() + CONNECT_TIMEOUT_MS
 	tcp_client.connect_to_host(ip, tcp_port)
 	set_process(true)
 
-	print("[Network] Connecting to %s:%d..." % [ip, tcp_port])
+	print("[Network] Connecting to %s:%d%s..." % [ip, tcp_port,
+		" (video over TCP)" if tcp_media else ""])
 
 func _process(_delta: float) -> void:
 	tcp_client.poll()
@@ -154,7 +169,7 @@ func _process(_delta: float) -> void:
 				"could not connect to %s:%d" % [_host_ip, _tcp_port])
 
 	# Read UDP video packets
-	if _connected:
+	if _connected and not _tcp_media:
 		_read_udp_packets()
 
 ## Tear the connection down and tell the rest of the app, so the reconnect
@@ -180,17 +195,18 @@ func _on_tcp_connected() -> void:
 	# the whole frame fail to reassemble, which looks like stutter, artifacts or a
 	# frozen/black screen. PacketPeerUDP.bind()'s recv_buffer_size (bytes) is the
 	# queue capacity in Godot 4; 8 MB gives generous headroom for motion bursts.
-	var bind_err := udp_client.bind(_udp_port, "*", 8 * 1024 * 1024)
+	var bind_err := OK if _tcp_media else udp_client.bind(_udp_port, "*", 8 * 1024 * 1024)
 	if bind_err != OK:
 		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 
 	# Send HELLO message
 	var hello := PackedByteArray()
-	hello.resize(33)  # 1 byte version + 32 bytes name
+	hello.resize(34)  # 1 byte version + 32 bytes name + 1 byte flags
 	hello[0] = PROTOCOL_VERSION
 	var name_bytes := "Immersive-2 VR".to_utf8_buffer()
 	for i in range(min(name_bytes.size(), 32)):
 		hello[1 + i] = name_bytes[i]
+	hello[33] = HELLO_FLAG_TCP_MEDIA if _tcp_media else 0
 
 	_send_control_message(MSG_HELLO, hello)
 	connected_to_host.emit()
@@ -239,33 +255,43 @@ func _send_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	tcp_client.put_data(msg)
 
 func _read_tcp_messages() -> void:
-	# Leer todos los bytes disponibles y guardarlos en el buffer seguro
+	# Leer todos los bytes disponibles y guardarlos en el buffer seguro.
+	# In a loop: in TCP media mode whole frames come through here, and one read
+	# per render frame capped throughput at whatever the socket had buffered.
 	var avail: int = tcp_client.get_available_bytes()
-	if avail > 0:
+	while avail > 0:
 		var data := tcp_client.get_data(avail)
-		if data[0] == OK:
-			_tcp_buffer.append_array(data[1])
-			_last_rx_ms = Time.get_ticks_msec()
+		if data[0] != OK:
+			break
+		_tcp_buffer.append_array(data[1])
+		_last_rx_ms = Time.get_ticks_msec()
+		avail = tcp_client.get_available_bytes()
 
-	# Procesar mensajes completos
-	while _tcp_buffer.size() >= 5:
-		var msg_type: int = _tcp_buffer[0]
-		var msg_length: int = _tcp_buffer.decode_u32(1)
+	# Procesar mensajes completos. Walk an offset and trim once at the end:
+	# re-slicing the remainder after every message copied the whole backlog
+	# per message, which with frames in the stream (USB mode) went quadratic.
+	var off := 0
+	while _tcp_buffer.size() - off >= 5:
+		var msg_type: int = _tcp_buffer[off]
+		var msg_length: int = _tcp_buffer.decode_u32(off + 1)
 
 		# Filtro de seguridad
-		if msg_length > 1048576:
+		if msg_length > MAX_MESSAGE_SIZE:
 			_fail_connection("rejecting oversized message: %d bytes" % msg_length)
 			return
 
 		# Si el buffer aún no tiene el mensaje completo, esperamos al siguiente fotograma
-		if _tcp_buffer.size() < 5 + msg_length:
-			return
+		if _tcp_buffer.size() - off < 5 + msg_length:
+			break
 
-		var payload := _tcp_buffer.slice(5, 5 + msg_length)
-		# Avanzar el buffer eliminando el mensaje ya procesado
-		_tcp_buffer = _tcp_buffer.slice(5 + msg_length)
+		var payload := _tcp_buffer.slice(off + 5, off + 5 + msg_length)
+		off += 5 + msg_length
 
 		_handle_control_message(msg_type, payload)
+		if not _connected:
+			return  # a handler tore the connection down (buffer already cleared)
+	if off > 0:
+		_tcp_buffer = _tcp_buffer.slice(off)
 
 func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	match msg_type:
@@ -346,6 +372,14 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var client_ts: int     = payload.decode_u64(8)
 				latency_response_received.emit(probe_id, client_ts)
 
+		MSG_VIDEO_FRAME:
+			# payload: monitor_id (u8) + frame_number (u32) + whole frame
+			if payload.size() > 5:
+				_deliver_frame(payload[0], payload.decode_u32(1), payload.slice(5))
+
+		MSG_AUDIO_DATA:
+			audio_packet_received.emit(payload)
+
 		MSG_PING:
 			# Echo back
 			_send_control_message(MSG_PING, PackedByteArray())
@@ -399,9 +433,18 @@ var _frames_assembled: int = 0
 func _assemble_frame(frame_key: int) -> void:
 	var frame_info: Dictionary = _frame_buffer[frame_key]
 	var total: int = frame_info["total"]
-	var monitor_id: int = frame_info["monitor_id"]
-	var frame_num: int = frame_info["frame_num"]
 
+	# Concatenate chunks in order
+	var frame_data := PackedByteArray()
+	for i in range(total):
+		if frame_info["chunks"].has(i):
+			frame_data.append_array(frame_info["chunks"][i])
+	_frame_buffer.erase(frame_key)
+	_deliver_frame(frame_info["monitor_id"], frame_info["frame_num"], frame_data)
+
+## Hand a complete frame (reassembled from UDP, or one TCP VIDEO_FRAME) to
+## the app and ACK it.
+func _deliver_frame(monitor_id: int, frame_num: int, frame_data: PackedByteArray) -> void:
 	# Detect a gap in completed frame numbers (a frame was lost or the host
 	# dropped it). For inter-frame codecs this breaks the decode chain, so we
 	# signal it; main.gd asks for a keyframe when a hardware decoder is active.
@@ -414,24 +457,17 @@ func _assemble_frame(frame_key: int) -> void:
 	else:
 		_last_completed_frame[monitor_id] = frame_num
 
-	# Concatenate chunks in order
-	var frame_data := PackedByteArray()
-	for i in range(total):
-		if frame_info["chunks"].has(i):
-			frame_data.append_array(frame_info["chunks"][i])
-
 	_frames_assembled += 1
 	# Log every large frame (potential IDR) and periodically for small ones.
 	if frame_data.size() > 50000:
-		print("[Net] LARGE frame assembled: mon=%d frame=%d chunks=%d size=%d" % [
-				monitor_id, frame_num, total, frame_data.size()])
+		print("[Net] LARGE frame assembled: mon=%d frame=%d size=%d" % [
+				monitor_id, frame_num, frame_data.size()])
 	elif _frames_assembled % 120 == 0:
 		print("[Net] frames assembled=%d last: mon=%d frame=%d size=%d buf_entries=%d" % [
 				_frames_assembled, monitor_id, frame_num, frame_data.size(), _frame_buffer.size()])
 
 	var size: Vector2i = _stream_size.get(monitor_id, Vector2i.ZERO)
 	video_frame_received.emit(monitor_id, frame_data, size.x, size.y)
-	_frame_buffer.erase(frame_key)
 
 	# Acknowledge so the host's flow control can drop frames when we lag
 	send_frame_ack(monitor_id, frame_num)

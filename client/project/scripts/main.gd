@@ -98,6 +98,10 @@ var _awaiting_idr: Dictionary = {}
 ## not re-send the same event every frame. See send_mouse_input().
 var _last_mouse_state: Array = []
 
+## Force video/audio over TCP whatever the address (--im2-usb). Normally
+## implied by _use_tcp_media(); this lets desktop tests exercise USB mode.
+var _force_tcp_media: bool = false
+
 # ---------------------------------------------------------------------------
 # Test/debug harness — driven from immersive2_config.cfg [test] section or
 # --im2-host=/--im2-port=/--im2-capture command-line args (adb am ... --esa
@@ -203,6 +207,16 @@ func _init_network() -> void:
 	network_client.audio_stream_started.connect(_on_audio_stream_started)
 	network_client.audio_stream_stopped.connect(_on_audio_stream_stopped)
 	network_client.frame_gap_detected.connect(_on_frame_gap)
+	network_client.audio_packet_received.connect(func(pkt: PackedByteArray):
+		if audio_receiver:
+			audio_receiver.parse_packet(pkt))
+
+## USB mode: on the headset, a loopback host address can only be the PC
+## reached through `adb reverse` (the host re-arms it every few seconds), and
+## that tunnel carries TCP only — so ask for video/audio in-band on TCP.
+## On desktop, loopback is a host on the same machine and UDP works.
+func _use_tcp_media() -> bool:
+	return _force_tcp_media or (OS.has_feature("android") and host_ip.begins_with("127."))
 
 func connect_to_host() -> void:
 	if current_state != State.DISCONNECTED:
@@ -210,7 +224,7 @@ func connect_to_host() -> void:
 	current_state = State.CONNECTING
 	_update_overlay_state()
 	print("[Immersive-2] Connecting to %s:%d..." % [host_ip, host_tcp_port])
-	network_client.connect_to_server(host_ip, host_tcp_port, host_udp_port)
+	network_client.connect_to_server(host_ip, host_tcp_port, host_udp_port, _use_tcp_media())
 	_should_reconnect = true
 
 func disconnect_from_host() -> void:
@@ -957,7 +971,9 @@ func _on_audio_stream_started(_sample_rate: int, _channels: int, audio_port: int
 		audio_receiver = preload("res://scripts/audio_receiver.gd").new()
 		audio_receiver.name = "AudioReceiver"
 		add_child(audio_receiver)
-	audio_receiver.start(host_ip, audio_port)
+	# USB mode: packets come on TCP (audio_packet_received); bind an ephemeral
+	# port rather than the real one, which nothing will ever send to.
+	audio_receiver.start(host_ip, 0 if _use_tcp_media() else audio_port)
 
 func _on_audio_stream_stopped() -> void:
 	if audio_receiver:
@@ -1347,6 +1363,7 @@ func _load_config() -> void:
 ##   am start -n com.immersive2.vrclient/com.godot.game.GodotAppLauncher \
 ##       --esa command_line "--im2-host=192.168.1.34,--im2-capture"
 ## Recognised: --im2-host=IP, --im2-port=N, --im2-codec=N, --im2-capture,
+## --im2-usb (video/audio over TCP, as over a USB cable),
 ## --im2-monitors=0,1,2 (monitors to stream once connected).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
@@ -1359,6 +1376,8 @@ func _apply_cmdline_overrides() -> void:
 			host_tcp_port = int(arg.get_slice("=", 1))
 		elif arg.begins_with("--im2-codec="):
 			stream_codec = _resolve_codec(int(arg.get_slice("=", 1)))
+		elif arg == "--im2-usb":
+			_force_tcp_media = true
 		elif arg == "--im2-capture":
 			_debug_capture = true
 		elif arg.begins_with("--im2-monitors="):

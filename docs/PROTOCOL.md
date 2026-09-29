@@ -18,6 +18,12 @@ The host's UDP socket is send-only and binds an ephemeral port; the client owns
 19801/19802 for receiving. (Binding them on the host too would stop a client on
 the same machine from receiving video at all.)
 
+**TCP media mode (USB).** A client that sets `HELLO_FLAG_TCP_MEDIA` in HELLO gets
+no UDP at all: video and audio arrive on the control socket as `VIDEO_FRAME`
+(0x50) and `AUDIO_DATA` (0x51) messages. This is how a headset on a USB cable
+works — the host runs `adb reverse tcp:19800 tcp:19800`, the headset connects to
+its own `127.0.0.1:19800`, and `adb reverse` can only tunnel TCP.
+
 ---
 
 ## Control Channel (TCP)
@@ -44,16 +50,17 @@ All control messages use a **TLV (Type-Length-Value)** framing:
 Sent immediately after TCP connection is established.
 
 ```
- 0         1                      33
- +---------+----------------------+
- | version | client_name[32]      |
- +---------+----------------------+
+ 0         1                      33       34
+ +---------+----------------------+--------+
+ | version | client_name[32]      | flags  |
+ +---------+----------------------+--------+
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | version | uint8 | Protocol version (currently 1) |
 | client_name | char[32] | UTF-8 null-terminated display name |
+| flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP |
 
 ---
 
@@ -347,6 +354,28 @@ rtt_ms = (Time.get_ticks_usec() - client_timestamp) / 1000.0
 
 ---
 
+### `0x50` VIDEO_FRAME — Host → Client (TCP media mode only)
+
+One whole encoded frame — the bytes its UDP chunks would reassemble to.
+
+| Field | Size | Description |
+|-------|------|-------------|
+| monitor_id | 1 byte | Which monitor this frame belongs to |
+| frame_number | 4 bytes LE | Same per-monitor numbering as the UDP video channel |
+| data | length − 5 bytes | Encoded frame |
+
+The client still sends `FRAME_ACK` per frame. A frame can be several MB, far
+above the 64 KB the host accepts for client → host messages.
+
+---
+
+### `0x51` AUDIO_DATA — Host → Client (TCP media mode only)
+
+Payload is exactly one audio packet as sent on the UDP audio channel (header +
+PCM, see below).
+
+---
+
 ### `0xFF` PING
 
 Empty payload. The receiver echoes it back — and both ends echo, so a PING
@@ -469,4 +498,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB) — additive, old clients are unaffected |

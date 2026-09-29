@@ -6,7 +6,9 @@ It connects from 127.0.0.2 so the UDP video stream can be received locally
 even though the host holds the wildcard bind on the video port.
 
 Exercises: HELLO handshake, MONITOR_LIST, MULTI_MONITOR_SELECT, video frame
-reassembly (all selected monitors) and STREAM_STOP on deselection.
+reassembly (all selected monitors) and STREAM_STOP on deselection. Then a
+second connection asks for HELLO_FLAG_TCP_MEDIA (the USB / adb-reverse mode)
+and checks every monitor's frames arrive in-band as VIDEO_FRAME messages.
 """
 import socket
 import struct
@@ -220,6 +222,30 @@ def main():
 
     s.close()
     print("[client] OK: handshake, multi-monitor streaming and stop all verified")
+    check_tcp_media(selection)
+
+def check_tcp_media(selection):
+    """USB mode: video comes on the TCP socket as VIDEO_FRAME (0x50) messages."""
+    time.sleep(0.5)  # let the host reap the previous client's streams
+    s = socket.create_connection((HOST, TCP_PORT), timeout=5)
+    name = b"SmokeTestUSB".ljust(32, b"\x00")
+    s.sendall(struct.pack("<BI", 0x01, 34) + bytes([1]) + name + bytes([0x01]))
+    send_multi_select(s, selection)
+    counts = {}
+    deadline = time.time() + 10
+    while time.time() < deadline and any(counts.get(m, 0) < 3 for m in selection):
+        mtype, payload = recv_msg(s)
+        if mtype == 0x50:
+            mon, fnum = struct.unpack_from("<BI", payload)
+            if payload[5:7] != b"\xff\xd8":  # default codec is MJPEG
+                print(f"[client] FAIL: VIDEO_FRAME mon={mon} is not a JPEG")
+                sys.exit(1)
+            counts[mon] = counts.get(mon, 0) + 1
+    s.close()
+    if any(counts.get(m, 0) < 3 for m in selection):
+        print(f"[client] FAIL: TCP media frames per monitor: {counts}")
+        sys.exit(1)
+    print(f"[client] OK: video over TCP (USB mode) for all monitors: {counts}")
 
 if __name__ == "__main__":
     main()

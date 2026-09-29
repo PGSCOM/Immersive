@@ -89,6 +89,7 @@ var _lbl_status            : Label
 var _lbl_ping              : Label
 var _input_ip              : LineEdit
 var _btn_connect           : Button
+var _btn_usb               : Button
 var _monitor_list          : VBoxContainer
 var _lbl_title             : Label
 var _chk_curved            : CheckBox
@@ -177,6 +178,7 @@ func set_state(state: ConnectionState) -> void:
 	_input_ip.focus_mode = Control.FOCUS_ALL if can_edit else Control.FOCUS_NONE
 	_mon_hdr.visible = _is_connected()
 	_rebuild_monitor_list()
+	_btn_usb.disabled = not can_edit
 	match state:
 		ConnectionState.DISCONNECTED:
 			_btn_connect.text     = "Connect"
@@ -533,10 +535,22 @@ func _build_ui() -> void:
 	_kbd_container.visible = false
 	vbox.add_child(_kbd_container)
 
+	var connect_row := HBoxContainer.new()
+	connect_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(connect_row)
 	_btn_connect = Button.new()
 	_btn_connect.text = "Connect"
+	_btn_connect.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_btn_connect.pressed.connect(_on_connect_pressed)
-	vbox.add_child(_btn_connect)
+	connect_row.add_child(_btn_connect)
+	# Headset on a USB cable: the host's `adb reverse` makes the PC answer on
+	# the headset's own 127.0.0.1 (main.gd then streams over TCP).
+	_btn_usb = Button.new()
+	_btn_usb.text = "USB"
+	_btn_usb.tooltip_text = "Connect over the USB cable (needs adb on the PC)"
+	_btn_usb.custom_minimum_size = Vector2(120, 0)
+	_btn_usb.pressed.connect(_on_usb_pressed)
+	connect_row.add_child(_btn_usb)
 
 	# ── Display section ──────────────────────────────────────────────────
 	_add_section_separator(vbox, "Display")
@@ -1095,6 +1109,10 @@ func _on_connect_pressed() -> void:
 		connect_requested.emit(_host_ip, _tcp_port, _udp_port)
 	else:
 		connect_requested.emit("", 0, 0)
+
+func _on_usb_pressed() -> void:
+	_input_ip.text = "127.0.0.1"
+	_on_connect_pressed()
 
 func _on_monitor_selected(monitor_id: int) -> void:
 	# Keep the overlay open: selection toggles screens on/off, and the list
