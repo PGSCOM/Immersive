@@ -57,8 +57,12 @@ func _update_pointer() -> void:
 
 	# When the user is tracking bare hands (no controllers), hand_input.gd owns
 	# the pointer. Bail out so an untracked controller's stale pose can't fight
-	# the hand cursor over the same monitor.
-	if _hands_active():
+	# the hand cursor over the same monitor. Its laser goes too, or a second
+	# beam would hang at the controller's last pose.
+	var hands := _hands_active()
+	if raycast_origin:
+		raycast_origin.visible = not hands
+	if hands:
 		return
 
 	var source_transform: Transform3D
@@ -173,7 +177,9 @@ func _set_trigger_state(pressed: bool) -> void:
 		return
 	_trigger_pressed = pressed
 	print("[VRInput] Trigger %s" % ["DOWN" if pressed else "UP"])
-	if not main_scene:
+	# Runtimes may map a hand pinch onto the trigger; hand_input.gd already
+	# clicks for it, and this path would click at the stale controller spot.
+	if not main_scene or _hands_active():
 		return
 	if _kbd_hovered:
 		return  # the keyboard consumes the press in _update_pointer()
@@ -190,6 +196,8 @@ func _set_grip_state(pressed: bool) -> void:
 		return
 	_grip_pressed = pressed
 	print("[VRInput] Grip %s" % ["DOWN" if pressed else "UP"])
+	if _hands_active():
+		return
 	if pressed:
 		if _ui_hovered and main_scene and main_scene.has_method("start_ui_drag"):
 			# Grab the overlay (it is otherwise static) instead of right-clicking.
@@ -220,10 +228,7 @@ func _hands_active() -> bool:
 		or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
 
 func _query_tracking_active() -> bool:
-	var xr_tracker := XRServer.get_tracker(controller.tracker)
-	if xr_tracker and xr_tracker.has_method("get_has_tracking_data"):
-		return xr_tracker.get_has_tracking_data()
-	return false
+	return controller.get_has_tracking_data()
 
 func _update_tracking_debug() -> void:
 	var tracking_active := _query_tracking_active()

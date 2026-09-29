@@ -1,7 +1,7 @@
 ## Hand-tracking input for Immersive-2 (Pico 4 + SteamVR + Quest).
 ##
 ## Lets the user drive the virtual desktop with bare hands — no controllers:
-##   • Right hand — index-finger ray pointer; pinch (thumb + index) = left click,
+##   • Right hand — point with the arm; pinch (thumb + index) = left click,
 ##     hold-and-move = click-drag. Works on both the streamed monitor panels and
 ##     the in-VR overlay menu, with a visible laser + cursor for aiming feedback.
 ##   • Left hand  — pinch-and-hold (~0.65 s) toggles the overlay menu.
@@ -14,18 +14,29 @@
 ## Requirements:
 ##   • project setting  xr/openxr/extensions/hand_tracking = true  (project.godot)
 ##   • Pico:  <meta-data android:name="handtracking" android:value="1"/> in the
-##            Android manifest (export_presets.cfg → gradle_build/manifest_additions)
+##            Android manifest (added by addons/im2_decoder/im2_decoder.gd)
 ##   • Quest: export preset xr_features/hand_tracking >= 1
 
 extends Node
 
-const PINCH_DOWN_THRESHOLD := 0.72
-const PINCH_UP_THRESHOLD := 0.42
-const MIN_PINCH_DISTANCE_M := 0.008
-const MAX_PINCH_DISTANCE_M := 0.045
+## Thumb-tip to index-tip distance that starts a pinch, and the wider one that
+## ends it (the gap keeps a half-closed pinch from flickering).
+const PINCH_PRESS_M := 0.02
+const PINCH_RELEASE_M := 0.035
 const OVERLAY_TOGGLE_HOLD_S := 0.65
 const KEYBOARD_TOGGLE_HOLD_S := 1.6
-const RAY_SMOOTHING := 0.5            ## 0 = raw, →1 = heavier low-pass on the ray
+## The ray runs from an estimated shoulder (head + these offsets) through the
+## index knuckle, like the Quest / Pico system pointer. It follows the arm, not
+## the finger, so curling the index into a pinch does not move it.
+const SHOULDER_DOWN_M := 0.18
+const SHOULDER_SIDE_M := 0.17
+## One Euro filter on the ray direction: steady when the hand is still, little
+## lag when it moves fast. Raise MIN_CUTOFF if it feels slow, lower it if jittery.
+const FILTER_MIN_CUTOFF := 1.0
+const FILTER_BETA := 4.0
+## A pinch holds the ray still until the hand moves this far (~1.5°), so a click
+## never turns into a tiny drag (breaks double-clicks, selects text).
+const CLICK_SLOP_RAD := 0.026
 const MAX_RAY_LENGTH := 8.0
 
 @onready var main_scene: Node = get_node_or_null("/root/Main")
@@ -35,17 +46,22 @@ var _right_hand_tracker: XRHandTracker = null
 var _left_hand_tracker: XRHandTracker = null
 
 # Right-hand pointer state.
-var _pinch_active: bool = false
+var _pinch_active: bool = false     # button held down on a target
+var _right_pinching: bool = false   # fingers pinched (with hysteresis)
+var _right_tracked: bool = false
+var _press_origin: Vector3 = Vector3.ZERO
+var _press_dir: Vector3 = Vector3.FORWARD
+var _dragging: bool = false
 var _on_overlay: bool = false
 var _last_monitor_id: int = 0
 var _last_pixel: Vector2i = Vector2i.ZERO
 
-# Ray low-pass filter (optical hand tracking is jittery).
-var _have_smoothed: bool = false
-var _smooth_origin: Vector3 = Vector3.ZERO
-var _smooth_dir: Vector3 = Vector3.FORWARD
+# One Euro filter state for the ray direction (ZERO = start over).
+var _dir_filtered: Vector3 = Vector3.ZERO
+var _dir_rate: Vector3 = Vector3.ZERO
 
 # Left-hand overlay-toggle state.
+var _left_pinching: bool = false
 var _left_hold_time: float = 0.0
 var _left_toggle_latched: bool = false
 var _left_kbd_latched: bool = false
@@ -66,9 +82,14 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	_refresh_trackers()
 
-	if _is_optical_hand_tracking(_right_hand_tracker):
-		_process_right_hand_pointer()
+	var tracked := _is_optical_hand_tracking(_right_hand_tracker)
+	if tracked != _right_tracked:
+		_right_tracked = tracked
+		print("[HandInput] Right hand %s" % ["tracked" if tracked else "lost"])
+	if tracked:
+		_process_right_hand_pointer(delta)
 	else:
+		_right_pinching = false
 		_end_pinch_if_active()
 		_hide_pointer_visual()
 
@@ -97,22 +118,33 @@ func _is_optical_hand_tracking(tracker: XRHandTracker) -> bool:
 # Right-hand pointer
 # ---------------------------------------------------------------------------
 
-func _process_right_hand_pointer() -> void:
+func _process_right_hand_pointer(delta: float) -> void:
 	var ray := _compute_hand_ray(_right_hand_tracker)
 	if not ray.get("valid", false):
+		_right_pinching = false
 		_end_pinch_if_active()
 		_hide_pointer_visual()
 		return
 
 	var origin: Vector3 = ray["origin"]
-	var direction: Vector3 = ray["direction"]
-	var smoothed := _smooth_ray(origin, direction)
-	origin = smoothed[0]
-	direction = smoothed[1]
+	var direction := _filter_direction(ray["direction"], delta)
 
-	var pinch_strength := _compute_pinch_strength(_right_hand_tracker)
-	var threshold := PINCH_UP_THRESHOLD if _pinch_active else PINCH_DOWN_THRESHOLD
-	var should_press := pinch_strength >= threshold
+	var should_press := _is_pinching(_right_hand_tracker, _right_pinching)
+	if should_press != _right_pinching:
+		print("[HandInput] Pinch %s" % ["DOWN" if should_press else "UP"])
+		if should_press:
+			_press_origin = origin
+			_press_dir = direction
+			_dragging = false
+	# Hold the ray where the pinch started (release frame included) until the
+	# hand clearly moves away: that is a drag, not a shaky click.
+	if (should_press or _right_pinching) and not _dragging:
+		if direction.angle_to(_press_dir) > CLICK_SLOP_RAD:
+			_dragging = true
+		else:
+			origin = _press_origin
+			direction = _press_dir
+	_right_pinching = should_press
 
 	# 1) Overlay menu takes priority so the bare hands can connect/configure.
 	if main_scene and main_scene.has_method("get_ui_hit_from_ray"):
@@ -200,13 +232,14 @@ func _end_pinch_if_active() -> void:
 
 func _process_left_hand_overlay_toggle(delta: float) -> void:
 	if not _is_optical_hand_tracking(_left_hand_tracker):
+		_left_pinching = false
 		_left_hold_time = 0.0
 		_left_toggle_latched = false
 		_left_kbd_latched = false
 		return
 
-	var pinch_strength := _compute_pinch_strength(_left_hand_tracker)
-	if pinch_strength >= PINCH_DOWN_THRESHOLD:
+	_left_pinching = _is_pinching(_left_hand_tracker, _left_pinching)
+	if _left_pinching:
 		_left_hold_time += delta
 		if _left_hold_time >= OVERLAY_TOGGLE_HOLD_S and not _left_toggle_latched:
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
@@ -222,7 +255,7 @@ func _process_left_hand_overlay_toggle(delta: float) -> void:
 			if main_scene and main_scene.has_method("toggle_virtual_keyboard"):
 				main_scene.toggle_virtual_keyboard()
 			_left_kbd_latched = true
-	elif pinch_strength <= PINCH_UP_THRESHOLD:
+	else:
 		_left_hold_time = 0.0
 		_left_toggle_latched = false
 		_left_kbd_latched = false
@@ -232,53 +265,50 @@ func _process_left_hand_overlay_toggle(delta: float) -> void:
 # ---------------------------------------------------------------------------
 
 func _compute_hand_ray(tracker: XRHandTracker) -> Dictionary:
-	if not _joint_has_valid_position(tracker, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP):
+	var knuckle_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL
+	var head := get_viewport().get_camera_3d()
+	if head == null or not _joint_has_valid_position(tracker, knuckle_joint):
 		return {"valid": false}
 
-	var tip := _joint_world_position(tracker, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP)
-	var base_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL
-	var base := _joint_world_position(tracker, base_joint)
-
-	var direction := tip - base
-	if direction.length() < 0.001 and _joint_has_valid_position(tracker, XRHandTracker.HAND_JOINT_WRIST):
-		var wrist := _joint_world_position(tracker, XRHandTracker.HAND_JOINT_WRIST)
-		direction = tip - wrist
-
-	if direction.length() < 0.001:
+	var knuckle := _joint_world_position(tracker, knuckle_joint)
+	var right := head.global_basis.x
+	right.y = 0.0
+	var shoulder := head.global_position + Vector3.DOWN * SHOULDER_DOWN_M \
+		+ right.normalized() * SHOULDER_SIDE_M
+	var direction := knuckle - shoulder
+	if direction.length() < 0.01:
 		return {"valid": false}
 
 	return {
 		"valid": true,
-		"origin": tip,
+		"origin": knuckle,
 		"direction": direction.normalized()
 	}
 
-## Exponential low-pass on origin (lerp) and direction (slerp) to tame the
-## jitter inherent to camera-based hand tracking. Returns [origin, direction].
-func _smooth_ray(origin: Vector3, direction: Vector3) -> Array:
-	if _have_smoothed:
-		origin = _smooth_origin.lerp(origin, 1.0 - RAY_SMOOTHING)
-		direction = _smooth_dir.slerp(direction, 1.0 - RAY_SMOOTHING).normalized()
-	_smooth_origin = origin
-	_smooth_dir = direction
-	_have_smoothed = true
-	return [origin, direction]
+## One Euro filter (Casiez et al. 2012) on the ray direction: the cutoff rises
+## with speed, so slow aiming is smoothed hard and fast sweeps barely lag.
+func _filter_direction(direction: Vector3, delta: float) -> Vector3:
+	if _dir_filtered == Vector3.ZERO or delta <= 0.0:
+		_dir_filtered = direction
+		_dir_rate = Vector3.ZERO
+		return direction
+	_dir_rate = _dir_rate.lerp((direction - _dir_filtered) / delta, _euro_alpha(1.0, delta))
+	var cutoff := FILTER_MIN_CUTOFF + FILTER_BETA * _dir_rate.length()
+	_dir_filtered = _dir_filtered.lerp(direction, _euro_alpha(cutoff, delta)).normalized()
+	return _dir_filtered
 
-func _compute_pinch_strength(tracker: XRHandTracker) -> float:
-	if not _joint_has_valid_position(tracker, XRHandTracker.HAND_JOINT_THUMB_TIP):
-		return 0.0
-	if not _joint_has_valid_position(tracker, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP):
-		return 0.0
+static func _euro_alpha(cutoff: float, delta: float) -> float:
+	return 1.0 / (1.0 + 1.0 / (TAU * cutoff * delta))
 
-	var thumb_tip := _joint_world_position(tracker, XRHandTracker.HAND_JOINT_THUMB_TIP)
-	var index_tip := _joint_world_position(tracker, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP)
-	var dist := thumb_tip.distance_to(index_tip)
-
-	var normalized: float = 1.0 - clampf(
-		(dist - MIN_PINCH_DISTANCE_M) / (MAX_PINCH_DISTANCE_M - MIN_PINCH_DISTANCE_M),
-		0.0,
-		1.0)
-	return normalized
+## Thumb and index tips together, with hysteresis on `was_pinching`.
+func _is_pinching(tracker: XRHandTracker, was_pinching: bool) -> bool:
+	var thumb := XRHandTracker.HAND_JOINT_THUMB_TIP
+	var index := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	if not (_joint_has_valid_position(tracker, thumb) and _joint_has_valid_position(tracker, index)):
+		return false
+	var dist := tracker.get_hand_joint_transform(thumb).origin.distance_to(
+		tracker.get_hand_joint_transform(index).origin)
+	return dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M)
 
 func _joint_has_valid_position(tracker: XRHandTracker, joint: int) -> bool:
 	if not is_instance_valid(tracker):
@@ -355,4 +385,4 @@ func _hide_pointer_visual() -> void:
 		_laser.visible = false
 	if is_instance_valid(_cursor):
 		_cursor.visible = false
-	_have_smoothed = false
+	_dir_filtered = Vector3.ZERO

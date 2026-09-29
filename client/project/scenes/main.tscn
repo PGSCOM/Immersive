@@ -45,6 +45,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.25, 1.25, -0.4)
 tracker = &"left_hand"
 pose = &"aim"
+show_when_tracked = true
 
 [node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/LeftController" unique_id=1585038273]
 transform = Transform3D(1, 0, 0, 0, 0.76604456, -0.64278764, 0, 0.64278764, 0.76604456, 0, 0, 0.1)
@@ -55,6 +56,7 @@ mesh = SubResource("BoxMesh_controller")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.25, 1.25, -0.4)
 tracker = &"right_hand"
 pose = &"aim"
+show_when_tracked = true
 
 [node name="ControllerVisual" type="MeshInstance3D" parent="XROrigin3D/RightController" unique_id=1684311371]
 transform = Transform3D(1, 0, 0, 0, 0.76604456, -0.64278764, 0, 0.64278764, 0.76604456, 0, 0, 0.1)
@@ -67,6 +69,7 @@ script = ExtResource("3_input")
 [node name="RightAim" type="XRController3D" parent="XROrigin3D" unique_id=638144865]
 tracker = &"right_hand"
 pose = &"aim"
+show_when_tracked = true
 
 [node name="RaycastOrigin" type="Node3D" parent="XROrigin3D/RightAim" unique_id=756867234]
 transform = Transform3D(1, 0, 0, 0, 0.76604444, -0.6427876, 0, 0.6427876, 0.76604444, 0, 0, 0.1)

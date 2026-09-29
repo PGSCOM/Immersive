@@ -16,6 +16,8 @@ Checks, in order:
   5. Ctrl+C on the host exits promptly.
   6. The in-VR menu works with pointer clicks (IP keypad, layout), via
      client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
+  7. Hand tracking: a pinch clicks where the hand points, no drift or drag,
+     via client/tests/hand_input_test.gd (fake tracked hand, headless).
 """
 import os
 import re
@@ -137,24 +139,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/6 connect, stream and decode 3 monitors")
+    step("1/7 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/6 host killed -> client reconnects to a new host")
+    step("2/7 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/6 host frozen -> client times out, then recovers")
+    step("3/7 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/6 host sockets use TCP keepalive")
+    step("4/7 host sockets use TCP keepalive")
     if shutil.which("ss"):
         out = subprocess.run(["ss", "-tno", "state", "established", "( sport = :19800 )"],
                              capture_output=True, text=True).stdout
@@ -163,7 +165,7 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/6 Ctrl+C -> host exits")
+    step("5/7 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
@@ -177,7 +179,7 @@ def main():
         p.stop()
     procs.clear()
 
-    step("6/6 in-VR menu: IP keypad and layout")
+    step("6/7 in-VR menu: IP keypad and layout")
     if shutil.which("xvfb-run"):
         menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
                              "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
@@ -187,6 +189,14 @@ def main():
         menu.stop()
     else:
         print("      (skipped: `xvfb-run` not available)")
+
+    step("7/7 hand tracking: pinch clicks where the hand points")
+    hand = Proc("hand", ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
+                         "--path", CLIENT_DIR,
+                         "-s", os.path.join(ROOT, "client", "tests", "hand_input_test.gd")])
+    procs.append(hand)
+    hand.wait_for(r"RESULT fails=0", 60)
+    hand.stop()
     print("\nOK: end-to-end host <-> client checks passed")
 
 
