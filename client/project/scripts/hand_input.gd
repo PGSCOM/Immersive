@@ -23,6 +23,10 @@ extends Node
 ## ends it (the gap keeps a half-closed pinch from flickering).
 const PINCH_PRESS_M := 0.02
 const PINCH_RELEASE_M := 0.035
+## The pinch must look open this long before it lets go. Pico drops or jolts
+## the finger tips for a frame or two mid-pinch (the thumb hides behind the
+## index), which used to release the click after ~30 ms and re-press it.
+const PINCH_RELEASE_HOLD_S := 0.12
 const OVERLAY_TOGGLE_HOLD_S := 0.65
 const KEYBOARD_TOGGLE_HOLD_S := 1.6
 ## The ray runs from an estimated shoulder (head + these offsets) through the
@@ -62,6 +66,7 @@ var _dir_rate: Vector3 = Vector3.ZERO
 
 # Left-hand overlay-toggle state.
 var _left_pinching: bool = false
+var _open_s: Dictionary = {}  # tracker -> seconds its pinch has looked open
 var _left_hold_time: float = 0.0
 var _left_toggle_latched: bool = false
 var _left_kbd_latched: bool = false
@@ -129,9 +134,10 @@ func _process_right_hand_pointer(delta: float) -> void:
 	var origin: Vector3 = ray["origin"]
 	var direction := _filter_direction(ray["direction"], delta)
 
-	var should_press := _is_pinching(_right_hand_tracker, _right_pinching)
+	var should_press := _is_pinching(_right_hand_tracker, _right_pinching, delta)
 	if should_press != _right_pinching:
-		print("[HandInput] Pinch %s" % ["DOWN" if should_press else "UP"])
+		print("[HandInput] Pinch %s (%d mm)" % ["DOWN" if should_press else "UP",
+			_pinch_distance(_right_hand_tracker) * 1000.0])
 		if should_press:
 			_press_origin = origin
 			_press_dir = direction
@@ -238,7 +244,7 @@ func _process_left_hand_overlay_toggle(delta: float) -> void:
 		_left_kbd_latched = false
 		return
 
-	_left_pinching = _is_pinching(_left_hand_tracker, _left_pinching)
+	_left_pinching = _is_pinching(_left_hand_tracker, _left_pinching, delta)
 	if _left_pinching:
 		_left_hold_time += delta
 		if _left_hold_time >= OVERLAY_TOGGLE_HOLD_S and not _left_toggle_latched:
@@ -300,15 +306,26 @@ func _filter_direction(direction: Vector3, delta: float) -> Vector3:
 static func _euro_alpha(cutoff: float, delta: float) -> float:
 	return 1.0 / (1.0 + 1.0 / (TAU * cutoff * delta))
 
-## Thumb and index tips together, with hysteresis on `was_pinching`.
-func _is_pinching(tracker: XRHandTracker, was_pinching: bool) -> bool:
+## Thumb and index tips together, with hysteresis on `was_pinching` and a
+## short hold before letting go (see PINCH_RELEASE_HOLD_S).
+func _is_pinching(tracker: XRHandTracker, was_pinching: bool, delta: float) -> bool:
+	var dist := _pinch_distance(tracker)
+	if dist < 0.0:
+		return was_pinching  # tips not tracked this frame: keep what we had
+	if dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M):
+		_open_s[tracker] = 0.0
+		return true
+	_open_s[tracker] = _open_s.get(tracker, 0.0) + delta
+	return was_pinching and _open_s[tracker] < PINCH_RELEASE_HOLD_S
+
+## Thumb-tip to index-tip distance in metres, or -1 when either is not tracked.
+func _pinch_distance(tracker: XRHandTracker) -> float:
 	var thumb := XRHandTracker.HAND_JOINT_THUMB_TIP
 	var index := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
 	if not (_joint_has_valid_position(tracker, thumb) and _joint_has_valid_position(tracker, index)):
-		return false
-	var dist := tracker.get_hand_joint_transform(thumb).origin.distance_to(
+		return -1.0
+	return tracker.get_hand_joint_transform(thumb).origin.distance_to(
 		tracker.get_hand_joint_transform(index).origin)
-	return dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M)
 
 func _joint_has_valid_position(tracker: XRHandTracker, joint: int) -> bool:
 	if not is_instance_valid(tracker):

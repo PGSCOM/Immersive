@@ -98,9 +98,23 @@ func _run() -> void:
 	await _frames(3)
 	check(_last()[2] == 1, "half-open pinch (25 mm) still holds the click")
 
+	# The glitches seen on a real Pico 4 mid-pinch: tips jolt apart for two
+	# frames, or drop out of tracking (thumb hidden behind the index).
 	mark = main.sent.size()
 	_pose(KNUCKLE, 0.08)
-	await _frames(3)
+	await _frames(2)
+	_pose(KNUCKLE, 0.005)
+	await _frames(2)
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_THUMB_TIP, 0)
+	await _frames(20)
+	_pose(KNUCKLE, 0.005)
+	await _frames(2)
+	check(main.sent.slice(mark).all(func(e): return e[2] == 1),
+		"2-frame tracking glitches and a hidden thumb do not release the click")
+
+	mark = main.sent.size()
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
 	var release: Array = main.sent.slice(mark).filter(func(e): return e[2] == 0)
 	check(release.slice(0, 1) == [[aim[0], aim[1], 0]],
 		"release lands on the press spot -> %s" % [release.slice(0, 1)])
@@ -118,7 +132,7 @@ func _run() -> void:
 	check(_last()[2] == 1 and _last()[0] > aim[0] + 200, "pinch and move drags -> %s" % [_last()])
 
 	hand.has_tracking_data = false
-	await _frames(2)
+	await _frames(3)
 	check(_last()[2] == 0, "losing the hand releases the click")
 
 	XRServer.remove_tracker(hand)
