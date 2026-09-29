@@ -16,6 +16,8 @@ func send_keyboard_pointer(_o, _d, _p): return false
 func get_panel_hit_from_ray(o: Vector3, d: Vector3) -> Dictionary:
 	var t := (-1.5 - o.z) / d.z
 	var p := o + d * t
+	if absf(p.x) > 1.0:
+		return {}
 	return {"valid": true, "panel": self, "monitor_id": 0, "distance": t,
 		"uv": Vector2((p.x + 1.0) / 2.0, (2.2 - p.y) / 1.6)}
 func uv_to_pixel(uv: Vector2) -> Vector2i: return Vector2i(uv * Vector2(1920, 1080))
@@ -28,6 +30,7 @@ const KNUCKLE := Vector3(0.17, 1.42, -0.45)
 var main: Node3D
 var hand := XRHandTracker.new()
 var fails := 0
+var input: Node
 
 func _initialize() -> void:
 	var script := GDScript.new()
@@ -45,7 +48,8 @@ func _initialize() -> void:
 	hand.has_tracking_data = true
 	hand.hand_tracking_source = XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
 	XRServer.add_tracker(hand)
-	main.add_child(load("res://scripts/hand_input.gd").new())
+	input = load("res://scripts/hand_input.gd").new()
+	main.add_child(input)
 	_run()
 
 func check(cond: bool, what: String) -> void:
@@ -130,6 +134,13 @@ func _run() -> void:
 		await _frames(2)
 	await _frames(20)
 	check(_last()[2] == 1 and _last()[0] > aim[0] + 200, "pinch and move drags -> %s" % [_last()])
+
+	_pose(KNUCKLE + Vector3(0.5, 0, 0), 0.08)
+	await _frames(40)
+	check(not input._laser.visible, "no laser when the hand points off the panel")
+	_pose(KNUCKLE, 0.08)
+	await _frames(40)
+	check(input._laser.visible, "laser back when it points at the panel")
 
 	hand.has_tracking_data = false
 	await _frames(3)

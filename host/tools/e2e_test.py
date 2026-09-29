@@ -17,7 +17,8 @@ Checks, in order:
   6. The in-VR menu works with pointer clicks (IP keypad, layout), via
      client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
   7. Hand tracking: a pinch clicks where the hand points, no drift or drag,
-     via client/tests/hand_input_test.gd (fake tracked hand, headless).
+     via client/tests/hand_input_test.gd (fake tracked hand, headless); and a
+     controller left still hides, via client/tests/controller_idle_test.gd.
 """
 import os
 import re
@@ -190,13 +191,13 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("7/7 hand tracking: pinch clicks where the hand points")
-    hand = Proc("hand", ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
-                         "--path", CLIENT_DIR,
-                         "-s", os.path.join(ROOT, "client", "tests", "hand_input_test.gd")])
-    procs.append(hand)
-    hand.wait_for(r"RESULT fails=0", 60)
-    hand.stop()
+    step("7/7 hand tracking and idle controllers")
+    for test in ("hand_input_test.gd", "controller_idle_test.gd"):
+        t = Proc(test, ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
+                        "--path", CLIENT_DIR, "-s", os.path.join(ROOT, "client", "tests", test)])
+        procs.append(t)
+        t.wait_for(r"RESULT fails=0", 60)
+        t.stop()
     print("\nOK: end-to-end host <-> client checks passed")
 
 

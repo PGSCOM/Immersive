@@ -391,7 +391,7 @@ func _update_pointer_visual(origin: Vector3, direction: Vector3, distance: float
 		up = Vector3.RIGHT
 	var oriented := Basis.looking_at(direction, up)  # local -Z follows `direction`
 	_laser.transform = Transform3D(oriented.scaled(Vector3(1.0, 1.0, length)), mid)
-	_laser.visible = true
+	_laser.visible = hit  # a beam into empty space is just noise
 
 	_cursor.visible = hit
 	if hit:

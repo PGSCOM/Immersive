@@ -8,6 +8,11 @@ const TRIGGER_RELEASE_THRESHOLD := 0.35
 const GRIP_PRESS_THRESHOLD := 0.55
 const GRIP_RELEASE_THRESHOLD := 0.35
 const THUMBSTICK_SCROLL_THRESHOLD := 0.1
+## A controller left still this long (put down on the desk) disappears, laser
+## included, and stops driving the pointer until it moves again.
+const IDLE_HIDE_S := 3.0
+const IDLE_MOVE_M := 0.01
+const IDLE_TURN_RAD := 0.05
 
 @onready var controller: XRController3D = get_parent() as XRController3D
 @onready var main_scene: Node3D = get_node_or_null("/root/Main")
@@ -15,6 +20,7 @@ const THUMBSTICK_SCROLL_THRESHOLD := 0.1
 ## Raycast for pointer interaction (siblings under XROrigin3D).
 @onready var raycast: RayCast3D = get_node_or_null("/root/Main/XROrigin3D/RightAim/RaycastOrigin/RayCast3D")
 @onready var raycast_origin: Node3D = get_node_or_null("/root/Main/XROrigin3D/RightAim/RaycastOrigin")
+@onready var left_controller: XRController3D = get_node_or_null("/root/Main/XROrigin3D/LeftController")
 
 var active_monitor_id: int = 0
 var _trigger_pressed: bool = false
@@ -28,6 +34,8 @@ var _last_tracking_active: bool = false
 var _ui_hovered: bool = false
 var _ui_dragging: bool = false
 var _kbd_hovered: bool = false
+var _idle: Dictionary = {}  # controller -> [transform when it last moved, seconds still]
+var _right_idle: bool = false
 
 func _is_trigger_action(name: String) -> bool:
 	return name == "trigger_click" or name == "trigger_value" or name == "trigger" or name == "select" or name == "select_click" or name == "select_value"
@@ -48,21 +56,27 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	_update_tracking_debug()
+	_right_idle = _update_idle(controller, _delta)
+	if left_controller:
+		_update_idle(left_controller, _delta)
 	_update_pointer()
 	_update_scale(_delta)
 
 func _update_pointer() -> void:
-	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
-		return
-
 	# When the user is tracking bare hands (no controllers), hand_input.gd owns
 	# the pointer. Bail out so an untracked controller's stale pose can't fight
 	# the hand cursor over the same monitor. Its laser goes too, or a second
 	# beam would hang at the controller's last pose.
 	var hands := _hands_active()
 	if raycast_origin:
-		raycast_origin.visible = not hands
-	if hands:
+		raycast_origin.visible = not hands and not _right_idle
+	if hands or _right_idle:
+		_ui_hovered = false
+		_kbd_hovered = false
+		_active_panel = null
+		_last_uv = Vector2(-1, -1)
+		return
+	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
 		return
 
 	var source_transform: Transform3D
@@ -130,7 +144,26 @@ func _update_scale(delta: float) -> void:
 		if _active_panel and _active_panel.has_method("scale_panel"):
 			_active_panel.scale_panel(delta_scale)
 
+## Tracks how long `c` has sat still and hides its model once it counts as put
+## down. Returns true while idle.
+func _update_idle(c: XRController3D, delta: float) -> bool:
+	var now := c.global_transform
+	var state: Array = _idle.get(c, [now, 0.0])
+	var then: Transform3D = state[0]
+	if now.origin.distance_to(then.origin) > IDLE_MOVE_M or \
+			now.basis.get_rotation_quaternion().angle_to(then.basis.get_rotation_quaternion()) > IDLE_TURN_RAD:
+		state = [now, 0.0]
+	else:
+		state[1] += delta
+	_idle[c] = state
+	var idle: bool = state[1] >= IDLE_HIDE_S
+	var visual := c.get_node_or_null("ControllerVisual") as Node3D
+	if visual:
+		visual.visible = not idle
+	return idle
+
 func _on_button_pressed(button_name: String) -> void:
+	_idle.erase(controller)  # a press wakes a still controller
 	if _is_trigger_action(button_name):
 		_set_trigger_state(true)
 		return
