@@ -14,6 +14,8 @@ Checks, in order:
   4. The host turns on TCP keepalive, so a headset that vanishes without
      closing the socket (Wi-Fi drop, battery) does not leave a ghost client.
   5. Ctrl+C on the host exits promptly.
+  6. The in-VR menu works with pointer clicks (IP keypad, layout), via
+     client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
 """
 import os
 import re
@@ -135,24 +137,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/5 connect, stream and decode 3 monitors")
+    step("1/6 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/5 host killed -> client reconnects to a new host")
+    step("2/6 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/5 host frozen -> client times out, then recovers")
+    step("3/6 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/5 host sockets use TCP keepalive")
+    step("4/6 host sockets use TCP keepalive")
     if shutil.which("ss"):
         out = subprocess.run(["ss", "-tno", "state", "established", "( sport = :19800 )"],
                              capture_output=True, text=True).stdout
@@ -161,7 +163,7 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/5 Ctrl+C -> host exits")
+    step("5/6 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
@@ -171,9 +173,20 @@ def main():
     errors = [l for l in client.lines if "SCRIPT ERROR" in l]
     if errors:
         fail("client raised script errors:\n" + "\n".join(errors[:10]))
-
     for p in procs:
         p.stop()
+    procs.clear()
+
+    step("6/6 in-VR menu: IP keypad and layout")
+    if shutil.which("xvfb-run"):
+        menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
+                             "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
+                             "-s", os.path.join(ROOT, "client", "tests", "overlay_test.gd")])
+        procs.append(menu)
+        menu.wait_for(r"RESULT fails=0", 60)
+        menu.stop()
+    else:
+        print("      (skipped: `xvfb-run` not available)")
     print("\nOK: end-to-end host <-> client checks passed")
 
 

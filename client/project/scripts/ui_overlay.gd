@@ -59,7 +59,6 @@ var _foveation_strength    : float           = 0.55
 var _passthrough_enabled   : bool            = false
 var _passthrough_supported : bool            = true
 var _last_pointer_uv       : Vector2         = Vector2(0.5, 0.5)
-var _kbd_visible           : bool            = false
 
 # Grab-to-move state (the overlay stays static until grabbed with the grip).
 var _is_dragging           : bool            = false
@@ -102,7 +101,9 @@ var _chk_passthrough       : CheckBox
 var _btn_workspace_save    : Button
 var _btn_workspace_restore : Button
 var _btn_keyboard          : Button
+var _mon_hdr               : HBoxContainer  ## Save/Restore/Keyboard: only useful while connected
 var _kbd_container         : VBoxContainer  ## In-viewport numeric keyboard
+var _lbl_ip_error          : Label
 
 # Stream quality controls
 var _codec_buttons         : Dictionary = {}  ## value -> Button
@@ -152,6 +153,7 @@ func toggle_visibility() -> void:
 		_reposition_in_front_of_camera()
 	else:
 		hide()
+		_set_kbd_visible(false)
 	# A SubViewport is not a Node3D, so hiding this node does NOT stop it
 	# rendering: the 900x880 UI kept being redrawn every frame on the headset
 	# GPU for an overlay nobody was looking at.
@@ -164,6 +166,17 @@ func set_state(state: ConnectionState) -> void:
 	_update_labels()
 	if not _btn_connect:
 		return
+	# The address can only change while disconnected. Unfocusable (not just
+	# read-only) while connected: a read-only field still takes focus, which
+	# opened the keypad, and releasing focus from inside focus_entered crashes.
+	var can_edit := state == ConnectionState.DISCONNECTED
+	if not can_edit:
+		_set_kbd_visible(false)
+		_lbl_ip_error.hide()
+	_input_ip.editable   = can_edit
+	_input_ip.focus_mode = Control.FOCUS_ALL if can_edit else Control.FOCUS_NONE
+	_mon_hdr.visible = _is_connected()
+	_rebuild_monitor_list()
 	match state:
 		ConnectionState.DISCONNECTED:
 			_btn_connect.text     = "Connect"
@@ -371,6 +384,9 @@ func _apply_theme(root: Control) -> void:
 	# LineEdit
 	t.set_stylebox("normal", "LineEdit", _flat(Color(0.09, 0.10, 0.17), Color(0.26, 0.40, 0.70), 4, 8))
 	t.set_stylebox("focus",  "LineEdit", _flat(Color(0.11, 0.13, 0.21), Color(0.40, 0.62, 1.00), 4, 8))
+	# Read-only while connected; without this it fell back to the stock grey box.
+	t.set_stylebox("read_only", "LineEdit", _flat(Color(0.07, 0.08, 0.13), Color(0.17, 0.22, 0.38), 4, 8))
+	t.set_color("font_uneditable_color", "LineEdit", Color(0.62, 0.68, 0.84))
 	t.set_font_size("font_size",              "LineEdit", 18)
 	t.set_color("font_color",            "LineEdit", Color(0.90, 0.94, 1.00))
 	t.set_color("font_placeholder_color","LineEdit", Color(0.40, 0.45, 0.62))
@@ -381,21 +397,18 @@ func _apply_theme(root: Control) -> void:
 	t.set_font_size("font_size",           "CheckBox", 18)
 	t.set_color("font_color",              "CheckBox", Color(0.87, 0.91, 1.00))
 	t.set_color("font_disabled_color",     "CheckBox", Color(0.38, 0.40, 0.55))
-	# HSlider — make track visible
+	# HSlider. The track's thickness is its content margins: with none it was
+	# 0 px tall and only the grabber dot showed.
 	var track := StyleBoxFlat.new()
 	track.bg_color = Color(0.18, 0.22, 0.40)
-	track.corner_radius_top_left = 3
-	track.corner_radius_top_right = 3
-	track.corner_radius_bottom_left = 3
-	track.corner_radius_bottom_right = 3
+	track.set_corner_radius_all(3)
+	track.content_margin_top    = 3
+	track.content_margin_bottom = 3
 	t.set_stylebox("slider", "HSlider", track)
-	var grab := StyleBoxFlat.new()
+	var grab := track.duplicate() as StyleBoxFlat
 	grab.bg_color = Color(0.30, 0.52, 0.90)
-	grab.corner_radius_top_left = 3
-	grab.corner_radius_top_right = 3
-	grab.corner_radius_bottom_left = 3
-	grab.corner_radius_bottom_right = 3
 	t.set_stylebox("grabber_area", "HSlider", grab)
+	t.set_stylebox("grabber_area_highlight", "HSlider", grab)
 	root.theme = t
 
 # ---------------------------------------------------------------------------
@@ -498,14 +511,24 @@ func _build_ui() -> void:
 	_input_ip.text                  = _host_ip
 	_input_ip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_input_ip.placeholder_text      = "192.168.1.100"
+	_input_ip.max_length            = 15  # dotted IPv4
+	# Never raise the Android system keyboard: on the headset it pops up as a
+	# flat window over everything and fights the in-panel keypad. Tapping the
+	# field opens the keypad below instead; a physical keyboard still types.
+	_input_ip.virtual_keyboard_enabled = false
+	_input_ip.focus_entered.connect(_set_kbd_visible.bind(true))
+	_input_ip.text_submitted.connect(func(_t): _on_connect_pressed())
+	_input_ip.text_changed.connect(func(_t): _lbl_ip_error.hide())
 	ip_row.add_child(_input_ip)
-	var kbd_toggle := Button.new()
-	kbd_toggle.text        = "⌨"
-	kbd_toggle.tooltip_text = "Show / hide IP keyboard"
-	kbd_toggle.pressed.connect(_on_toggle_kbd)
-	ip_row.add_child(kbd_toggle)
 
-	# In-viewport IP keyboard (Issue #4)
+	_lbl_ip_error = Label.new()
+	_lbl_ip_error.text = "Not an IP address. Use four numbers, like 192.168.1.100"
+	_lbl_ip_error.add_theme_font_size_override("font_size", 16)
+	_lbl_ip_error.add_theme_color_override("font_color", Color(0.95, 0.58, 0.52))
+	_lbl_ip_error.hide()
+	vbox.add_child(_lbl_ip_error)
+
+	# In-viewport IP keypad, opened by tapping the field.
 	_kbd_container         = _build_ip_keyboard()
 	_kbd_container.visible = false
 	vbox.add_child(_kbd_container)
@@ -525,11 +548,9 @@ func _build_ui() -> void:
 	_chk_curved = CheckBox.new()
 	_chk_curved.text           = "Curved screen"
 	_chk_curved.button_pressed = _curved_enabled
+	_chk_curved.custom_minimum_size = Vector2(280, 0)  # align with the row below
 	_chk_curved.toggled.connect(_on_curved_toggled)
 	curve_row.add_child(_chk_curved)
-	var curve_sp := Control.new()
-	curve_sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	curve_row.add_child(curve_sp)
 	_slider_curvature = HSlider.new()
 	_slider_curvature.min_value             = 0.0
 	_slider_curvature.max_value             = 0.5
@@ -553,11 +574,9 @@ func _build_ui() -> void:
 	_chk_foveation = CheckBox.new()
 	_chk_foveation.text           = "Eye-tracked foveation"
 	_chk_foveation.button_pressed = _foveation_enabled
+	_chk_foveation.custom_minimum_size = Vector2(280, 0)
 	_chk_foveation.toggled.connect(_on_foveation_toggled)
 	fov_row.add_child(_chk_foveation)
-	var fov_sp := Control.new()
-	fov_sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	fov_row.add_child(fov_sp)
 	_slider_foveation = HSlider.new()
 	_slider_foveation.min_value             = 0.0
 	_slider_foveation.max_value             = 1.0
@@ -590,34 +609,37 @@ func _build_ui() -> void:
 	# ── Monitors section ─────────────────────────────────────────────────
 	_add_section_separator(vbox, "Monitors")
 
-	var mon_hdr := HBoxContainer.new()
-	mon_hdr.add_theme_constant_override("separation", 6)
-	vbox.add_child(mon_hdr)
+	_mon_hdr = HBoxContainer.new()
+	_mon_hdr.add_theme_constant_override("separation", 6)
+	_mon_hdr.hide()  # shown by set_state() once connected
+	vbox.add_child(_mon_hdr)
 	var mon_fill := Control.new()
 	mon_fill.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	mon_hdr.add_child(mon_fill)
+	_mon_hdr.add_child(mon_fill)
 	_btn_workspace_save = Button.new()
 	_btn_workspace_save.text = "💾 Save layout"
 	_btn_workspace_save.pressed.connect(_on_workspace_save_pressed)
-	mon_hdr.add_child(_btn_workspace_save)
+	_mon_hdr.add_child(_btn_workspace_save)
 	_btn_workspace_restore = Button.new()
 	_btn_workspace_restore.text = "↩ Restore"
 	_btn_workspace_restore.pressed.connect(_on_workspace_restore_pressed)
-	mon_hdr.add_child(_btn_workspace_restore)
+	_mon_hdr.add_child(_btn_workspace_restore)
 	_btn_keyboard = Button.new()
 	_btn_keyboard.text = "⌨ Keyboard"
 	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
-	mon_hdr.add_child(_btn_keyboard)
+	_mon_hdr.add_child(_btn_keyboard)
 
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical  = Control.SIZE_EXPAND_FILL
-	scroll.custom_minimum_size  = Vector2(0, 80)
+	# No minimum height: the panel is a fixed 900x880, and a floor here pushed
+	# the bottom of the panel out of view whenever the IP keypad was open.
 	vbox.add_child(scroll)
 
 	_monitor_list = VBoxContainer.new()
 	_monitor_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_monitor_list.add_theme_constant_override("separation", 4)
 	scroll.add_child(_monitor_list)
+	_rebuild_monitor_list()
 
 	# ── 3D mesh that renders the SubViewport in world space ───────────────
 	_panel_mesh = MeshInstance3D.new()
@@ -654,15 +676,19 @@ func _make_segmented_row(parent: HBoxContainer, options: Array,
 	return buttons
 
 func _refresh_segmented(buttons: Dictionary, selected_value) -> void:
+	# A toggled button draws with the "pressed" style, which in this theme is
+	# the darkest one, so the selected option used to look disabled. Give the
+	# selection its own lighter surface instead.
+	var selected := _flat(Color(0.24, 0.36, 0.66), Color(0.58, 0.74, 1.00))
 	for value in buttons:
 		var b: Button = buttons[value]
 		b.set_pressed_no_signal(value == selected_value)
-		if value == selected_value:
-			b.add_theme_color_override("font_color", Color(0.55, 0.95, 0.65))
-		else:
-			b.remove_theme_color_override("font_color")
+		for style in ["pressed", "hover_pressed"]:
+			b.add_theme_stylebox_override(style, selected)
+		for col in ["font_pressed_color", "font_hover_pressed_color"]:
+			b.add_theme_color_override(col, Color(1, 1, 1))
 
-func _quality_label(parent: HBoxContainer, text: String, min_w: int = 92) -> void:
+func _quality_label(parent: HBoxContainer, text: String, min_w: int = 104) -> void:
 	var lbl := Label.new()
 	lbl.text = text
 	lbl.add_theme_color_override("font_color", Color(0.68, 0.74, 0.94))
@@ -743,6 +769,7 @@ func _build_quality_section(vbox: VBoxContainer) -> void:
 	_lbl_auto_info.add_theme_font_size_override("font_size", 15)
 	_lbl_auto_info.add_theme_color_override("font_color", Color(0.55, 0.80, 1.00))
 	_lbl_auto_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_lbl_auto_info.hide()  # an empty label still took a line of the panel
 	vbox.add_child(_lbl_auto_info)
 
 	# Apply button (settings also auto-apply shortly after any change)
@@ -779,9 +806,9 @@ func _refresh_quality_ui() -> void:
 	# Highlight the slider that matters for the chosen codec
 	# (bitrate → H.264/HEVC/AV1; JPEG quality → MJPEG/Auto)
 	if _slider_bitrate:
-		_slider_bitrate.editable = _stream_codec in [0, 1, 3]
+		_set_slider_active(_slider_bitrate, _stream_codec in [0, 1, 3])
 	if _slider_jpegq:
-		_slider_jpegq.editable = _stream_codec == 2 or _stream_codec == 0xFF
+		_set_slider_active(_slider_jpegq, _stream_codec == 2 or _stream_codec == 0xFF)
 
 func _on_codec_chosen(value: int) -> void:
 	_stream_codec = value
@@ -832,8 +859,9 @@ func set_stream_settings(codec: int, bitrate_kbps: int, jpeg_quality: int,
 func set_auto_quality_result(width: int, height: int, fps: int,
 		ppd: float, angle_deg: float, distance: float) -> void:
 	if _lbl_auto_info:
-		_lbl_auto_info.text = "Auto: %dx%d @ %d fps — panel covers %.0f° at %.1f m (headset ≈ %.0f px/°)" % [
+		_lbl_auto_info.text = "Auto: %dx%d @ %d fps. Panel covers %.0f° at %.1f m (headset ≈ %.0f px/°)" % [
 			width, height, fps, angle_deg, distance, ppd]
+		_lbl_auto_info.show()
 
 # ---------------------------------------------------------------------------
 # Section separator helper
@@ -885,65 +913,77 @@ func _build_ip_keyboard() -> VBoxContainer:
 	row1.add_theme_constant_override("separation", 3)
 	inner.add_child(row1)
 	for ch in ["1","2","3","4","5","6","7","8","9","0","."]:
-		var b := Button.new()
-		b.text = ch
-		b.add_theme_font_size_override("font_size", 18)
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var _ch: String = ch
-		b.pressed.connect(func(): _on_ip_kbd_key(_ch))
-		row1.add_child(b)
+		row1.add_child(_make_kbd_key(ch, _on_ip_kbd_key.bind(ch)))
 
 	# Row 2 — control keys
 	var row2 := HBoxContainer.new()
 	row2.add_theme_constant_override("separation", 3)
 	inner.add_child(row2)
-
-	var bksp := Button.new()
-	bksp.text = "⌫  Back"
-	bksp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	bksp.pressed.connect(func(): _on_ip_kbd_key("←"))
-	row2.add_child(bksp)
-
-	var clr := Button.new()
-	clr.text = "✕  Clear"
-	clr.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	clr.pressed.connect(func(): _on_ip_kbd_key("C"))
-	row2.add_child(clr)
-
-	var done := Button.new()
-	done.text = "✓  Done"
-	done.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	done.pressed.connect(func(): _on_toggle_kbd())
-	row2.add_child(done)
+	row2.add_child(_make_kbd_key("⌫  Back", _on_ip_kbd_key.bind("←")))
+	row2.add_child(_make_kbd_key("✕  Clear", _on_ip_kbd_key.bind("C")))
+	row2.add_child(_make_kbd_key("✓  Done", _set_kbd_visible.bind(false)))
 
 	return wrapper
 
-func _on_toggle_kbd() -> void:
-	_kbd_visible = not _kbd_visible
-	if _kbd_container:
-		_kbd_container.visible = _kbd_visible
+## Keys never take focus, so the IP field keeps its caret while you type.
+func _make_kbd_key(label: String, action: Callable) -> Button:
+	var b := Button.new()
+	b.text = label
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_font_size_override("font_size", 18)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.pressed.connect(action)
+	return b
 
+func _set_kbd_visible(show_kbd: bool) -> void:
+	if _kbd_container:
+		_kbd_container.visible = show_kbd
+	# Drop focus on close so the next tap on the field opens the keypad again.
+	if not show_kbd and _input_ip and _input_ip.has_focus():
+		_input_ip.release_focus()
+
+## Edits at the caret (replacing any selection), like a normal text field.
 func _on_ip_kbd_key(code: String) -> void:
 	if not _input_ip:
 		return
+	_lbl_ip_error.hide()
+	if _input_ip.has_selection():
+		_input_ip.delete_text(_input_ip.get_selection_from_column(),
+			_input_ip.get_selection_to_column())
+		_input_ip.deselect()
+		if code == "←":
+			return
 	match code:
 		"←":
-			if _input_ip.text.length() > 0:
-				_input_ip.text = _input_ip.text.left(_input_ip.text.length() - 1)
+			var col := _input_ip.caret_column
+			if col > 0:
+				_input_ip.delete_text(col - 1, col)
 		"C":
-			_input_ip.text = ""
+			_input_ip.clear()
 		_:
-			_input_ip.text += code
+			_input_ip.insert_text_at_caret(code)
 
 # ---------------------------------------------------------------------------
 # Monitor list rebuild
 # ---------------------------------------------------------------------------
+
+func _is_connected() -> bool:
+	return _state == ConnectionState.CONNECTED or _state == ConnectionState.STREAMING
 
 func _rebuild_monitor_list() -> void:
 	if not _monitor_list:
 		return
 	for child in _monitor_list.get_children():
 		child.queue_free()
+	# Disconnected, the last host's list is stale and its buttons do nothing.
+	if not _is_connected() or _available_monitors.is_empty():
+		var hint := Label.new()
+		hint.text = "Connect to a host to see its monitors." if not _is_connected() \
+			else "The host reported no monitors."
+		hint.add_theme_font_size_override("font_size", 16)
+		hint.add_theme_color_override("font_color", Color(0.50, 0.56, 0.78))
+		_monitor_list.add_child(hint)
+		return
 	for mon in _available_monitors:
 		var mid: int = mon.get("id", 0)
 		var is_active: bool = _active_monitor_ids.has(mid)
@@ -951,7 +991,7 @@ func _rebuild_monitor_list() -> void:
 
 		var status := "●  " if is_active else "○  "
 		var hint := "   (tap to remove)" if is_active else "   (tap to add)"
-		btn.text = "%s[%d]  %s  —  %dx%d @ %d Hz%s" % [
+		btn.text = "%s[%d]  %s   %dx%d @ %d Hz%s" % [
 			status,
 			mid,
 			mon.get("name", "Monitor"),
@@ -1008,12 +1048,17 @@ func _update_labels() -> void:
 # Slider / checkbox UI sync
 # ---------------------------------------------------------------------------
 
+## HSlider has no disabled look of its own, so dim an inactive one.
+func _set_slider_active(slider: HSlider, active: bool) -> void:
+	slider.editable   = active
+	slider.modulate.a = 1.0 if active else 0.4
+
 func _update_curvature_ui() -> void:
 	if _chk_curved:
 		_chk_curved.button_pressed = _curved_enabled
 	if _slider_curvature:
 		_slider_curvature.value    = _curvature_amount
-		_slider_curvature.editable = _curved_enabled
+		_set_slider_active(_slider_curvature, _curved_enabled)
 	if _lbl_curvature_value:
 		_lbl_curvature_value.text  = "%.2f" % _curvature_amount
 
@@ -1022,7 +1067,7 @@ func _update_foveation_ui() -> void:
 		_chk_foveation.button_pressed = _foveation_enabled
 	if _slider_foveation:
 		_slider_foveation.value    = _foveation_strength
-		_slider_foveation.editable = _foveation_enabled
+		_set_slider_active(_slider_foveation, _foveation_enabled)
 	if _lbl_foveation_value:
 		_lbl_foveation_value.text  = "%.2f" % _foveation_strength
 
@@ -1037,9 +1082,15 @@ func _update_passthrough_ui() -> void:
 
 func _on_connect_pressed() -> void:
 	if _state == ConnectionState.DISCONNECTED:
-		_host_ip = _input_ip.text.strip_edges()
-		if _host_ip.is_empty():
-			_host_ip = "192.168.1.100"
+		var ip := _input_ip.text.strip_edges()
+		# connect_to_host() only takes an IP, and a bad one just fails silently
+		# and auto-retries forever. Say so here instead.
+		if not ip.is_valid_ip_address():
+			_lbl_ip_error.show()
+			_input_ip.grab_focus()
+			return
+		_host_ip = ip
+		_set_kbd_visible(false)
 		_save_config()
 		connect_requested.emit(_host_ip, _tcp_port, _udp_port)
 	else:

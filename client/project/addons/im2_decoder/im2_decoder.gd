@@ -1,5 +1,6 @@
 @tool
 ## Registers the Im2VideoDecoder Android plugin (MediaCodec hardware decode)
+## and the PICO hand-tracking manifest entries
 ## at export time. The AAR must be built from client/android-plugin and
 ## placed in res://addons/im2_decoder/bin/ — see that folder's README.
 extends EditorPlugin
@@ -42,3 +43,12 @@ class AndroidExportPlugin extends EditorExportPlugin:
 		push_warning("[Im2VideoDecoder] AAR not found in addons/im2_decoder/bin — " +
 			"the client will fall back to MJPEG. Build it from client/android-plugin.")
 		return PackedStringArray()
+
+	# PICO hand tracking: the PICO OpenXR runtime only feeds hand joints to apps
+	# that declare these. They used to sit in export_presets.cfg under
+	# "gradle_build/manifest_additions", which is not a Godot option, so they
+	# never reached the APK. This is the supported way to add manifest entries.
+	func _get_android_manifest_application_element_contents(
+			_platform: EditorExportPlatform, _debug: bool) -> String:
+		return "<meta-data android:name=\"handtracking\" android:value=\"1\" />\n" + \
+			"<meta-data android:name=\"Hand_Tracking_HighFrequency\" android:value=\"1\" />\n"
