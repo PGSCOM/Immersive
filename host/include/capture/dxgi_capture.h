@@ -20,6 +20,10 @@ struct DisplayInfo {
     int32_t     origin_y;
     std::string name;
     bool        is_primary;
+    /// Backend handle for the display: CGDirectDisplayID on macOS, the
+    /// PipeWire node id on Wayland, the RandR monitor index on X11. Unused
+    /// on Windows.
+    uint32_t    native_id = 0;
 };
 
 /// A captured frame from a display
@@ -63,5 +67,14 @@ std::unique_ptr<IScreenCapture> create_dxgi_capture();
 /// Returns a WgcCapture; call start_capture() which falls back to
 /// create_dxgi_capture() at runtime if WGC is not supported.
 std::unique_ptr<IScreenCapture> create_wgc_capture();
+
+/// Create the native capture backend for this OS: WGC (with DXGI fallback)
+/// on Windows, ScreenCaptureKit on macOS, the xdg-desktop-portal ScreenCast
+/// + PipeWire on a Wayland session or XShm on X11 on Linux. May return
+/// nullptr when no backend is usable (e.g. Linux with no display server).
+std::unique_ptr<IScreenCapture> create_screen_capture();
+
+/// Three fake solid-grey displays, for protocol tests (`--stub`).
+std::unique_ptr<IScreenCapture> create_stub_capture();
 
 }  // namespace immersive

@@ -1,6 +1,7 @@
 """Smoke-test client for the Immersive-2 host (no headset needed).
 
-Run the host on this machine, then:  python host/tools/smoke_client.py
+Run the host on this machine with fake displays (`immersive2_host --stub`),
+then:  python host/tools/smoke_client.py
 
 It connects from 127.0.0.2 so the UDP video stream can be received locally
 even though the host holds the wildcard bind on the video port.

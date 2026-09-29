@@ -8,8 +8,8 @@
 - **Windows 10/11 (x64)** for full host features
   - Visual Studio 2022 with "Desktop development with C++" workload
   - Or MinGW-w64 with GCC 12+
-- **Linux/macOS** for portable host mode
-  - GCC 12+ or Clang 14+
+- **Linux** (X11 or Wayland) — GCC 12+ or Clang 14+, see [Linux](#linux)
+- **macOS 13+** — Xcode command line tools, see [macOS](#macos-13-ventura-or-newer)
 - **GPU hardware encoder SDK** (optional — the MJPEG software encoder works with no GPU):
   - NVIDIA: CUDA Toolkit + NVIDIA Video Codec SDK
   - AMD: AMD Advanced Media Framework (AMF) SDK
@@ -54,9 +54,18 @@ cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release \
 cmake --build build
 ```
 
-### Linux / macOS (portable mode)
+### Linux
 
 ```bash
+# Debian/Ubuntu. Every group is optional; the host builds with whatever is found
+# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=…").
+sudo apt install build-essential cmake pkg-config \
+  libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
+  libdbus-1-dev libpipewire-0.3-dev \
+  libpulse-dev
+# Fedora: libX11-devel libXext-devel libXrandr-devel libXtst-devel libXfixes-devel
+#         dbus-devel pipewire-devel pulseaudio-libs-devel
+
 cd host
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
@@ -64,8 +73,40 @@ cmake --build build
 ./build/immersive2_host
 ```
 
-Portable mode provides protocol/network development support and stubbed host backends
-for capture/input/audio where platform APIs are unavailable.
+- **Wayland** (GNOME, KDE, …): capture and input go through xdg-desktop-portal
+  (ScreenCast + RemoteDesktop) and PipeWire. The first run shows the desktop's
+  screen-share dialog: pick the monitors to stream and allow remote control. The
+  choice is remembered (`~/.config/immersive2/portal-restore-token`); delete that
+  file to choose again. Compositors whose portal lacks RemoteDesktop (e.g.
+  wlroots) stream fine but ignore VR input.
+- **X11**: MIT-SHM capture per RandR monitor, XTEST input. No dialog.
+- **Audio**: the monitor of the default output, through PulseAudio or
+  PipeWire (pipewire-pulse).
+
+### macOS (13 Ventura or newer)
+
+```bash
+xcode-select --install   # compilers + SDK
+cd host
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+cmake --build build
+./build/immersive2_host
+```
+
+Capture and system audio use ScreenCaptureKit, input uses CGEvent. The first
+run asks for two permissions in System Settings → Privacy & Security, granted to
+the terminal (or the binary) that launches the host:
+
+- **Screen Recording** — without it no display is listed. Restart the host after
+  granting it.
+- **Accessibility** — without it the VR mouse/keyboard does nothing.
+
+### Protocol testing without a desktop
+
+`./build/immersive2_host --stub` serves three fake solid-grey monitors and only
+logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
+use it.
 
 ### CMake Options
 
@@ -80,15 +121,16 @@ When all hardware encoders are disabled (`=OFF`), the MJPEG software encoder
 
 ### What the Host Does
 
-1. Enumerates all connected displays via DXGI
+1. Enumerates all connected displays (DXGI/WGC, ScreenCaptureKit, RandR or the Wayland portal)
 2. Listens on TCP :19800 for client connections
 3. On connection, sends the monitor list to the VR client
-4. When the client selects a monitor, starts DXGI capture + MJPEG encoding
+4. When the client selects a monitor, starts capturing it + MJPEG encoding
 5. Streams encoded frames over UDP :19801 in chunks of ≤ 1400 bytes
-6. Receives mouse/keyboard input from the VR client and injects it via SendInput
+6. Receives mouse/keyboard input from the VR client and injects it (SendInput,
+   CGEvent, XTEST or the RemoteDesktop portal)
 
-On Linux/macOS portable mode, capture/input/virtual-display backends are stubbed for
-development and protocol testing.
+Hardware H.264/HEVC/AV1 encoding is Windows-only for now; Linux and macOS
+stream MJPEG (the client negotiates it automatically).
 
 ---
 
@@ -233,7 +275,10 @@ Artifacts are uploaded as:
 
 ### Host: "No displays found"
 - On Windows: ensure monitors are active and GPU drivers are installed
-- On Linux/macOS portable mode: a stub display is exposed for development/testing
+- On macOS: grant Screen Recording (System Settings → Privacy & Security) and restart the host
+- On Linux: run it inside the graphical session (`DISPLAY` / `WAYLAND_DISPLAY` set); on
+  Wayland, accept the screen-share dialog
+- Anywhere: `--stub` gives fake displays for protocol testing
 
 ### Client: OpenXR not initializing
 - Ensure the headset runtime is active (put the headset on or use PC link)

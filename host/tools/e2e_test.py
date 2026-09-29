@@ -2,8 +2,8 @@
 
     python3 host/tools/e2e_test.py
 
-No headset needed. Builds host/build/immersive2_host with cmake if it is
-missing, and runs the client headless with `godot` from PATH (Godot 4.7).
+No headset needed. Builds host/build/immersive2_host with cmake (incremental),
+runs it with --stub (three fake grey monitors, input only logged), and runs the client headless with `godot` from PATH (Godot 4.7).
 
 Checks, in order:
   1. The client connects, streams all three stub monitors and decodes each one
@@ -97,7 +97,7 @@ def step(msg):
 
 def start_host():
     # stdbuf: the host's stdout is block-buffered into a pipe otherwise.
-    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--no-audio"])
+    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub"])
     procs.append(host)
     host.wait_for(r"\[Host\] Ready", 10)
     return host
@@ -109,7 +109,7 @@ def expect_streaming(client, since):
         client.wait_for(rf"Streaming monitor {mid} ", 20, since)
     for mid in MONITORS:
         m = client.wait_for(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})", 20, since)
-        # The portable capture stub fills monitor i with grey 64 + 48*i.
+        # The --stub capture fills monitor i with grey 64 + 48*i.
         want = 64 + 48 * mid
         got = [int(m.group(1)[k:k + 2], 16) for k in (0, 2, 4)]
         if any(abs(c - want) > 8 for c in got):
@@ -119,12 +119,13 @@ def expect_streaming(client, since):
 def main():
     if not shutil.which("godot"):
         fail("`godot` (4.7) not found on PATH")
-    if not os.path.exists(HOST_BIN):
-        step("building host")
+    step("building host")
+    if not os.path.isdir(os.path.join(ROOT, "host", "build")):
         subprocess.run(["cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release",
                         "-DENABLE_NVENC=OFF", "-DENABLE_AMF=OFF", "-DENABLE_QSV=OFF"],
                        cwd=os.path.join(ROOT, "host"), check=True, stdout=subprocess.DEVNULL)
-        subprocess.run(["cmake", "--build", "build", "-j"],
+    # Always (incremental): a stale binary predating --stub would fail oddly.
+    subprocess.run(["cmake", "--build", "build", "-j"],
                        cwd=os.path.join(ROOT, "host"), check=True, stdout=subprocess.DEVNULL)
 
     # Class names (SoftwareVideoDecoder, ...) need the import cache.

@@ -425,14 +425,10 @@ std::unique_ptr<IScreenCapture> create_wgc_capture() {
     return std::make_unique<WgcCapture>();
 }
 
+std::unique_ptr<IScreenCapture> create_screen_capture() {
+    return create_wgc_capture();
+}
+
 }  // namespace immersive
-
-#else  // !_WIN32
-
-namespace immersive {
-std::unique_ptr<IScreenCapture> create_wgc_capture() {
-    return create_dxgi_capture();  // stub: use DXGI stub on non-Windows
-}
-}
 
 #endif
