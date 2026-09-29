@@ -115,6 +115,8 @@ func _run() -> void:
 	await _click(ov._btn_connect)
 	check(connects == ["10.0.0.7"], "valid IP connects -> %s" % [connects])
 	check(not ov._kbd_container.visible, "keypad closes on connect")
+	await _click(ov._btn_usb)
+	check(connects == ["10.0.0.7", "127.0.0.1"], "USB connects to loopback -> %s" % [connects])
 
 	ov.set_state(ov.ConnectionState.STREAMING)
 	ov.set_monitor_list([
@@ -123,6 +125,7 @@ func _run() -> void:
 		{"id": 2, "name": "Monitor C", "width": 1920, "height": 1080, "refresh_rate": 60}])
 	ov.set_active_monitors([0, 2])
 	check(not ov._input_ip.editable, "IP read-only while connected")
+	check(ov._btn_usb.disabled, "USB disabled while connected")
 	await _click(ov._input_ip)  # used to crash (focus released inside focus_entered)
 	check(not ov._kbd_container.visible, "no keypad while connected")
 	check(ov._mon_hdr.visible, "monitor controls shown while connected")

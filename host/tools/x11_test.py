@@ -119,7 +119,7 @@ def run():
                            stderr=subprocess.DEVNULL, text=True)
     procs.append(xev)
 
-    host = subprocess.Popen([HOST_BIN, "--no-audio"], env=env,
+    host = subprocess.Popen([HOST_BIN, "--no-audio", "--no-usb"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     procs.append(host)
     time.sleep(1.0)
