@@ -20,6 +20,7 @@
 #include <map>
 #include <csignal>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -76,6 +77,19 @@ namespace {
         }
     }
 
+    /// Run a shell command and wait for it. popen, not std::system: POSIX
+    /// system() ignores SIGINT while the child runs, so a Ctrl+C landing
+    /// during a periodic `adb reverse` was silently lost.
+    int run_quiet(const std::string& cmd) {
+#ifdef _WIN32
+        FILE* p = _popen(cmd.c_str(), "r");
+        return p ? _pclose(p) : -1;
+#else
+        FILE* p = popen(cmd.c_str(), "r");
+        return p ? pclose(p) : -1;
+#endif
+    }
+
     /// Print usage and exit.
     [[noreturn]] void usage(const char* prog) {
         std::cerr << "Usage: " << prog << " [options]\n"
@@ -85,6 +99,7 @@ namespace {
                   << "  --udp-port N        UDP video port (default: 19801)\n"
                   << "  --audio-port N      UDP audio port (default: 19802)\n"
                   << "  --no-audio          Disable audio streaming\n"
+                  << "  --no-usb            Don't run `adb reverse` for USB-connected headsets\n"
                   << "  --codec NAME        Video codec: mjpeg (default), h264, h265 or av1.\n"
                   << "                      h264/h265/av1 use the GPU encoder (Media\n"
                   << "                      Foundation) and require a matching decoder on\n"
@@ -126,6 +141,7 @@ int main(int argc, char* argv[]) {
     uint16_t udp_port     = immersive::protocol::DEFAULT_UDP_PORT;
     uint16_t audio_port   = immersive::protocol::DEFAULT_AUDIO_PORT;
     bool     audio_enable = true;
+    bool     usb_enable   = true;
     uint8_t  default_codec = 2;  // protocol VideoCodec: 0=H264 1=H265 2=MJPEG 3=AV1
     uint32_t jpeg_quality = 35;
 
@@ -144,6 +160,8 @@ int main(int argc, char* argv[]) {
             audio_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--no-audio") {
             audio_enable = false;
+        } else if (arg == "--no-usb") {
+            usb_enable = false;
         } else if (arg == "--install-idd-cert") {
             immersive::install_idd_signing_certificate();
             return 0;
@@ -668,6 +686,30 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // --- USB ---
+    // A headset on a USB cable reaches the host through `adb reverse`: its
+    // 127.0.0.1:<tcp_port> tunnels to ours. Only TCP can be tunnelled, so the
+    // client asks for video/audio in-band on TCP (HELLO_FLAG_TCP_MEDIA).
+    // The adb server daemon is started HERE, before any socket is opened: a
+    // daemon spawned later would inherit the listening socket and keep the
+    // port bound after the host exits.
+    // ponytail: `adb kill-server` mid-session restarts it with our sockets
+    // inherited; mark them non-inheritable if that ever bites.
+#ifdef _WIN32
+    const char* kNull = " >nul 2>&1";
+#else
+    const char* kNull = " >/dev/null 2>&1";
+#endif
+    const std::string adb_reverse = "adb reverse tcp:" + std::to_string(tcp_port) +
+                                    " tcp:" + std::to_string(tcp_port) + kNull;
+    if (usb_enable && run_quiet(std::string("adb start-server") + kNull) != 0) {
+        std::cout << "[Host] USB: adb not found on PATH; install Android platform-tools\n"
+                  << "       to connect a headset over USB (Wi-Fi still works).\n";
+        usb_enable = false;
+    } else if (usb_enable) {
+        std::cout << "[Host] USB: plug in the headset (USB debugging on) and press USB in the app.\n";
+    }
+
     // Start the network server with configured options
     immersive::ServerConfig srv_config;
     srv_config.tcp_port    = tcp_port;
@@ -721,8 +763,17 @@ int main(int argc, char* argv[]) {
 
     // --- Main loop ---
     // Streaming happens in per-monitor worker threads; the main thread just
-    // waits for the shutdown signal.
+    // waits for the shutdown signal, and re-arms the USB tunnel every few
+    // seconds: it dies whenever the cable is unplugged or the headset reboots
+    // (re-running it is idempotent, and just fails with no device attached).
+    // ponytail: plain `adb reverse` fails with several Android devices plugged
+    // in; loop over `adb devices` with -s if that ever matters.
+    auto next_adb = std::chrono::steady_clock::now();
     while (g_running) {
+        if (usb_enable && std::chrono::steady_clock::now() >= next_adb) {
+            run_quiet(adb_reverse);
+            next_adb = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 

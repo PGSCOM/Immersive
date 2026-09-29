@@ -116,9 +116,11 @@ func set_volume(vol: float) -> void:
 func _receive_packets() -> void:
 	while _udp and _udp.get_available_packet_count() > 0:
 		var raw: PackedByteArray = _udp.get_packet()
-		_parse_audio_packet(raw)
+		parse_packet(raw)
 
-func _parse_audio_packet(raw: PackedByteArray) -> void:
+## Queue one audio packet (AudioPacketHeader + PCM). Called for UDP packets
+## and, in USB mode, for AUDIO_DATA messages from the TCP control channel.
+func parse_packet(raw: PackedByteArray) -> void:
 	# AudioPacketHeader: seq(4) + samples(2) + channels(1) + reserved(1) = 8 bytes
 	if raw.size() < 8:
 		return

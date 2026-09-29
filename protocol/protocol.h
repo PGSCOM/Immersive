@@ -55,6 +55,8 @@ enum class MessageType : uint8_t {
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
     LATENCY_RESPONSE     = 0x41, ///< Server echoes LATENCY_PROBE back
+    VIDEO_FRAME          = 0x50, ///< Host → client: whole frame over TCP (HELLO_FLAG_TCP_MEDIA)
+    AUDIO_DATA           = 0x51, ///< Host → client: audio packet over TCP (HELLO_FLAG_TCP_MEDIA)
     PING                 = 0xFF,
 };
 
@@ -66,9 +68,15 @@ struct ControlHeader {
     uint32_t length;
 };
 
+/// Hello.flags bit: send video and audio in-band on the TCP control channel
+/// (VIDEO_FRAME / AUDIO_DATA) instead of UDP. Used over USB, where
+/// `adb reverse` tunnels TCP only. Older clients send no flags byte (= UDP).
+constexpr uint8_t HELLO_FLAG_TCP_MEDIA = 0x01;
+
 struct Hello {
     uint8_t protocol_version;
     char    client_name[32];
+    uint8_t flags;  ///< HELLO_FLAG_* bitmask; optional (absent = 0)
 };
 
 struct HelloAck {
@@ -192,6 +200,14 @@ struct VideoPacketHeader {
     uint16_t chunk_index;
     uint16_t chunk_count;
     // Followed by payload bytes
+};
+
+/// VIDEO_FRAME payload header (TCP media mode). Followed by the whole encoded
+/// frame — the same bytes the UDP chunks of that frame would reassemble to.
+/// AUDIO_DATA's payload is exactly one UDP audio packet (AudioPacketHeader + PCM).
+struct VideoFrameHeader {
+    uint8_t  monitor_id;
+    uint32_t frame_number;
 };
 
 #pragma pack(pop)

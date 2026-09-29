@@ -140,24 +140,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/7 connect, stream and decode 3 monitors")
+    step("1/8 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/7 host killed -> client reconnects to a new host")
+    step("2/8 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/7 host frozen -> client times out, then recovers")
+    step("3/8 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/7 host sockets use TCP keepalive")
+    step("4/8 host sockets use TCP keepalive")
     if shutil.which("ss"):
         out = subprocess.run(["ss", "-tno", "state", "established", "( sport = :19800 )"],
                              capture_output=True, text=True).stdout
@@ -166,21 +166,35 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/7 Ctrl+C -> host exits")
+    step("5/8 USB mode: video over the TCP control socket")
+    # Same thing a headset on a cable does through `adb reverse`.
+    client.stop()
+    procs.remove(client)
+    mark = host.mark()
+    usb = Proc("client-usb", [
+        "godot", "--headless", "--xr-mode", "off", "--path", CLIENT_DIR, "--",
+        "--im2-host=127.0.0.1", "--im2-usb", "--im2-capture",
+        "--im2-monitors=" + ",".join(map(str, MONITORS))])
+    procs.append(usb)
+    host.wait_for(r"says hello: .*\(video/audio over TCP\)", 20, mark)
+    expect_streaming(usb, 0)
+    client_lines = client.lines + usb.lines
+
+    step("6/8 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
     except subprocess.TimeoutExpired:
         fail("host still running 5 s after SIGINT")
 
-    errors = [l for l in client.lines if "SCRIPT ERROR" in l]
+    errors = [l for l in client_lines if "SCRIPT ERROR" in l]
     if errors:
         fail("client raised script errors:\n" + "\n".join(errors[:10]))
     for p in procs:
         p.stop()
     procs.clear()
 
-    step("6/7 in-VR menu: IP keypad and layout")
+    step("7/8 in-VR menu: IP keypad and layout")
     if shutil.which("xvfb-run"):
         menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
                              "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
@@ -191,7 +205,7 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("7/7 hand tracking and idle controllers")
+    step("8/8 hand tracking and idle controllers")
     for test in ("hand_input_test.gd", "controller_idle_test.gd"):
         t = Proc(test, ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
                         "--path", CLIENT_DIR, "-s", os.path.join(ROOT, "client", "tests", test)])
