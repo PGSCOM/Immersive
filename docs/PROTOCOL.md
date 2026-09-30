@@ -135,7 +135,12 @@ Response to HELLO.
 | udp_port | uint16 LE | UDP port for video stream |
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
 | host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
-| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC |
+| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`, or "Let headsets control this PC" off in the host's settings window). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC |
+
+When the flags change while clients are connected (the settings window turns
+remote control on or off), the host sends every paired client a fresh
+HELLO_ACK with the new flags; a client treats a later HELLO_ACK as an update
+of the host's name and flags, not as a new session.
 
 ---
 
@@ -148,7 +153,9 @@ Sent instead of HELLO_ACK; the host closes the connection right after.
 | reason | uint8 | 1 `REJECT_PIN_REQUIRED` (no PIN sent), 2 `REJECT_WRONG_PIN`, 3 `REJECT_SERVER_FULL` (`--max-clients` reached), 4 `REJECT_LOCKED_OUT` (too many wrong PINs, retry in a minute) |
 
 A client should ask the user for the PIN on 1 and 2 instead of retrying, and
-stop retrying on 4.
+stop retrying on 4. A headset disconnected from the host's settings window
+gets reason 1 on its next HELLO (once, whatever PIN it sends), so it stops
+reconnecting by itself and has to be paired again.
 
 ---
 

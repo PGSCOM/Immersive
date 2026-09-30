@@ -36,6 +36,15 @@ int open_pipewire_remote(uint64_t gen);
 /// ensure_session() starts over (used when its streams keep failing).
 void invalidate(uint64_t gen);
 
+/// A session is live but the desktop did not grant pointer/keyboard, so
+/// headsets can watch but not control this PC. Lock-free.
+bool input_denied();
+
+/// Forget the stored restore token, close the session and start a new one
+/// in the background, so the dialog asks for remote control again now,
+/// while the user is at the PC (settings panel "Ask again").
+void ask_again();
+
 /// Called by the capture once the buffer size of a node is known: pointer
 /// coordinates are sent in that space (see portal_input.cpp).
 void set_frame_size(uint32_t node_id, uint32_t w, uint32_t h);

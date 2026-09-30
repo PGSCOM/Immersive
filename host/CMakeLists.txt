@@ -37,6 +37,25 @@ set(MAIN_SOURCE
     src/main.cpp
 )
 
+# Tray icon + settings panel (src/ui). The page and its font are compiled in.
+set(PANEL_ASSETS ${CMAKE_BINARY_DIR}/generated/panel_assets.h)
+add_custom_command(
+    OUTPUT ${PANEL_ASSETS}
+    COMMAND ${CMAKE_COMMAND} -DOUT=${PANEL_ASSETS}
+            -DHTML=${CMAKE_SOURCE_DIR}/src/ui/panel.html
+            -DFONT=${CMAKE_SOURCE_DIR}/../client/project/fonts/Grotesk-04Gras.woff2
+            -P ${CMAKE_SOURCE_DIR}/src/ui/embed.cmake
+    DEPENDS src/ui/panel.html src/ui/embed.cmake
+            ${CMAKE_SOURCE_DIR}/../client/project/fonts/Grotesk-04Gras.woff2
+    COMMENT "Embedding the settings panel"
+)
+set(UI_SOURCES
+    src/ui/panel.cpp
+    src/ui/ui_common.cpp
+    src/ui/ui_platform.cpp
+    ${PANEL_ASSETS}
+)
+
 # Host executable
 add_executable(immersive2_host
     ${MAIN_SOURCE}
@@ -44,11 +63,13 @@ add_executable(immersive2_host
     ${ENCODER_SOURCES}
     ${NETWORK_SOURCES}
     ${DRIVER_SOURCES}
+    ${UI_SOURCES}
 )
 
 target_include_directories(immersive2_host PRIVATE
     include
     src                 # private headers shared between backends
+    ${CMAKE_BINARY_DIR}/generated
     ${PROTOCOL_DIR}
 )
 
@@ -64,8 +85,13 @@ if(WIN32)
         src/input/input_injector.cpp
         src/audio/audio_capture.cpp
         src/encoder/mf_encoder.cpp
+        src/ui/tray_win.cpp
     )
     target_link_libraries(immersive2_host PRIVATE
+        shell32             # tray icon, opening the settings window
+        user32
+        gdi32
+        advapi32            # start at login (HKCU Run key)
         d3d11
         dxgi
         ws2_32
@@ -100,8 +126,10 @@ if(APPLE)
         src/input/mac_input.mm
         src/audio/mac_audio_capture.mm
         src/encoder/vt_encoder.mm
+        src/ui/tray_mac.mm
     )
     set_source_files_properties(
+        src/ui/tray_mac.mm
         src/capture/mac_capture.mm
         src/input/mac_input.mm
         src/audio/mac_audio_capture.mm
@@ -117,6 +145,7 @@ if(APPLE)
         "-framework ApplicationServices"
         "-framework IOSurface"
         "-framework VideoToolbox"
+        "-framework Cocoa"   # menu-bar item
     )
 elseif(UNIX)
     # Linux / BSD. Each backend is optional so the host always builds; the
@@ -124,6 +153,7 @@ elseif(UNIX)
     #   X11:     libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev
     #   Wayland: libdbus-1-dev libpipewire-0.3-dev (xdg-desktop-portal)
     #   Audio:   libpulse-dev (works on PipeWire through pipewire-pulse)
+    #   Tray:    libdbus-1-dev (StatusNotifierItem icon; also used by Wayland)
     #   H.264/HEVC/AV1: libavcodec-dev libavutil-dev libswscale-dev (FFmpeg:
     #            NVENC, VAAPI, libx264). Without it Linux streams MJPEG only.
     find_package(PkgConfig)
@@ -132,6 +162,7 @@ elseif(UNIX)
         pkg_check_modules(IM2_PORTAL IMPORTED_TARGET dbus-1 libpipewire-0.3)
         pkg_check_modules(IM2_PULSE IMPORTED_TARGET libpulse-simple)
         pkg_check_modules(IM2_FFMPEG IMPORTED_TARGET libavcodec libavutil libswscale)
+        pkg_check_modules(IM2_DBUS IMPORTED_TARGET dbus-1)
     endif()
 
     target_sources(immersive2_host PRIVATE src/capture/linux_backends.cpp)
@@ -159,6 +190,12 @@ elseif(UNIX)
         target_compile_definitions(immersive2_host PRIVATE IMMERSIVE_HAVE_PULSE=1)
     endif()
 
+    if(IM2_DBUS_FOUND)  # tray icon (StatusNotifierItem); without it the panel opens instead
+        target_sources(immersive2_host PRIVATE src/ui/tray_linux.cpp)
+        target_link_libraries(immersive2_host PRIVATE PkgConfig::IM2_DBUS)
+        target_compile_definitions(immersive2_host PRIVATE IMMERSIVE_HAVE_DBUS=1)
+    endif()
+
     if(IM2_FFMPEG_FOUND)
         target_sources(immersive2_host PRIVATE src/encoder/ffmpeg_encoder.cpp)
         target_link_libraries(immersive2_host PRIVATE PkgConfig::IM2_FFMPEG)
@@ -167,7 +204,7 @@ elseif(UNIX)
 
     message(STATUS "Linux backends: X11=${IM2_X11_FOUND} "
                    "Wayland-portal=${IM2_PORTAL_FOUND} PulseAudio=${IM2_PULSE_FOUND} "
-                   "FFmpeg=${IM2_FFMPEG_FOUND}")
+                   "FFmpeg=${IM2_FFMPEG_FOUND} Tray=${IM2_DBUS_FOUND}")
     if(NOT IM2_X11_FOUND AND NOT IM2_PORTAL_FOUND)
         message(WARNING "No X11 or Wayland capture libraries found: this host "
                         "can only run with --stub. See the comment above.")

@@ -10,6 +10,7 @@
 #include "input/input_injector.h"
 #include "driver/idd_manager.h"
 #include "audio/audio_capture.h"
+#include "ui/host_ui.h"
 #include "protocol.h"
 
 #include <algorithm>
@@ -168,14 +169,20 @@ namespace {
                   << "  --view-only         Share the screens but ignore mouse and keyboard\n"
                   << "                      from headsets (no remote control)\n"
                   << "  --stub              Fake displays and logged-only input, for protocol\n"
-                  << "                      tests without touching the real desktop\n"
+                  << "                      tests without touching the real desktop (ignores\n"
+                  << "                      host.conf, so test runs are reproducible)\n"
+                  << "  --no-ui             No tray icon and no settings window (headless)\n"
+                  << "  --panel-port N      Settings panel port on 127.0.0.1 (default: 19803,\n"
+                  << "                      any free port if busy)\n"
                   << "  --install-idd-cert  Install a self-signed code-signing certificate\n"
                   << "                      into the machine trust stores so an unsigned\n"
                   << "                      IDD virtual-display driver can be installed,\n"
                   << "                      then exit. Needs administrator rights and\n"
                   << "                      permanently trusts that key — see\n"
                   << "                      docs/IDD_DRIVER.md. Not needed for normal use.\n"
-                  << "  --help              Show this message\n";
+                  << "  --help              Show this message\n"
+                  << "Settings changed in the panel are kept in host.conf in the settings\n"
+                  << "folder; the flags above override them for one run.\n";
         std::exit(1);
     }
 }
@@ -195,17 +202,25 @@ int main(int argc, char* argv[]) {
 #endif
 
     // --- Parse command-line arguments ---
+    // Settings the panel changes live (src/ui): host.conf first, then the
+    // flags override them for this run. --stub (tests) ignores host.conf.
+    immersive::ui::Settings settings;
+    if (std::none_of(argv + 1, argv + argc, [](const char* a) { return std::strcmp(a, "--stub") == 0; }))
+        immersive::ui::load_host_conf(config_dir(), settings);
+    std::atomic<bool>&     usb_enable    = settings.usb;
+    std::atomic<uint8_t>&  default_codec = settings.codec;  // protocol VideoCodec: 0=H264 1=H265 2=MJPEG 3=AV1
+    std::atomic<uint32_t>& jpeg_quality  = settings.jpeg_quality;
+    std::atomic<bool>&     view_only     = settings.view_only;
     uint32_t max_clients  = 4;
     uint16_t tcp_port     = immersive::protocol::DEFAULT_TCP_PORT;
     uint16_t udp_port     = immersive::protocol::DEFAULT_UDP_PORT;
     uint16_t audio_port   = immersive::protocol::DEFAULT_AUDIO_PORT;
-    bool     audio_enable = true;
-    bool     usb_enable   = true;
-    uint8_t  default_codec = 2;  // protocol VideoCodec: 0=H264 1=H265 2=MJPEG 3=AV1
-    uint32_t jpeg_quality = 35;
+    bool     audio_enable = true;   // this run can send sound; settings.audio is the switch
     bool     stub         = false;
-    int64_t  pin_arg      = -1;  // -1: persistent random PIN, 0: --no-pin
-    bool     view_only    = false;
+    int64_t  pin_arg      = settings.pin_enabled ? -1 : 0;  // -1: persistent random PIN, 0: --no-pin
+    bool     ui_enable    = true;
+    uint16_t panel_port   = 19803;
+    bool     port_given   = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -216,6 +231,11 @@ int main(int argc, char* argv[]) {
             max_clients = static_cast<uint32_t>(std::stoi(argv[++i]));
         } else if (arg == "--tcp-port" && i + 1 < argc) {
             tcp_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+            port_given = true;
+        } else if (arg == "--no-ui") {
+            ui_enable = false;
+        } else if (arg == "--panel-port" && i + 1 < argc) {
+            panel_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--udp-port" && i + 1 < argc) {
             udp_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--audio-port" && i + 1 < argc) {
@@ -257,6 +277,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "[Host] Unknown argument: " << arg << "\n";
             usage(argv[0]);
         }
+    }
+
+    // Launched again (from the desktop, say) while running: show the panel
+    // of the running host instead of failing on its busy ports.
+    if (ui_enable && !stub && !port_given && immersive::ui::open_running_instance(config_dir())) {
+        std::cout << "[Host] Already running: opened its settings window\n";
+        return 0;
     }
 
     std::cout << "[Host] Configuration: max_clients=" << max_clients
@@ -336,7 +363,7 @@ int main(int argc, char* argv[]) {
 
     // 5. Audio capture (WASAPI loopback)
     std::unique_ptr<immersive::IAudioCapture> audio_capture;
-    if (audio_enable) {
+    if (audio_enable && settings.audio) {
         audio_capture = immersive::create_audio_capture();
         if (!audio_capture || !audio_capture->start()) {
             std::cerr << "[Host] Audio capture failed to start — audio disabled\n";
@@ -386,6 +413,11 @@ int main(int argc, char* argv[]) {
         std::atomic<bool> force_keyframe{false};  // set by REQUEST_KEYFRAME (loss recovery)
         std::atomic<bool> done{false};            // worker returned: join() won't block
         std::thread       worker;
+        // For the settings panel.
+        std::atomic<uint8_t>  codec{0xFF};
+        std::atomic<uint16_t> width{0}, height{0};
+        std::atomic<uint32_t> fps_cap{0};
+        std::atomic<uint64_t> frames{0}, bytes{0};
     };
 
     std::mutex ops_mutex;
@@ -470,7 +502,7 @@ int main(int argc, char* argv[]) {
 
         // --- Resolve effective settings (client config overrides CLI) ---
         // Protocol codec values: 0=H.264, 1=HEVC, 2=MJPEG, 3=AV1, 0xFF=default
-        uint8_t requested_codec = (cfg.codec != 0xFF) ? cfg.codec : default_codec;
+        uint8_t requested_codec = (cfg.codec != 0xFF) ? cfg.codec : default_codec.load();
 
         // Output resolution (downscale keeping aspect, even dimensions for NV12)
         uint32_t out_w = display.width;
@@ -522,7 +554,7 @@ int main(int argc, char* argv[]) {
         // lingering until something else forces a refresh.
         enc_config.gop_size     = std::max<uint32_t>(30, enc_config.fps * 4);
         enc_config.jpeg_quality = (cfg.jpeg_quality >= 10 && cfg.jpeg_quality <= 95)
-                                      ? cfg.jpeg_quality : jpeg_quality;
+                                      ? cfg.jpeg_quality : jpeg_quality.load();
         if (cfg.bitrate_kbps > 0) {
             enc_config.bitrate_kbps = std::min<uint32_t>(cfg.bitrate_kbps, 100000);
         }
@@ -607,6 +639,10 @@ int main(int argc, char* argv[]) {
         start_info.codec       = actual_codec;  // 0=H264 1=HEVC 2=MJPEG 3=AV1
         start_info.first_frame = first_frame;
         server->send_stream_start(client_id, start_info);
+        ctx->codec = actual_codec;
+        ctx->width = static_cast<uint16_t>(out_w);
+        ctx->height = static_cast<uint16_t>(out_h);
+        ctx->fps_cap = fps_cap;
 
         std::cout << "[Host] Streaming monitor " << (int)monitor_id
                   << " to client " << client_id
@@ -722,10 +758,12 @@ int main(int argc, char* argv[]) {
                     frame_number,
                     pkt.data.data(),
                     static_cast<uint32_t>(pkt.data.size()));
+                ctx->bytes += pkt.data.size();
             }
             if (!packets.empty()) {
                 frame_high_water[monitor_id].store(frame_number);
                 frame_number++;  // number only frames actually sent
+                ctx->frames++;
                 last_sent = now;
                 frames_since_keyframe++;
             }
@@ -876,7 +914,7 @@ int main(int argc, char* argv[]) {
         server->send_monitor_list(client_id, monitors, flags);
 
         // Notify about audio stream if enabled
-        if (audio_enable) {
+        if (audio_enable && settings.audio) {
             immersive::protocol::AudioStart astart;
             astart.sample_rate = 48000;
             astart.channels    = 2;
@@ -1085,14 +1123,11 @@ int main(int argc, char* argv[]) {
             if (status == p::VDISPLAY_OK) broadcast_monitor_list();
         });
 
-    server->set_on_virtual_display_remove([&](uint32_t client_id, uint8_t id) {
-        namespace p = immersive::protocol;
-        std::lock_guard<std::mutex> ops(ops_mutex);
+    // Remove a virtual screen this host made (from a headset or the panel).
+    // Caller holds ops_mutex and then broadcasts the monitor list.
+    auto remove_virtual_locked = [&](uint8_t id) {
         const auto active = vdm->get_active_displays();
-        if (std::find(active.begin(), active.end(), id) == active.end()) {
-            send_vresult(client_id, vdm_ok ? p::VDISPLAY_FAILED : p::VDISPLAY_UNSUPPORTED, true, id);
-            return;
-        }
+        if (std::find(active.begin(), active.end(), id) == active.end()) return false;
         // Stop its stream first (STREAM_STOP to whoever watches it).
         std::vector<uint8_t> keep;
         bool streaming = false;
@@ -1105,6 +1140,16 @@ int main(int argc, char* argv[]) {
         if (streaming) apply_selection_locked(streams_client_id, keep);
         vdm->remove_display(id);
         refresh_displays(0xFF);
+        return true;
+    };
+
+    server->set_on_virtual_display_remove([&](uint32_t client_id, uint8_t id) {
+        namespace p = immersive::protocol;
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        if (!remove_virtual_locked(id)) {
+            send_vresult(client_id, vdm_ok ? p::VDISPLAY_FAILED : p::VDISPLAY_UNSUPPORTED, true, id);
+            return;
+        }
         std::cout << "[Host] Client " << client_id << " removed virtual monitor " << (int)id << "\n";
         send_vresult(client_id, p::VDISPLAY_OK, true, id);
         broadcast_monitor_list();
@@ -1126,11 +1171,15 @@ int main(int argc, char* argv[]) {
 #endif
     const std::string adb_reverse = "adb reverse tcp:" + std::to_string(tcp_port) +
                                     " tcp:" + std::to_string(tcp_port) + kNull;
+    // Only an adb server started here, before the sockets, is used: turning
+    // USB on later in the panel takes effect on the next start.
+    bool adb_started = false, adb_missing = false;
     if (usb_enable && run_quiet(std::string("adb start-server") + kNull) != 0) {
         std::cout << "[Host] USB: adb not found on PATH; install Android platform-tools\n"
                   << "       to connect a headset over USB (Wi-Fi still works).\n";
-        usb_enable = false;
+        adb_missing = true;
     } else if (usb_enable) {
+        adb_started = true;
         std::cout << "[Host] USB: plug in the headset (USB debugging on) and press USB in the app.\n";
     }
 
@@ -1142,17 +1191,22 @@ int main(int argc, char* argv[]) {
     srv_config.monitor_count = static_cast<uint8_t>(std::min<size_t>(displays.size(), 255));
     srv_config.host_flags = (view_only ? immersive::protocol::HOST_FLAG_VIEW_ONLY : 0) |
                             (vdm_ok ? immersive::protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0);
-    srv_config.pin = pin_arg >= 0 ? static_cast<uint32_t>(pin_arg) : load_or_create_pin();
+    // With --no-pin an existing PIN is kept for when the panel turns it back on.
+    settings.pin = pin_arg > 0 ? static_cast<uint32_t>(pin_arg)
+                 : pin_arg < 0 ? load_or_create_pin()
+                               : [] { uint32_t p = 0; std::ifstream(config_dir() / "pairing-pin") >> p; return p; }();
+    settings.pin_enabled = pin_arg != 0;
+    srv_config.pin = settings.pin_enabled ? settings.pin.load() : 0;
 
     // A headset asked to pair: show the PIN on this PC's screen, since the
     // host may be running with no visible console. At most one every 5 s.
-    server->set_on_pin_requested([pin = srv_config.pin](const std::string& peer_ip) {
+    server->set_on_pin_requested([&settings](const std::string& peer_ip) {
         static std::atomic<int64_t> last_s{-5};
         const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         int64_t prev = last_s.load();
         if (now - prev < 5 || !last_s.compare_exchange_strong(prev, now)) return;
-        const std::string p = std::to_string(pin);
+        const std::string p = std::to_string(settings.pin.load());
         notify_desktop("Immersive-2 PIN: " + p.substr(0, 3) + " " + p.substr(3),
                        "A headset at " + peer_ip + " wants to connect. Type this PIN in it.");
     });
@@ -1164,7 +1218,7 @@ int main(int argc, char* argv[]) {
 
     // --- Audio streaming thread ---
     std::thread audio_thread;
-    if (audio_enable && audio_capture) {
+    if (audio_enable) {
         audio_thread = std::thread([&]() {
             // 288 stereo frames (6 ms) = 1160-byte packets: under any Wi-Fi
             // MTU, so a packet is never IP-fragmented (one lost fragment
@@ -1173,6 +1227,20 @@ int main(int argc, char* argv[]) {
             uint32_t seq = 0;
             std::vector<uint8_t> pkt;
             while (g_running) {
+                if (!settings.audio) {  // switched off in the panel
+                    if (audio_capture) { audio_capture->stop(); audio_capture.reset(); }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                if (!audio_capture) {   // switched (back) on
+                    audio_capture = immersive::create_audio_capture();
+                    if (!audio_capture || !audio_capture->start()) {
+                        std::cerr << "[Host] Audio capture failed to start\n";
+                        audio_capture.reset();
+                        settings.audio = false;
+                        continue;
+                    }
+                }
                 auto audio_frame = audio_capture->get_frame();
                 if (!audio_frame) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1221,6 +1289,52 @@ int main(int argc, char* argv[]) {
                                            : "no virtual screens on this desktop") << "\n";
     std::cout << "\n[Host] Press Ctrl+C to quit.\n\n";
 
+    // --- Tray icon + settings panel (src/ui) ---
+    std::unique_ptr<immersive::ui::HostUi> ui;
+    if (ui_enable) {
+        immersive::ui::Hooks hooks;
+        hooks.monitors = [&] {
+            std::vector<immersive::ui::MonitorRow> rows;
+            std::lock_guard<std::mutex> lock(displays_mutex);
+            for (const auto& d : displays)
+                rows.push_back({d.id, d.name, static_cast<uint16_t>(d.width), static_cast<uint16_t>(d.height),
+                                d.id >= immersive::protocol::VIRTUAL_MONITOR_ID_BASE});
+            return rows;
+        };
+        hooks.streams = [&](uint32_t& client_id) {
+            std::vector<immersive::ui::StreamRow> rows;
+            std::lock_guard<std::mutex> lock(streams_mutex);
+            client_id = active_streams.empty() ? 0 : streams_client_id;
+            for (const auto& [id, c] : active_streams)
+                if (c->codec != 0xFF)
+                    rows.push_back({id, c->codec, c->width, c->height, c->fps_cap, c->frames, c->bytes});
+            return rows;
+        };
+        hooks.remove_virtual = [&](uint8_t id) {
+            std::lock_guard<std::mutex> ops(ops_mutex);
+            if (!remove_virtual_locked(id)) return false;
+            std::cout << "[Host] Removed virtual monitor " << (int)id << " from the settings panel\n";
+            broadcast_monitor_list();
+            return true;
+        };
+        hooks.usb_note = [&, adb_started, adb_missing]() -> std::string {
+            if (!usb_enable) return "";
+            if (adb_missing) return "adb not found: install Android platform-tools";
+            if (!adb_started) return "Takes effect the next time Immersive-2 starts";
+            return "";
+        };
+        hooks.quit = [] { g_running = false; };
+        immersive::ui::Options opts;
+        opts.config_dir = config_dir();
+        opts.panel_port = panel_port;
+        opts.tcp_port = tcp_port;
+        opts.audio_port = audio_port;
+        opts.audio_available = audio_enable;
+        opts.virtual_supported = vdm_ok;
+        opts.stub = stub;
+        ui = immersive::ui::start(settings, *server, std::move(hooks), std::move(opts));
+    }
+
     // --- Main loop ---
     // Streaming happens in per-monitor worker threads; the main thread just
     // waits for the shutdown signal, and re-arms the USB tunnel every few
@@ -1238,16 +1352,18 @@ int main(int argc, char* argv[]) {
     };
     auto next_adb = std::chrono::steady_clock::now();
     while (g_running) {
-        if (usb_enable && std::chrono::steady_clock::now() >= next_adb) {
+        if (usb_enable && adb_started && std::chrono::steady_clock::now() >= next_adb) {
             run_quiet(adb_reverse);
             next_adb = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
         reap_graveyard(false);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (ui) ui->pump(std::chrono::milliseconds(100));  // runs the macOS menu bar
+        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // --- Shutdown ---
     std::cout << "[Host] Cleaning up...\n";
+    ui.reset();  // it calls into the server
 
     // Server first: its handler threads can still be inside a MONITOR_SELECT
     // callback starting new workers. Stopping streams before that left those

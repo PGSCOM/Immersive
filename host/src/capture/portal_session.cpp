@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace immersive::portal {
 
@@ -56,6 +57,7 @@ Snapshot          g_state;
 uint64_t          g_generations = 0;
 Clock::time_point g_next_attempt{};
 std::atomic<uint64_t> g_live{0};
+std::atomic<bool>     g_remote{false};  // g_state.remote_desktop, lock-free for the panel
 
 // Buffer size per node, set from the PipeWire thread: own lock, see header.
 std::mutex g_frame_mutex;
@@ -481,6 +483,7 @@ Result try_session(bool rd, const std::string& token, uint32_t rd_version,
     state.generation     = ++g_generations;
     state.remote_desktop = (devices & 3) != 0;
     g_state = state;
+    g_remote = state.remote_desktop;
     g_live  = state.generation;
     {
         std::lock_guard<std::mutex> lock(g_frame_mutex);
@@ -558,6 +561,24 @@ Snapshot ensure_session() {
 }
 
 uint64_t live_generation() { return g_live.load(); }
+
+bool input_denied() { return g_live.load() != 0 && !g_remote.load(); }
+
+void ask_again() {
+    std::error_code ec;
+    std::filesystem::remove(token_path(), ec);
+    {
+        std::unique_lock<std::timed_mutex> lock(g_mutex, 1s);
+        if (!lock) return;  // a dialog is already open
+        if (g_live) close_session();
+        g_next_attempt = {};
+    }
+    // Streams notice the closed session and ask for a new one themselves; this
+    // shows the dialog now even when nothing streams.
+    // ponytail: detached, so quitting while this dialog is open can race the
+    // exit; join it from shutdown if that ever shows up.
+    std::thread([] { ensure_session(); }).detach();
+}
 
 int open_pipewire_remote(uint64_t gen) {
     std::unique_lock<std::timed_mutex> lock(g_mutex, 1s);

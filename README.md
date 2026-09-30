@@ -165,6 +165,22 @@ cmake --build build
 
 The host listens on TCP :19800 (control) and UDP :19801 (video).
 
+**No terminal needed.** While it runs, the host keeps an icon in the tray
+(Windows notification area, macOS menu bar, the KDE tray or GNOME with the
+*AppIndicator* extension). Click it, or pick **Open Immersive-2** in its menu,
+for the settings window: the pairing PIN, the connected headsets (what each
+one streams, at what fps and bitrate, with **Disconnect**), and switches for
+remote control, the PIN, sound, USB, start at login, the default codec and
+the virtual screens. On a desktop without a tray the window opens when the
+host starts; launching the host again while it runs opens it too.
+
+The window is a page the host serves on `127.0.0.1` only, opened as an app
+window (Edge or Chrome `--app`, else the default browser), and only with the
+random key the host puts in the address each run. Changes apply at once and
+are kept in `host.conf` in the settings folder (`%APPDATA%\Immersive2`,
+`~/.config/immersive2`); command-line options override them for one run.
+`--no-ui` runs the host headless, exactly as a console program.
+
 Useful host options:
 
 | Option | Description |
@@ -176,7 +192,9 @@ Useful host options:
 | `--pin NNNNNN` | Pairing PIN headsets must enter. By default one is generated once and kept in the settings folder (`%APPDATA%\Immersive2`, `~/.config/immersive2`). |
 | `--no-pin` | No pairing: any device on the network may connect. |
 | `--view-only` | Share the screens but ignore mouse and keyboard input from every headset (remote control off). |
-| `--stub` | Fake displays, input only logged — protocol testing without a desktop. |
+| `--no-ui` | No tray icon and no settings window (servers, scripts, tests). |
+| `--panel-port N` | Port of the settings window on 127.0.0.1 (default 19803; any free one if busy). |
+| `--stub` | Fake displays, input only logged — protocol testing without a desktop. Ignores `host.conf`. |
 
 These are only defaults: the VR client can override codec, bitrate, JPEG
 quality, stream resolution and FPS at runtime from the menu's **Quality** tab
@@ -219,8 +237,8 @@ CI builds publish an `immersive2_client_android` artifact containing a debug-sig
 
 - The menu opens on **Connect** and lists the PCs running the host on your
   network. Press **Connect** next to yours (or type its address on the keypad).
-- The first time, type the **PIN** the PC shows in a notification when the
-  headset asks (it is also printed in the host window). The headset
+- The first time, type the **PIN** the PC shows in its settings window (and in
+  a notification when the headset asks). The headset
   remembers it, and on the next launch goes straight back to that PC.
 - Your monitors appear as screens on an arc in front of you. Choose which ones
   on the **Screens** tab; **Arrange around me** and **Bring in front** tidy
@@ -339,6 +357,7 @@ shows the screens wrong.
 - [x] OpenXR compositor layers for sharper text (opt-in)
 - [x] Controller vibration on clicks and grabs
 - [x] Remote control switch in the headset, and `--view-only` on the host
+- [x] Host tray icon + settings window (PIN, headsets, live switches, start at login)
 - [x] Mouse and keyboard in the WebXR scene
 - [x] Eye-tracking based foveated rendering (OpenXR eye gaze + head-gaze fallback)
 - [x] Hand tracking support (pinch pointer/click, no controllers required)

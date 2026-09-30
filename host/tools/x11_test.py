@@ -127,6 +127,7 @@ def run():
     env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
     env["DISPLAY"] = start_xvfb()
     env["XDG_SESSION_TYPE"] = "x11"
+    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="im2-x11-cfg-")  # never the user's host.conf
     x(env, "xrandr", "--setmonitor", "LEFT", f"{W//2}/200x{H}/200+0+0", "screen")
     x(env, "xrandr", "--setmonitor", "RIGHT", f"{W//2}/200x{H}/200+{W//2}+0", "none")
     # Left behind by a host that was killed: the next host must clear it.
@@ -139,7 +140,7 @@ def run():
 
     global host_log
     host_log = tempfile.TemporaryFile("w+")
-    host = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--no-audio", "--no-usb", "--no-pin",
+    host = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--no-audio", "--no-usb", "--no-ui", "--no-pin",
                              "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)], env=env,
                             stdout=host_log, stderr=subprocess.STDOUT)
     procs.append(host)

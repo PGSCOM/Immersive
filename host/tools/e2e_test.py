@@ -103,7 +103,7 @@ def step(msg):
 
 def start_host():
     # stdbuf: the host's stdout is block-buffered into a pipe otherwise.
-    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub", "--pin", PIN])
+    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub", "--no-ui", "--pin", PIN])
     procs.append(host)
     host.wait_for(r"\[Host\] Ready", 10)
     return host

@@ -30,6 +30,34 @@ The host application runs on your Windows PC and:
 └──────────┴──────────┴───────────┴───────────────┘
 ```
 
+#### Tray icon and settings window (`host/src/ui/`)
+
+The host's persistent UI, off with `--no-ui`. It never runs on a streaming
+thread:
+
+- **Settings** (`host_ui.h`): the switches the panel changes live, as atomics
+  that `main.cpp` reads where it used to read its CLI variables (view-only,
+  default codec and JPEG quality, sound, USB, PIN). Loaded from `host.conf`,
+  overridden by CLI flags; the panel writes back only the key it changed.
+- **Panel** (`panel.cpp` + `panel.html`): one thread serving a small HTTP
+  API on 127.0.0.1 only. Access needs the per-run token (in the URL the host
+  opens, then an HttpOnly SameSite=Strict cookie); the Host header must name
+  the panel (DNS rebinding) and requests carrying another Origin are refused;
+  POSTs also need an `X-Im2-Panel` header. It reads state through `Hooks`
+  lent by `main.cpp` (monitors, streams with frame/byte counters, virtual
+  screen removal) and changes the server live through `INetworkServer`
+  (`set_pin`, `set_host_flags`, which re-sends HELLO_ACK, `clients`,
+  `disconnect_client`).
+- **Tray** (`tray_win.cpp` Shell_NotifyIcon on its own thread,
+  `tray_mac.mm` NSStatusItem pumped from the main loop through
+  `HostUi::pump()`, `tray_linux.cpp` a StatusNotifierItem + dbusmenu on a
+  private session-bus connection): status line, PIN, Open, Quit. Without a
+  tray the panel opens at startup; `panel-url` in the settings folder lets a
+  second launch open the running host's window.
+- On a Wayland session the panel shows when the desktop refused remote
+  control (`portal::input_denied()`) and "Ask again" forgets the restore
+  token and restarts the portal session (`portal::ask_again()`).
+
 ### VR Client (Godot / OpenXR)
 
 The client runs on VR headsets (and on a PC for testing) and:

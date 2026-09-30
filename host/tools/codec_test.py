@@ -159,7 +159,7 @@ def main():
         return
     exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         ROOT, "host", "build", "immersive2_host")
-    host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-pin",
+    host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-ui", "--no-pin",
                              "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

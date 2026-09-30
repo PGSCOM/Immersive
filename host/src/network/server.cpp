@@ -104,6 +104,8 @@ public:
         if (running_) return false;
         config_ = config;
         monitor_count_ = config.monitor_count;
+        pin_ = config.pin;
+        host_flags_ = config.host_flags;
 
 #ifdef _WIN32
         WSADATA wsa;
@@ -491,6 +493,47 @@ public:
         on_vdisplay_remove_ = std::move(cb);
     }
 
+    void set_pin(uint32_t pin) override { pin_ = pin; }
+
+    void set_host_flags(uint8_t flags) override {
+        if (host_flags_.exchange(flags) == flags) return;
+        const protocol::HelloAck ack = make_ack();
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (auto& [id, client] : clients_) {
+            if (!client.authed) continue;
+            protocol::ControlHeader header{static_cast<uint8_t>(protocol::MessageType::HELLO_ACK),
+                                           static_cast<uint32_t>(sizeof(ack))};
+            if (!send_tcp(client.tcp_socket, &header, sizeof(header)) ||
+                !send_tcp(client.tcp_socket, &ack, sizeof(ack)))
+                shutdown(client.tcp_socket, SHUTDOWN_BOTH);
+        }
+    }
+
+    std::vector<ClientInfo> clients() const override {
+        std::vector<ClientInfo> out;
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (const auto& [id, c] : clients_) {
+            if (!c.authed) continue;
+            char ip[INET_ADDRSTRLEN] = {};
+            inet_ntop(AF_INET, &c.udp_addr.sin_addr, ip, sizeof(ip));
+            out.push_back({id, c.name, ip, c.tcp_media});
+        }
+        std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        return out;
+    }
+
+    void disconnect_client(uint32_t client_id) override {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.find(client_id);
+        if (it == clients_.end()) return;
+        {
+            std::lock_guard<std::mutex> auth(auth_mutex_);
+            kicked_.insert(it->second.udp_addr.sin_addr.s_addr);
+        }
+        std::cout << "[Server] Client " << client_id << " disconnected from the settings panel\n";
+        shutdown(it->second.tcp_socket, SHUTDOWN_BOTH);
+    }
+
     bool is_running() const override { return running_; }
 
     uint32_t client_count() const override {
@@ -656,15 +699,22 @@ private:
                                              strnlen(hello.client_name, sizeof(hello.client_name)))
                               << (tcp_media ? " (video/audio over TCP)" : "") << "\n";
 
-                    const uint8_t reject = check_pin(peer, hello.pin);
+                    bool kicked;  // disconnected from the panel: ask for the PIN once
+                    {
+                        std::lock_guard<std::mutex> lock(auth_mutex_);
+                        kicked = kicked_.erase(peer.s_addr) > 0;
+                    }
+                    const uint8_t reject = kicked ? protocol::REJECT_PIN_REQUIRED
+                                                  : check_pin(peer, hello.pin);
                     if (reject) {
                         std::cerr << "[Server] Client " << client_id << " refused: "
-                                  << (reject == protocol::REJECT_PIN_REQUIRED ? "no PIN"
+                                  << (kicked ? "disconnected from the settings panel, asking for the PIN"
+                                      : reject == protocol::REJECT_PIN_REQUIRED ? "no PIN"
                                       : reject == protocol::REJECT_WRONG_PIN ? "wrong PIN"
                                       : "too many wrong PINs, locked out for a minute")
                                   << " (the PIN is shown in this window)\n";
                         send_reject(sock, reject);
-                        if (reject != protocol::REJECT_LOCKED_OUT && on_pin_requested_)
+                        if (reject != protocol::REJECT_LOCKED_OUT && !kicked && on_pin_requested_)
                             on_pin_requested_(inet_ntoa(peer));
                         rejected = true;
                         break;
@@ -682,7 +732,11 @@ private:
                             break;
                         }
                         auto it = clients_.find(client_id);
-                        if (it != clients_.end()) it->second.authed = true;
+                        if (it != clients_.end()) {
+                            it->second.authed = true;
+                            it->second.name.assign(hello.client_name,
+                                                   strnlen(hello.client_name, sizeof(hello.client_name)));
+                        }
                     }
                     authed = true;
                     set_recv_timeout(sock, 0);  // paired: idle is fine now (keepalive covers dead peers)
@@ -696,13 +750,7 @@ private:
                         if (it != clients_.end()) it->second.tcp_media = true;
                     }
 
-                    protocol::HelloAck ack{};
-                    ack.protocol_version = protocol::PROTOCOL_VERSION;
-                    ack.udp_port = config_.udp_port;
-                    ack.monitor_count = monitor_count_;
-                    ack.flags = config_.host_flags;
-                    std::strncpy(ack.host_name, host_name_.c_str(), sizeof(ack.host_name) - 1);
-
+                    const protocol::HelloAck ack = make_ack();
                     send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
                     // Monitor list and audio announcement follow the ACK.
                     if (on_connected_) on_connected_(client_id);
@@ -874,13 +922,14 @@ private:
     /// Five wrong PINs from one address lock it out for a minute, and every
     /// wrong answer costs half a second, so the 900 000 PINs can't be walked.
     uint8_t check_pin(struct in_addr peer, uint32_t pin) {
-        if (config_.pin == 0 || peer.s_addr == htonl(INADDR_LOOPBACK)) return 0;
+        const uint32_t want = pin_;
+        if (want == 0 || peer.s_addr == htonl(INADDR_LOOPBACK)) return 0;
         const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(auth_mutex_);
             auto& st = auth_failures_[peer.s_addr];
             if (now < st.locked_until) return protocol::REJECT_LOCKED_OUT;
-            if (pin == config_.pin) { st.failures = 0; return 0; }
+            if (pin == want) { st.failures = 0; return 0; }
             if (pin == 0) return protocol::REJECT_PIN_REQUIRED;
             if (++st.failures >= 5) {
                 st.failures = 0;
@@ -889,6 +938,16 @@ private:
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         return protocol::REJECT_WRONG_PIN;
+    }
+
+    protocol::HelloAck make_ack() const {
+        protocol::HelloAck ack{};
+        ack.protocol_version = protocol::PROTOCOL_VERSION;
+        ack.udp_port = config_.udp_port;
+        ack.monitor_count = monitor_count_;
+        ack.flags = host_flags_;
+        std::strncpy(ack.host_name, host_name_.c_str(), sizeof(ack.host_name) - 1);
+        return ack;
     }
 
     /// Write one HELLO_REJECT straight to a socket (no client entry needed).
@@ -924,8 +983,8 @@ private:
             reply.protocol_version = protocol::PROTOCOL_VERSION;
             reply.tcp_port         = config_.tcp_port;
             reply.monitor_count    = monitor_count_;
-            reply.flags            = (config_.pin ? protocol::DISCOVERY_FLAG_PIN : 0) |
-                                     ((config_.host_flags & protocol::HOST_FLAG_VIEW_ONLY)
+            reply.flags            = (pin_ ? protocol::DISCOVERY_FLAG_PIN : 0) |
+                                     ((host_flags_ & protocol::HOST_FLAG_VIEW_ONLY)
                                           ? protocol::DISCOVERY_FLAG_VIEW_ONLY : 0);
             std::strncpy(reply.host_name, host_name_.c_str(), sizeof(reply.host_name) - 1);
             sendto(discovery_socket_, reinterpret_cast<const char*>(&reply), sizeof(reply), 0,
@@ -1057,6 +1116,9 @@ private:
     };
     std::mutex auth_mutex_;
     std::unordered_map<uint32_t, AuthState> auth_failures_;  ///< by peer IPv4
+    std::set<uint32_t> kicked_;  ///< peers disconnected from the panel (auth_mutex_)
+    std::atomic<uint32_t> pin_{0};
+    std::atomic<uint8_t>  host_flags_{0};
 
     // Per-client handler threads, joined in stop(). finished_threads_ marks the
     // ones that have run to completion so the accept loop can reap them.

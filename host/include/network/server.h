@@ -116,6 +116,26 @@ public:
     virtual void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) = 0;
     virtual void set_on_pin_requested(PinRequestedCallback cb) = 0;
 
+    /// Settings panel (host/src/ui): change the pairing PIN (0 = none) and
+    /// the HOST_FLAG_* bits while running. New flags are re-sent in a fresh
+    /// HELLO_ACK to every paired client (clients treat it as an update).
+    virtual void set_pin(uint32_t pin) = 0;
+    virtual void set_host_flags(uint8_t flags) = 0;
+
+    struct ClientInfo {
+        uint32_t    id;
+        std::string name;       ///< from HELLO
+        std::string address;    ///< peer IPv4
+        bool        tcp_media;  ///< HELLO_FLAG_TCP_MEDIA (USB)
+    };
+    /// Paired clients.
+    virtual std::vector<ClientInfo> clients() const = 0;
+
+    /// Drop a client. Its next HELLO from that address is refused once with
+    /// REJECT_PIN_REQUIRED, so the headset stops auto-reconnecting and asks
+    /// for the PIN instead of coming straight back.
+    virtual void disconnect_client(uint32_t client_id) = 0;
+
     /// Check if server is running
     virtual bool is_running() const = 0;
 

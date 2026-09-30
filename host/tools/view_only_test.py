@@ -23,7 +23,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 def main():
     exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "host", "build", "immersive2_host")
     log = tempfile.TemporaryFile("w+")
-    host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-pin", "--view-only",
+    host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-ui", "--no-pin", "--view-only",
                              "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)],
                             stdout=log, stderr=subprocess.STDOUT)
     try:

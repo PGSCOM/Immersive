@@ -58,7 +58,9 @@ cmake --build build
 
 ```bash
 # Debian/Ubuntu. Every group is optional; the host builds with whatever is found
-# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=… FFmpeg=…").
+# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=… FFmpeg=… Tray=…").
+# libdbus-1-dev also gives the tray icon (StatusNotifierItem); without it the
+# settings window opens at startup instead.
 sudo apt install build-essential cmake pkg-config \
   libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
   libdbus-1-dev libpipewire-0.3-dev \
@@ -126,7 +128,20 @@ looked up at run time: a macOS without it just offers none.
 
 `./build/immersive2_host --stub` serves three fake solid-grey monitors (plus
 fake virtual screens on request) and only logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
-use it.
+use it, with `--no-ui` so no tray icon or window appears. `--stub` also
+ignores `host.conf`, so saved settings never change a test run.
+
+### Tray icon and settings window
+
+The host shows a tray / menu-bar icon (`src/ui/tray_win.cpp`, `tray_mac.mm`,
+`tray_linux.cpp`) and serves its settings page (`src/ui/panel.html`, compiled
+into the binary with the Grotesk font at build time) on `127.0.0.1:19803`.
+On GNOME the icon needs the *AppIndicator and KStatusNotifierItem* extension
+(Ubuntu ships it); without a tray the window opens at startup. The page is
+opened as an app window: Edge on Windows, Chrome/Chromium on Linux when
+installed, else the default browser. `host/tools/panel_test.py` tests the
+page's security, every setting and, on Linux with `dbus-run-session` and
+python3-dbus/python3-gi, the tray on a private session bus.
 
 ### CMake Options
 
