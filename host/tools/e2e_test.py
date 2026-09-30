@@ -117,28 +117,27 @@ def expect_streaming(client, since):
         client.wait_for(rf"Streaming monitor {mid} ", 20, since)
     start = client.mark()
     for mid in MONITORS:
-        client.wait_for(rf"Streaming monitor {mid} ", 20, since)
         # The --stub capture fills monitor i with grey 64 + 48*i.
-        want = 64 + 48 * mid
-        rx = re.compile(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})")
-        end = time.time() + 20
-        seen = None
-        i = start
-        while time.time() < end:
-            while i < len(client.lines):
-                m = rx.search(client.lines[i])
-                i += 1
-                if m:
-                    seen = m.group(1)
-                    got = [int(seen[k:k + 2], 16) for k in (0, 2, 4)]
-                    if all(abs(c - want) <= 8 for c in got):
-                        break
-            else:
-                time.sleep(0.05)
-                continue
-            break
-        else:
-            fail(f"monitor {mid} panel shows #{seen}, expected grey {want}")
+        expect_shade(client, mid, 64 + 48 * mid, start)
+
+
+def expect_shade(client, mid, want, since):
+    """Monitor `mid`'s panel shows grey `want` within 20 s."""
+    rx = re.compile(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})")
+    end = time.time() + 20
+    seen = None
+    i = since
+    while time.time() < end:
+        while i < len(client.lines):
+            m = rx.search(client.lines[i])
+            i += 1
+            if m:
+                seen = m.group(1)
+                got = [int(seen[k:k + 2], 16) for k in (0, 2, 4)]
+                if all(abs(c - want) <= 8 for c in got):
+                    return
+        time.sleep(0.05)
+    fail(f"monitor {mid} panel shows #{seen}, expected grey {want}")
 
 
 def main():
@@ -165,24 +164,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/9 connect, stream and decode 3 monitors")
+    step("1/10 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/9 host killed -> client reconnects to a new host")
+    step("2/10 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/9 host frozen -> client times out, then recovers")
+    step("3/10 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/9 host sockets use TCP keepalive")
+    step("4/10 host sockets use TCP keepalive")
     if shutil.which("ss"):
         out = subprocess.run(["ss", "-tno", "state", "established", "( sport = :19800 )"],
                              capture_output=True, text=True).stdout
@@ -191,7 +190,7 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/9 USB mode: video over the TCP control socket")
+    step("5/10 USB mode: video over the TCP control socket")
     # Same thing a headset on a cable does through `adb reverse`.
     client.stop()
     procs.remove(client)
@@ -205,7 +204,7 @@ def main():
     expect_streaming(usb, 0)
     client_lines = client.lines + usb.lines
 
-    step("6/9 LAN discovery and PIN pairing")
+    step("6/10 LAN discovery and PIN pairing")
     run_godot_test("discovery_test.gd")
     lan = lan_ip()
     if lan:
@@ -233,7 +232,22 @@ def main():
     else:
         print("      (PIN over the network skipped: this machine has no LAN address)")
 
-    step("7/9 Ctrl+C -> host exits")
+    step("7/10 a virtual screen asked for from the headset")
+    for p in procs:
+        if p is not host:
+            p.stop()
+    mark = host.mark()
+    virt = Proc("client-virtual", [
+        "godot", "--headless", "--xr-mode", "off", "--path", CLIENT_DIR, "--",
+        "--im2-host=127.0.0.1", "--im2-capture", "--im2-monitors=0",
+        "--im2-virtual=1280x720"])
+    procs.append(virt)
+    host.wait_for(r"asked for a 1280x720 virtual screen: monitor 100", 20, mark)
+    virt.wait_for(r"Streaming monitor 100 ", 20)
+    expect_shade(virt, 100, 208, 0)  # the --stub virtual screens' grey
+    client_lines += virt.lines
+
+    step("8/10 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
@@ -247,7 +261,7 @@ def main():
         p.stop()
     procs.clear()
 
-    step("8/9 in-VR menu: keypads, PIN, tabs and layout")
+    step("9/10 in-VR menu: keypads, PIN, tabs and layout")
     if shutil.which("xvfb-run"):
         menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
                              "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
@@ -258,7 +272,7 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("9/9 hand tracking, controllers, screens and keyboard")
+    step("10/10 hand tracking, controllers, screens and keyboard")
     for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd"):
         run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")

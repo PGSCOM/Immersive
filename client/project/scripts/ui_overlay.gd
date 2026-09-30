@@ -1124,7 +1124,6 @@ func _rebuild_monitor_list() -> void:
 		slot.custom_minimum_size = Vector2(116, 0)
 		line.add_child(slot)
 		if mon.get("virtual", false):
-			row.text = "Virtual  ·  %d × %d" % [mon.get("width", 0), mon.get("height", 0)]
 			var remove := _button("Remove")
 			remove.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 			remove.pressed.connect(func(): virtual_screen_remove_requested.emit(mid))

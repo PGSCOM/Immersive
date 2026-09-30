@@ -86,6 +86,10 @@ cmake --build build
   file to choose again. Compositors whose portal lacks RemoteDesktop (e.g.
   wlroots) stream fine but ignore VR input.
 - **X11**: MIT-SHM capture per RandR monitor, XTEST input. No dialog.
+- **Virtual screens** (added from the headset): on X11 an extra RandR 1.5
+  monitor (the X screen grows to the right to hold it); on GNOME Wayland a
+  Mutter virtual monitor (`org.gnome.Mutter.ScreenCast` RecordVirtual, no
+  dialog). Other Wayland compositors answer that they can't.
 - **Audio**: the monitor of the default output, through PulseAudio or
   PipeWire (pipewire-pulse).
 - **Video**: H.264 / HEVC / AV1 through FFmpeg — NVENC first, then VAAPI, then
@@ -114,10 +118,14 @@ the terminal (or the binary) that launches the host:
   granting it.
 - **Accessibility** — without it the VR mouse/keyboard does nothing.
 
+Virtual screens added from the headset use CoreGraphics' private
+`CGVirtualDisplay` (macOS 11+, the API behind DeskPad and BetterDisplay). It is
+looked up at run time: a macOS without it just offers none.
+
 ### Protocol testing without a desktop
 
-`./build/immersive2_host --stub` serves three fake solid-grey monitors and only
-logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
+`./build/immersive2_host --stub` serves three fake solid-grey monitors (plus
+fake virtual screens on request) and only logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
 use it.
 
 ### CMake Options

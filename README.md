@@ -289,8 +289,8 @@ clicked or typed; a host started with `--view-only` enforces it for everyone.
 A PC can add screens that exist only in the headset (Screens tab → **Add a
 virtual screen**, 1080p to 4K; up to four, removable from the list). The host
 creates them on X11 (an extra RandR monitor), on GNOME Wayland (Mutter's
-virtual monitors) and on macOS (a virtual display); other desktops answer
-that they can't. They are removed again when the host quits.
+virtual monitors) and on macOS (a virtual display, not yet tried on a real
+Mac); other desktops answer that they can't. They are removed again when the host quits.
 
 ### Sharper text
 

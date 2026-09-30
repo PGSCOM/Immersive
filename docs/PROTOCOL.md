@@ -46,7 +46,7 @@ on Android.
 | protocol_version | uint8 | |
 | tcp_port | uint16 LE | Control port to connect to |
 | monitor_count | uint8 | Number of displays |
-| flags | uint8 | Bit 0 `DISCOVERY_FLAG_PIN`: connecting needs the pairing PIN |
+| flags | uint8 | Bit 0 `DISCOVERY_FLAG_PIN`: connecting needs the pairing PIN. Bit 1 `DISCOVERY_FLAG_VIEW_ONLY`: the PC shares its screens but takes no input (`--view-only`) |
 | host_name | char[64] | The PC's name, UTF-8, NUL-padded |
 
 ---
@@ -123,10 +123,10 @@ captures audio) — or with HELLO_REJECT and closes.
 Response to HELLO.
 
 ```
- 0         1         3         4                  68
- +---------+---------+---------+------------------+
- | version | udp_port| mon_cnt | host_name[64]    |
- +---------+---------+---------+------------------+
+ 0         1         3         4                  68        69
+ +---------+---------+---------+------------------+---------+
+ | version | udp_port| mon_cnt | host_name[64]    | flags   |
+ +---------+---------+---------+------------------+---------+
 ```
 
 | Field | Type | Description |
@@ -135,6 +135,7 @@ Response to HELLO.
 | udp_port | uint16 LE | UDP port for video stream |
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
 | host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
+| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC |
 
 ---
 
@@ -153,11 +154,17 @@ stop retrying on 4.
 
 ### `0x03` MONITOR_LIST — Host → Client
 
-Sent after HELLO_ACK to enumerate available displays.
+Sent after HELLO_ACK to enumerate available displays, and again to every
+client whenever a virtual monitor is added or removed.
 
 ```
-Payload: uint8 count + count × MonitorInfo
+Payload: uint8 count + count × MonitorInfo [+ count × uint8 flags]
 ```
+
+The trailing flags (optional, older hosts omit them) are one byte per
+monitor, in the same order: bit 0 `MONITOR_FLAG_VIRTUAL` (made by this host
+on request, removable with VIRTUAL_DISPLAY_REMOVE), bit 1
+`MONITOR_FLAG_PRIMARY`.
 
 **MonitorInfo** (70 bytes):
 ```
@@ -332,6 +339,42 @@ effect immediately. The reference client keeps each screen where it was.
 When a stream is downscaled the host announces the scaled dimensions in
 STREAM_START and maps incoming INPUT_MOUSE coordinates (which are in stream
 pixels) back to native monitor pixels.
+
+---
+
+### `0x22` VIRTUAL_DISPLAY_CREATE — Client → Host
+
+Ask for an extra monitor that exists only to be shown in VR (X11: a RandR
+monitor; GNOME: a Mutter virtual monitor; macOS: a CGVirtualDisplay). Only
+sent when HELLO_ACK set `HOST_FLAG_VIRTUAL_DISPLAYS`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| width | uint16 LE | Pixels; the host clamps to 640–7680 and rounds down to even |
+| height | uint16 LE | Pixels; clamped to 480–4320, even |
+| refresh_rate | uint8 | Hz, 0 = 60 (clamped to 24–144) |
+
+The host answers with VIRTUAL_DISPLAY_RESULT and, on success, sends every
+client a new MONITOR_LIST. Virtual monitors get ids from 100
+(`VIRTUAL_MONITOR_ID_BASE`), at most 4 at a time, and are removed when the
+host quits. The client streams one like any other monitor (MULTI_MONITOR_SELECT).
+
+### `0x23` VIRTUAL_DISPLAY_REMOVE — Client → Host
+
+| Field | Type | Description |
+|-------|------|-------------|
+| monitor_id | uint8 | A monitor flagged `MONITOR_FLAG_VIRTUAL` |
+
+If it is streaming, the host first sends STREAM_STOP for it. Answered with
+VIRTUAL_DISPLAY_RESULT, then a new MONITOR_LIST to every client.
+
+### `0x24` VIRTUAL_DISPLAY_RESULT — Host → Client
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | uint8 | 0 `VDISPLAY_OK`, 1 `VDISPLAY_UNSUPPORTED` (this desktop cannot make them), 2 `VDISPLAY_FAILED` (see the host log), 3 `VDISPLAY_LIMIT` (4 already exist) |
+| removed | uint8 | 1 = answer to REMOVE, 0 = answer to CREATE |
+| monitor_id | uint8 | The monitor created / removed; 0xFF on failure |
 
 ---
 
@@ -568,4 +611,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB) — additive, old clients are unaffected |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors) — additive, old clients are unaffected |

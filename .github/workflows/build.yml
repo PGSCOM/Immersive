@@ -72,6 +72,9 @@ jobs:
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
 
+      - name: View-only test (--view-only)
+        run: python3 host/tools/view_only_test.py
+
       - name: Codec test (H.264/HEVC/AV1 decoded by ffmpeg)
         run: python3 host/tools/codec_test.py
 
