@@ -41,6 +41,7 @@ constexpr Sock kBadSock = INVALID_SOCKET;
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/select.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 using Sock = int;
@@ -54,6 +55,16 @@ namespace {
 #ifndef _WIN32
 void closesocket(int s) { close(s); }
 #endif
+
+/// Keep panel sockets out of child processes (adb's daemon, the browser):
+/// an inherited listener would keep the panel port bound after we exit.
+void no_inherit(Sock s) {
+#ifdef _WIN32
+    SetHandleInformation(reinterpret_cast<HANDLE>(s), HANDLE_FLAG_INHERIT, 0);
+#else
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+#endif
+}
 
 constexpr const char* kCodecNames[] = {"h264", "h265", "mjpeg", "av1"};
 
@@ -208,6 +219,7 @@ public:
         for (uint16_t port : {opt_.panel_port, static_cast<uint16_t>(0)}) {
             listen_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (listen_ == kBadSock) return false;
+            no_inherit(listen_);
             sockaddr_in a{};
             a.sin_family = AF_INET;
             a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // never any other interface
@@ -285,6 +297,7 @@ private:
             if (select(static_cast<int>(listen_) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
             Sock c = accept(listen_, nullptr, nullptr);
             if (c == kBadSock) continue;
+            no_inherit(c);
 #ifdef _WIN32
             DWORD ms = 2000;
             setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&ms), sizeof(ms));

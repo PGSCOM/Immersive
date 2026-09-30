@@ -202,6 +202,9 @@ def run(tmp):
         if time.time() > end:
             fail("AAA111 not re-armed after replug")
         time.sleep(0.1)
+    end = time.time() + 5  # the line follows the reverse call; give it a moment
+    while host.count("headset AAA111 is on the cable") < 2 and time.time() < end:
+        time.sleep(0.05)
     if host.count("headset AAA111 is on the cable") != 2:
         fail("replug not reported")
     host.stop()
