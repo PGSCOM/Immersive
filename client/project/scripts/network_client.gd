@@ -127,6 +127,7 @@ const HOST_TIMEOUT_MS: int = 10000
 ## idle screen is re-sent), so a pulled cable is noticed sooner.
 const USB_TIMEOUT_MS: int = 5000
 var _last_rx_ms: int = 0
+var _last_tick_ms: int = 0
 
 ## Throttle for the stale-partial-frame sweep.
 var _next_cleanup_ms: int = 0
@@ -178,6 +179,12 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool
 
 func _process(_delta: float) -> void:
 	tcp_client.poll()
+	# A Pico/Quest that sleeps (headset taken off) stops this loop without an
+	# Android pause: a gap in our own ticks is our silence, not the host's.
+	var now := Time.get_ticks_msec()
+	if _last_tick_ms > 0 and now - _last_tick_ms > 2000:
+		_last_rx_ms = now
+	_last_tick_ms = now
 
 	# Handle TCP connection state
 	var tcp_status: StreamPeerTCP.Status = tcp_client.get_status()
@@ -357,6 +364,13 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var host_flags: int = payload[68] if payload.size() >= 69 else 0
 				print("[Network] HELLO_ACK: version=%d udp_port=%d monitors=%d host=%s flags=%d" %
 					[version, udp_port, monitor_count, host_name, host_flags])
+				# The host sends video to our address at ITS UDP port: listen
+				# there, whatever port this client was configured with.
+				if not _tcp_media and udp_port > 0 and udp_port != _udp_port:
+					_udp_port = udp_port
+					udp_client.close()
+					if udp_client.bind(_udp_port, "*", 8 * 1024 * 1024) != OK:
+						push_error("[Network] Failed to bind UDP port %d — no video will be received" % _udp_port)
 				handshake_accepted.emit(host_name, host_flags)
 
 		MSG_HELLO_REJECT:

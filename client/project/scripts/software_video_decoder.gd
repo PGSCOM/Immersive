@@ -62,9 +62,15 @@ func is_open() -> bool:
 ## Feed one encoded frame (a complete JPEG). Thread-safe. Only the most recent
 ## frame is retained; if decoding lags behind arrival, older frames are dropped
 ## so the display stays current instead of falling behind.
+## Frames handed in / decoded / rejected as corrupt (test harness line).
+var frames_in := 0
+var frames_out := 0
+var frames_bad := 0
+
 func submit(data: PackedByteArray) -> void:
 	if _closed or data.is_empty():
 		return
+	frames_in += 1
 	_mutex.lock()
 	_encoded = data
 	_has_encoded = true
@@ -141,6 +147,7 @@ func _decode_worker() -> void:
 
 		var img := Image.new()
 		if img.load_jpg_from_buffer(data) != OK:
+			frames_bad += 1
 			continue  # corrupt/partial JPEG — skip, keep the previous frame
 		if img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGBA8)
@@ -149,6 +156,7 @@ func _decode_worker() -> void:
 		img.generate_mipmaps()
 
 		_mutex.lock()
+		frames_out += 1
 		_decoded = img
 		_has_decoded = true
 		_mutex.unlock()

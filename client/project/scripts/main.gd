@@ -1189,8 +1189,12 @@ func _handle_debug_capture(delta: float) -> void:
 			var img := tex.get_image()
 			if img:
 				img.save_png("user://im2_view_%d.png" % _debug_capture_count)
-	print("[Immersive-2][TEST] debug capture #%d (panel=%s) state=%d decoders=%d" %
-		[_debug_capture_count, str(saved), current_state, _decoders.size()])
+	var sw_stats := []
+	for mid in _sw_decoders:
+		var sw: SoftwareVideoDecoder = _sw_decoders[mid]
+		sw_stats.append("%d:%d/%d/%d" % [mid, sw.frames_in, sw.frames_out, sw.frames_bad])
+	print("[Immersive-2][TEST] debug capture #%d (panel=%s) state=%d decoders=%d mjpeg in/out/bad=%s" %
+		[_debug_capture_count, str(saved), current_state, _decoders.size(), " ".join(sw_stats)])
 	# One line per panel with its centre pixel, so host/tools/e2e_test.py can
 	# check each monitor's decoded image landed on that monitor's panel.
 	for mid in active_monitor_ids:
@@ -1688,9 +1692,10 @@ func _load_config() -> void:
 
 	_apply_cmdline_overrides()
 
-## Allow driving the client from adb without a headset:
-##   am start -n com.immersive2.vrclient/com.godot.game.GodotAppLauncher \
-##       --esa command_line "--im2-host=192.168.1.34,--im2-capture"
+## Test-harness arguments. On a PC pass them after `--`. On Android the
+## launcher drops intent extras, so bake them into a test APK with the export
+## option command_line/extra_args="--im2-host=192.168.1.34 --im2-capture"
+## (and reinstall the normal APK afterwards).
 ## Recognised: --im2-host=IP, --im2-port=N, --im2-udp-port=N, --im2-codec=N, --im2-capture,
 ## --im2-usb (video/audio over TCP, as over a USB cable),
 ## --im2-usb-port=N (the USB tunnel is 127.0.0.1:N: automatic USB on desktop),

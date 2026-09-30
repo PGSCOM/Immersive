@@ -93,6 +93,8 @@ Linux only (Xvfb, xrandr, xsetroot, xdotool, xev, Python PIL). Runs the real hos
 
 Desktop testing (no headset): open `client/project/` in Godot 4.7+, press F5, press `O` to open the overlay and connect.
 
+On a real headset the harness args can't come from `am start` (the launcher drops intent extras): export a test APK with `command_line/extra_args="--im2-host=… --im2-port=… --im2-capture"` added to the Android preset (don't commit it), run a `--stub --no-ui --no-usb` host on free ports, and read `adb logcat -s godot:* Im2VideoDecoder:*` (the `[TEST] debug capture` line carries MJPEG in/out/bad counts; Im2VideoDecoder logs H.264 output frames). Reinstall the normal APK afterwards. Start the adb server detached (`setsid -f adb start-server`) or it dies with the shell that spawned it, taking its `adb reverse` tunnels along.
+
 Export builds:
 
 ```bash
