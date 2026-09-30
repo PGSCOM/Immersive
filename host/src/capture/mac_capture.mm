@@ -1,7 +1,8 @@
 /// macOS screen capture through ScreenCaptureKit (macOS 12.3+, built for 13+).
 ///
 /// One SCStream per captured display, delivering BGRA frames at the display's
-/// pixel size into a latest-frame mailbox that acquire_frame() waits on.
+/// pixel size (or at the set_output_size() stream size, scaled on the GPU by
+/// ScreenCaptureKit) into a latest-frame mailbox that acquire_frame() waits on.
 /// SCStream callbacks only touch a shared FrameMailbox (never `this`), so a
 /// late callback after stop_capture()/destruction is harmless.
 
@@ -264,8 +265,8 @@ public:
             SCContentFilter* filter =
                 [[SCContentFilter alloc] initWithDisplay:target excludingWindows:@[]];
             SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
-            config.width                = w;
-            config.height               = h;
+            config.width                = out_w_ ? out_w_ : w;
+            config.height               = out_h_ ? out_h_ : h;
             config.pixelFormat          = kCVPixelFormatType_32BGRA;
             config.showsCursor          = YES;
             config.minimumFrameInterval = CMTimeMake(1, 60);
@@ -310,7 +311,8 @@ public:
             }
 
             std::cout << "[MacCapture] Started capture on display " << (int)display_id
-                      << " (" << w << "x" << h << ")\n";
+                      << " (" << w << "x" << h << " -> " << config.width << "x"
+                      << config.height << ")\n";
         }  // @autoreleasepool
         return true;
     }
@@ -343,6 +345,11 @@ public:
         return std::move(mb.latest);
     }
 
+    void set_output_size(uint32_t width, uint32_t height) override {
+        out_w_ = width;
+        out_h_ = height;
+    }
+
     bool is_capturing() const override {
         return stream_ != nil && mailbox_ && !mailbox_->stopped;
     }
@@ -352,6 +359,8 @@ private:
     Im2CaptureSink*               sink_   = nil;
     dispatch_queue_t              queue_  = nil;
     std::shared_ptr<FrameMailbox> mailbox_;
+    uint32_t                      out_w_  = 0;  // 0 = native size
+    uint32_t                      out_h_  = 0;
 };
 
 std::unique_ptr<IScreenCapture> create_screen_capture() {

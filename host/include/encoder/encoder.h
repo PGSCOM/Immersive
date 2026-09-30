@@ -71,7 +71,34 @@ public:
 
     /// Get human-readable encoder name
     virtual std::string name() const = 0;
+
+    /// True if encode() accepts frames of any size and scales them to the
+    /// configured width/height itself (on the GPU or with SIMD). main.cpp
+    /// then skips its own CPU downscale.
+    virtual bool scales_input() const { return false; }
 };
+
+/// The OS hardware encoder for H.264 / HEVC / AV1: Media Foundation on
+/// Windows, VideoToolbox on macOS, FFmpeg (NVENC → VAAPI → libx264) on Linux.
+/// The codec is taken from EncoderConfig::codec at initialize() time; returns
+/// nullptr (or fails initialize) when that codec cannot be encoded here.
+///
+/// Output contract, relied on by the client's MediaCodec decoder:
+///  - one encode() call → the packets of exactly one access unit (no B-frames,
+///    no reordering, no frame held back for lookahead);
+///  - H.264/HEVC as Annex-B with start codes, AV1 as low-overhead OBUs;
+///  - parameter sets (VPS/SPS/PPS, or the AV1 sequence header) in-band on
+///    every keyframe, so a client that joins or recovers mid-stream can start
+///    decoding at any IDR;
+///  - request_keyframe() makes the next encoded frame an IDR;
+///  - BT.601 limited-range colour, tagged in the VUI / colour config;
+///  - CBR-ish rate control at EncoderConfig::bitrate_kbps with a small VBV
+///    (~50 ms) so a single IDR stays a few dozen UDP chunks.
+std::unique_ptr<IVideoEncoder> create_hw_encoder();
+
+/// True if create_hw_encoder() can encode `codec` on this machine (probed
+/// once and cached).
+bool hw_encoder_available(VideoCodec codec);
 
 /// Detect the best available encoder backend
 EncoderBackend detect_best_encoder();

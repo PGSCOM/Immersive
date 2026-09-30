@@ -111,7 +111,7 @@ Immersive-2/
 ### Host
 - Windows 10/11 (x64) for full DXGI capture + SendInput + IDD features
 - Linux (X11 or Wayland) or macOS 13+ — see [docs/BUILDING.md](docs/BUILDING.md) for the
-  libraries and permissions (Linux/macOS stream MJPEG; GPU codecs are Windows-only)
+  libraries and permissions
 - CMake 3.20+
 - Visual Studio 2022 / MinGW-w64 (Windows) or Clang/GCC (Linux/macOS)
 - **No GPU encoder required** — the built-in MJPEG software encoder works on any CPU
@@ -153,7 +153,7 @@ Useful host options:
 
 | Option | Description |
 | --- | --- |
-| `--codec mjpeg\|h264\|h265\|av1` | Video codec. `mjpeg` (default) works with every client. The others use the GPU encoder (NVENC/AMF/QSV via Media Foundation); on the client they need the MediaCodec plugin (`client/android-plugin`) — without it the client auto-falls back to MJPEG. If the GPU lacks the codec the host falls back (→ H.264 → MJPEG). |
+| `--codec mjpeg\|h264\|h265\|av1` | Video codec. `mjpeg` (default) works with every client. The others use the hardware encoder (Media Foundation on Windows, VideoToolbox on macOS, FFmpeg NVENC/VAAPI — or libx264 — on Linux); on the client they need the MediaCodec plugin (`client/android-plugin`) — without it the client auto-falls back to MJPEG. If the GPU lacks the codec the host falls back (→ H.264 → MJPEG). |
 | `--jpeg-quality N` | MJPEG quality 10–95 (default 35; raise it on fast networks). |
 | `--no-audio` | Disable audio streaming. |
 | `--max-clients N` | Maximum simultaneous VR clients (default 4). |

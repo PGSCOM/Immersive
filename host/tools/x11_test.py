@@ -12,6 +12,8 @@ RandR monitors (left painted red, right blue):
   3. A mouse event on monitor 1 lands at monitor 1's origin + (x, y).
   4. Shift+A from the VR keyboard (VK 0x41 + shift bit) types 'A', and two
      wheel notches produce two button-4 clicks.
+  5. H.264 / HEVC / AV1 (needs ffmpeg) on that real red/blue content, via
+     codec_test.check_codecs(): chroma survives the encoder colour pipeline.
 """
 import io
 import os
@@ -25,6 +27,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from smoke_client import CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg, send_multi_select  # noqa: E402
+import codec_test  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HOST_BIN = os.path.join(ROOT, "host", "build", "immersive2_host")
@@ -119,8 +122,9 @@ def run():
                            stderr=subprocess.DEVNULL, text=True)
     procs.append(xev)
 
-    host = subprocess.Popen([HOST_BIN, "--no-audio", "--no-usb"], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    host_log = tempfile.TemporaryFile("w+")
+    host = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--no-audio", "--no-usb"], env=env,
+                            stdout=host_log, stderr=subprocess.STDOUT)
     procs.append(host)
     time.sleep(1.0)
 
@@ -176,11 +180,23 @@ def run():
     if log.count("button 4,") != 4:  # press + release per notch
         fail("expected two button-4 clicks for 240 wheel units")
 
+    # 5. Inter-frame codecs, decoded for real
+    if shutil.which("ffmpeg"):
+        codec_test.fail = fail  # clean up Xvfb on failure too
+        codec_test.check_codecs(s, udp, {0: (255, 0, 0), 1: (0, 0, 255)},
+                                {0: (640, 720), 1: (640, 720)})
+        host_log.seek(0)
+        for line in host_log:
+            if "Encoder]" in line:
+                print("[x11]   host: " + line.strip())
+    else:
+        print("[x11] (ffmpeg not installed: H.264/HEVC/AV1 check skipped)")
+
     s.close()
     host.terminate()
     if host.wait(timeout=5) != 0:
         fail("host did not exit cleanly")
-    print("[x11] OK: RandR monitors, per-monitor capture, mouse, keyboard and wheel")
+    print("[x11] OK: RandR monitors, per-monitor capture, mouse, keyboard, wheel, codecs")
 
 
 if __name__ == "__main__":

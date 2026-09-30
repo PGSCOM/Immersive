@@ -50,6 +50,7 @@ public:
     bool start_capture(uint8_t display_id) override {
         display_ = (display_id < kStubDisplayCount) ? display_id : 0;
         capturing_ = true;
+        delivered_ = false;
         std::cout << "[StubCapture] Started capture on display " << (int)display_id << "\n";
         return true;
     }
@@ -58,10 +59,16 @@ public:
 
     std::unique_ptr<CapturedFrame> acquire_frame(uint32_t timeout_ms) override {
         if (!capturing_) return nullptr;
-        // Sleep first: a stub that returns instantly turns the stream worker
-        // into a busy loop allocating a full frame as fast as the CPU allows.
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(std::max(1u, std::min(timeout_ms, 33u))));
+        // Like the real event-driven backends (WGC, ScreenCaptureKit,
+        // PipeWire) on a static desktop: one frame, then nothing until the
+        // content changes — which for a solid fill is never. This keeps the
+        // tests on main.cpp's idle path (resend on keyframe request, 1 s
+        // refresh). Sleep out the timeout: returning at once would spin.
+        if (delivered_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1u, timeout_ms)));
+            return nullptr;
+        }
+        delivered_ = true;
 
         auto frame = std::make_unique<CapturedFrame>();
         frame->monitor_id = display_;
@@ -82,6 +89,7 @@ public:
 
 private:
     bool    capturing_ = false;
+    bool    delivered_ = false;
     uint8_t display_   = 0;
 };
 

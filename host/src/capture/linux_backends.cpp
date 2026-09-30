@@ -5,6 +5,7 @@
 /// fallback. Anything else with DISPLAY set uses X11.
 
 #include "capture/linux_backends.h"
+#include "encoder/encoder.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -76,6 +77,12 @@ std::unique_ptr<IInputInjector> create_input_injector() {
     }
     return injector;
 }
+
+#ifndef IMMERSIVE_HAVE_FFMPEG
+// Built without FFmpeg: no H.264/HEVC/AV1, main.cpp falls back to MJPEG.
+std::unique_ptr<IVideoEncoder> create_hw_encoder() { return nullptr; }
+bool hw_encoder_available(VideoCodec) { return false; }
+#endif
 
 std::unique_ptr<IAudioCapture> create_audio_capture() {
 #ifdef IMMERSIVE_HAVE_PULSE

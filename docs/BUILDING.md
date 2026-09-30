@@ -58,13 +58,19 @@ cmake --build build
 
 ```bash
 # Debian/Ubuntu. Every group is optional; the host builds with whatever is found
-# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=…").
+# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=… FFmpeg=…").
 sudo apt install build-essential cmake pkg-config \
   libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
   libdbus-1-dev libpipewire-0.3-dev \
-  libpulse-dev
+  libpulse-dev \
+  libavcodec-dev libavutil-dev libswscale-dev
 # Fedora: libX11-devel libXext-devel libXrandr-devel libXtst-devel libXfixes-devel
-#         dbus-devel pipewire-devel pulseaudio-libs-devel
+#         dbus-devel pipewire-devel pulseaudio-libs-devel ffmpeg-devel (RPM Fusion)
+
+# GPU encoding (runtime): the VAAPI driver for your GPU.
+#   Intel (Broadwell and newer, incl. Core Ultra):  sudo apt install intel-media-va-driver-non-free
+#   AMD:                                              sudo apt install mesa-va-drivers
+#   NVIDIA: NVENC comes with the proprietary driver.
 
 cd host
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
@@ -82,6 +88,10 @@ cmake --build build
 - **X11**: MIT-SHM capture per RandR monitor, XTEST input. No dialog.
 - **Audio**: the monitor of the default output, through PulseAudio or
   PipeWire (pipewire-pulse).
+- **Video**: H.264 / HEVC / AV1 through FFmpeg — NVENC first, then VAAPI, then
+  libx264 (software H.264, fine for 1080p60 on a recent laptop CPU). The host
+  logs which one it picked (`[FfmpegEncoder] H.264 via h264_vaapi …`); if it
+  says libx264 on a machine with a GPU, install the VAAPI driver above.
 
 ### macOS (13 Ventura or newer)
 
@@ -94,7 +104,9 @@ cmake --build build
 ./build/immersive2_host
 ```
 
-Capture and system audio use ScreenCaptureKit, input uses CGEvent. The first
+Capture and system audio use ScreenCaptureKit (scaled to the stream size on the
+GPU), video is encoded by VideoToolbox (hardware H.264 / HEVC, low-latency mode),
+input uses CGEvent. The first
 run asks for two permissions in System Settings → Privacy & Security, granted to
 the terminal (or the binary) that launches the host:
 
@@ -129,8 +141,9 @@ When all hardware encoders are disabled (`=OFF`), the MJPEG software encoder
 6. Receives mouse/keyboard input from the VR client and injects it (SendInput,
    CGEvent, XTEST or the RemoteDesktop portal)
 
-Hardware H.264/HEVC/AV1 encoding is Windows-only for now; Linux and macOS
-stream MJPEG (the client negotiates it automatically).
+H.264/HEVC/AV1 are hardware-encoded on every OS (Media Foundation, VideoToolbox,
+FFmpeg NVENC/VAAPI); a codec the machine cannot encode falls back to H.264, then
+MJPEG, and the STREAM_START tells the client which one it got.
 
 ---
 

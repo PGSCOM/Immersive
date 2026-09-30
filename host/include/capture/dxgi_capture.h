@@ -56,6 +56,11 @@ public:
 
     /// Check if capture is currently active
     virtual bool is_capturing() const = 0;
+
+    /// Hint, set before start_capture(): the stream is encoded at this size.
+    /// Backends that can scale for free (ScreenCaptureKit on the GPU) deliver
+    /// frames at it; the others ignore it and deliver native size.
+    virtual void set_output_size(uint32_t /*width*/, uint32_t /*height*/) {}
 };
 
 /// Create a DXGI Desktop Duplication capture instance (exclusive, may fail

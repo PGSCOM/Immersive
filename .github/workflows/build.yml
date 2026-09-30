@@ -51,14 +51,15 @@ jobs:
           sudo apt-get install -y pkg-config \
             libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
             libdbus-1-dev libpipewire-0.3-dev libpulse-dev \
-            xvfb x11-xserver-utils x11-utils xdotool python3-pil
+            libavcodec-dev libavutil-dev libswscale-dev \
+            xvfb x11-xserver-utils x11-utils xdotool python3-pil ffmpeg
 
       - name: Configure CMake
         run: |
           cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF \
             -DCMAKE_CXX_FLAGS="-Wall -Wextra" | tee cmake.log
           # Every Linux backend must be compiled in CI, not silently skipped.
-          grep -q "Linux backends: X11=1 Wayland-portal=1 PulseAudio=1" cmake.log
+          grep -q "Linux backends: X11=1 Wayland-portal=1 PulseAudio=1 FFmpeg=1" cmake.log
 
       - name: Build
         run: |
@@ -71,7 +72,10 @@ jobs:
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
 
-      - name: X11 capture/input test (Xvfb)
+      - name: Codec test (H.264/HEVC/AV1 decoded by ffmpeg)
+        run: python3 host/tools/codec_test.py
+
+      - name: X11 capture/input/codec test (Xvfb)
         run: python3 host/tools/x11_test.py
 
       - name: Upload Host Artifact (Linux)
@@ -106,6 +110,11 @@ jobs:
           sleep 2
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
+
+      - name: Codec test (VideoToolbox, decoded by ffmpeg)
+        run: |
+          brew install ffmpeg
+          python3 host/tools/codec_test.py
 
       - name: Upload Host Artifact (macOS)
         uses: actions/upload-artifact@v7

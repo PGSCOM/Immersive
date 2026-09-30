@@ -101,9 +101,10 @@ namespace {
                   << "  --no-audio          Disable audio streaming\n"
                   << "  --no-usb            Don't run `adb reverse` for USB-connected headsets\n"
                   << "  --codec NAME        Video codec: mjpeg (default), h264, h265 or av1.\n"
-                  << "                      h264/h265/av1 use the GPU encoder (Media\n"
-                  << "                      Foundation) and require a matching decoder on\n"
-                  << "                      the client (Android MediaCodec plugin).\n"
+                  << "                      h264/h265/av1 use the hardware encoder (Media\n"
+                  << "                      Foundation, VideoToolbox, or NVENC/VAAPI via\n"
+                  << "                      FFmpeg with libx264 as fallback) and need the\n"
+                  << "                      client's MediaCodec decoder (Quest/Pico).\n"
                   << "  --jpeg-quality N    MJPEG quality 10-95 (default: 35)\n"
                   << "  --stub              Fake displays and logged-only input, for protocol\n"
                   << "                      tests without touching the real desktop\n"
@@ -227,14 +228,11 @@ int main(int argc, char* argv[]) {
     }
 
     // 2. Encoder availability. MJPEG always works (CPU). H.264/HEVC/AV1 use
-    // Media Foundation; each stream worker creates its own encoder instance.
-#ifdef _WIN32
-    const bool has_h264 = immersive::mf_encoder_available(immersive::VideoCodec::H264);
-    const bool has_h265 = immersive::mf_encoder_available(immersive::VideoCodec::H265);
-    const bool has_av1  = immersive::mf_encoder_available(immersive::VideoCodec::AV1);
-#else
-    const bool has_h264 = false, has_h265 = false, has_av1 = false;
-#endif
+    // the OS hardware encoder (create_hw_encoder); each stream worker creates
+    // its own encoder instance.
+    const bool has_h264 = immersive::hw_encoder_available(immersive::VideoCodec::H264);
+    const bool has_h265 = immersive::hw_encoder_available(immersive::VideoCodec::H265);
+    const bool has_av1  = immersive::hw_encoder_available(immersive::VideoCodec::AV1);
     std::cout << "[Host] Encoders available: MJPEG (software)"
               << (has_h264 ? ", H.264" : "")
               << (has_h265 ? ", HEVC" : "")
@@ -318,17 +316,6 @@ int main(int argc, char* argv[]) {
                              ActiveStream* ctx) {
         const uint8_t monitor_id = display.id;
 
-        // WGC is non-exclusive and should never return E_ACCESSDENIED; the retry
-        // loop is a safety net for transient failures (mode changes, etc.).
-        auto stream_capture = make_capture();
-        while (!stream_capture->start_capture(monitor_id)) {
-            if (!g_running || ctx->stop) return;
-            std::cerr << "[Host] Capture unavailable on monitor " << (int)monitor_id
-                      << " — retrying in 3 s...\n";
-            for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
         // --- Resolve effective settings (client config overrides CLI) ---
         // Protocol codec values: 0=H.264, 1=HEVC, 2=MJPEG, 3=AV1, 0xFF=default
         uint8_t requested_codec = (cfg.codec != 0xFF) ? cfg.codec : default_codec;
@@ -340,6 +327,22 @@ int main(int argc, char* argv[]) {
             out_w = cfg.max_width & ~1u;
             out_h = (static_cast<uint32_t>(display.height) * out_w / display.width) & ~1u;
             if (out_h < 2) out_h = 2;
+        }
+
+        // The retry loop is a safety net for transient failures (mode changes,
+        // a Wayland portal being re-created, a permission prompt).
+        std::unique_ptr<immersive::IScreenCapture> stream_capture;
+        for (;;) {
+            if (!stream_capture) {  // a backend can be unavailable for a while
+                stream_capture = make_capture();
+                if (stream_capture) stream_capture->set_output_size(out_w, out_h);
+            }
+            if (stream_capture && stream_capture->start_capture(monitor_id)) break;
+            if (!g_running || ctx->stop) return;
+            std::cerr << "[Host] Capture unavailable on monitor " << (int)monitor_id
+                      << " — retrying in 3 s...\n";
+            for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         immersive::EncoderConfig enc_config;
@@ -370,7 +373,7 @@ int main(int argc, char* argv[]) {
 
         auto try_mf_codec = [&](immersive::VideoCodec vc, uint8_t proto_value) -> bool {
             enc_config.codec = vc;
-            auto enc = immersive::create_mf_encoder();
+            auto enc = immersive::create_hw_encoder();
             if (enc && enc->initialize(enc_config)) {
                 stream_encoder = std::move(enc);
                 actual_codec   = proto_value;
@@ -456,8 +459,27 @@ int main(int argc, char* argv[]) {
         const uint32_t keyframe_interval = std::max(1u, fps_cap);
         uint32_t frames_since_keyframe = keyframe_interval;  // force one promptly
 
+        // The newest captured frame, and whether it still has to be sent.
+        // Event-driven backends (WGC, ScreenCaptureKit, PipeWire) deliver
+        // nothing while the screen is static, so a frame the pacing below
+        // skipped — the last keystroke, the final position of a dragged
+        // window — would otherwise stay unsent until something else changes,
+        // and a keyframe the client asks for after Wi-Fi loss would never
+        // come. Both are served from this frame when the capture goes idle.
+        std::unique_ptr<immersive::CapturedFrame> last_frame;
+        bool last_frame_unsent = false;
+
         while (g_running && !ctx->stop) {
             auto frame = stream_capture->acquire_frame(16);  // ~60fps timeout
+            auto now = std::chrono::steady_clock::now();
+            if (!frame && stream_capture->is_capturing() && last_frame) {
+                const bool due = now - last_sent >= min_interval;
+                if ((last_frame_unsent && due) || ctx->force_keyframe ||
+                    now - last_sent >= std::chrono::seconds(1)) {
+                    frame = std::move(last_frame);  // idle: (re)send the newest
+                    if (!last_frame_unsent) ctx->force_keyframe = true;
+                }
+            }
             if (!frame) {
                 // A backend that lost its source for good (monitor unplugged,
                 // screen-share revoked, compositor restart) stops capturing
@@ -476,9 +498,10 @@ int main(int argc, char* argv[]) {
             }
 
             // Frame pacing
-            auto now = std::chrono::steady_clock::now();
             if (last_sent.time_since_epoch().count() != 0 &&
                 now - last_sent < min_interval) {
+                last_frame = std::move(frame);
+                last_frame_unsent = true;
                 continue;
             }
 
@@ -489,7 +512,7 @@ int main(int argc, char* argv[]) {
             // client downscale, but also a frame whose size differs from the
             // enumerated one (HiDPI/fractional scaling, a resolution change
             // mid-stream). The encoder is fixed at out_w x out_h.
-            if (w != out_w || h != out_h) {
+            if ((w != out_w || h != out_h) && !stream_encoder->scales_input()) {
                 scaled.resize(static_cast<size_t>(out_w) * out_h * 4);
                 scale_bgra_bilinear(pixels, w, h, pitch,
                                     scaled.data(), out_w, out_h);
@@ -527,6 +550,8 @@ int main(int argc, char* argv[]) {
                 last_sent = now;
                 frames_since_keyframe++;
             }
+            last_frame = std::move(frame);
+            last_frame_unsent = false;
         }
 
         live_stream_count--;
