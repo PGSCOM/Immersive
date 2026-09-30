@@ -24,6 +24,13 @@ jobs:
         run: |
           cmake --build host/build --config Release
 
+      - name: Smoke test (--stub)
+        shell: bash
+        run: |
+          ./host/build/Release/immersive2_host.exe --stub --no-usb > host.log 2>&1 &
+          sleep 3
+          python host/tools/smoke_client.py || { cat host.log; exit 1; }
+
       - name: Upload Host Artifact
         uses: actions/upload-artifact@v7
         with:
@@ -38,13 +45,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
+            libdbus-1-dev libpipewire-0.3-dev libpulse-dev \
+            libavcodec-dev libavutil-dev libswscale-dev \
+            xvfb x11-xserver-utils x11-utils xdotool python3-pil ffmpeg
+
       - name: Configure CMake
         run: |
-          cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF
+          cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra" | tee cmake.log
+          # Every Linux backend must be compiled in CI, not silently skipped.
+          grep -q "Linux backends: X11=1 Wayland-portal=1 PulseAudio=1 FFmpeg=1" cmake.log
 
       - name: Build
         run: |
           cmake --build host/build --config Release
+
+      - name: Smoke test (--stub)
+        run: |
+          ./host/build/immersive2_host --stub --no-usb > host.log 2>&1 &
+          sleep 2
+          python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
+          kill -INT $! && wait $!
+
+      - name: Codec test (H.264/HEVC/AV1 decoded by ffmpeg)
+        run: python3 host/tools/codec_test.py
+
+      - name: X11 capture/input/codec test (Xvfb)
+        run: python3 host/tools/x11_test.py
 
       - name: Upload Host Artifact (Linux)
         uses: actions/upload-artifact@v7
@@ -69,6 +101,20 @@ jobs:
       - name: Build
         run: |
           cmake --build host/build --config Release
+
+      - name: Smoke test (--stub)
+        run: |
+          # The smoke client talks from 127.0.0.2, which macOS does not route by default.
+          sudo ifconfig lo0 alias 127.0.0.2 up
+          ./host/build/immersive2_host --stub --no-usb > host.log 2>&1 &
+          sleep 2
+          python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
+          kill -INT $! && wait $!
+
+      - name: Codec test (VideoToolbox, decoded by ffmpeg)
+        run: |
+          brew install ffmpeg
+          python3 host/tools/codec_test.py
 
       - name: Upload Host Artifact (macOS)
         uses: actions/upload-artifact@v7
@@ -232,3 +278,10 @@ jobs:
           name: immersive2_client_android
           path: client/export/android/*
           if-no-files-found: warn
+
+      # Real host (--stub) + the real client headless: connect, decode every
+      # monitor, reconnect after host kill/freeze, USB (TCP media) mode, menu
+      # and hand-input tests. Reuses the Godot installed above.
+      - name: End-to-end test (host + headless client)
+        timeout-minutes: 15
+        run: python3 host/tools/e2e_test.py

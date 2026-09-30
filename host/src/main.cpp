@@ -1,6 +1,6 @@
 /// Immersive-2 Host Application
 ///
-/// Main entry point for the Windows host.
+/// Main entry point for the host (Windows, Linux, macOS).
 /// Captures desktop, encodes video, streams to VR clients.
 
 #include "capture/dxgi_capture.h"
@@ -101,10 +101,13 @@ namespace {
                   << "  --no-audio          Disable audio streaming\n"
                   << "  --no-usb            Don't run `adb reverse` for USB-connected headsets\n"
                   << "  --codec NAME        Video codec: mjpeg (default), h264, h265 or av1.\n"
-                  << "                      h264/h265/av1 use the GPU encoder (Media\n"
-                  << "                      Foundation) and require a matching decoder on\n"
-                  << "                      the client (Android MediaCodec plugin).\n"
+                  << "                      h264/h265/av1 use the hardware encoder (Media\n"
+                  << "                      Foundation, VideoToolbox, or NVENC/VAAPI via\n"
+                  << "                      FFmpeg with libx264 as fallback) and need the\n"
+                  << "                      client's MediaCodec decoder (Quest/Pico).\n"
                   << "  --jpeg-quality N    MJPEG quality 10-95 (default: 35)\n"
+                  << "  --stub              Fake displays and logged-only input, for protocol\n"
+                  << "                      tests without touching the real desktop\n"
                   << "  --install-idd-cert  Install a self-signed code-signing certificate\n"
                   << "                      into the machine trust stores so an unsigned\n"
                   << "                      IDD virtual-display driver can be installed,\n"
@@ -118,11 +121,6 @@ namespace {
 
 int main(int argc, char* argv[]) {
     std::cout << "=== Immersive-2 Host v0.1.0 ===\n\n";
-
-#ifndef _WIN32
-    std::cout << "[Host] Portable mode (Linux/macOS): using stub capture/input backends.\n"
-              << "       This mode is intended for development and protocol testing.\n\n";
-#endif
 
     // Register signal handlers for graceful shutdown
     std::signal(SIGINT, signal_handler);
@@ -144,6 +142,7 @@ int main(int argc, char* argv[]) {
     bool     usb_enable   = true;
     uint8_t  default_codec = 2;  // protocol VideoCodec: 0=H264 1=H265 2=MJPEG 3=AV1
     uint32_t jpeg_quality = 35;
+    bool     stub         = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -159,6 +158,9 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--audio-port" && i + 1 < argc) {
             audio_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--no-audio") {
+            audio_enable = false;
+        } else if (arg == "--stub") {
+            stub = true;
             audio_enable = false;
         } else if (arg == "--no-usb") {
             usb_enable = false;
@@ -191,11 +193,19 @@ int main(int argc, char* argv[]) {
 
     // --- Initialize components ---
 
-    // 1. Screen capture — use Windows Graphics Capture (non-exclusive, works
-    //    alongside AnyDesk/GlideX/Sunshine); falls back to DXGI at runtime if
-    //    WGC is not supported (Windows < 10 1803).
-    auto capture = immersive::create_wgc_capture();
-    auto displays = capture->enumerate_displays();
+    // 1. Screen capture — the native backend for this OS (see
+    //    create_screen_capture), or fake displays with --stub. Each stream
+    //    worker makes its own instance through make_capture().
+    auto make_capture = [stub]() {
+        return stub ? immersive::create_stub_capture()
+                    : immersive::create_screen_capture();
+    };
+    if (stub) {
+        std::cout << "[Host] --stub: fake displays, input is only logged\n";
+    }
+    auto capture = make_capture();
+    auto displays = capture ? capture->enumerate_displays()
+                            : std::vector<immersive::DisplayInfo>{};
 
     std::cout << "[Host] Found " << displays.size() << " display(s):\n";
     for (const auto& d : displays) {
@@ -205,19 +215,24 @@ int main(int argc, char* argv[]) {
     }
 
     if (displays.empty()) {
-        std::cerr << "[Host] No displays found. Exiting.\n";
+        std::cerr << "[Host] No displays found. Exiting.\n"
+#ifdef __APPLE__
+                  << "       Grant Screen Recording to this binary (or its terminal) in\n"
+                  << "       System Settings > Privacy & Security, then run it again.\n"
+#elif !defined(_WIN32)
+                  << "       Needs a graphical session (WAYLAND_DISPLAY or DISPLAY set)\n"
+                  << "       and, on Wayland, the screen-share request accepted.\n"
+#endif
+                  << "       Use --stub to test the protocol without a desktop.\n";
         return 1;
     }
 
     // 2. Encoder availability. MJPEG always works (CPU). H.264/HEVC/AV1 use
-    // Media Foundation; each stream worker creates its own encoder instance.
-#ifdef _WIN32
-    const bool has_h264 = immersive::mf_encoder_available(immersive::VideoCodec::H264);
-    const bool has_h265 = immersive::mf_encoder_available(immersive::VideoCodec::H265);
-    const bool has_av1  = immersive::mf_encoder_available(immersive::VideoCodec::AV1);
-#else
-    const bool has_h264 = false, has_h265 = false, has_av1 = false;
-#endif
+    // the OS hardware encoder (create_hw_encoder); each stream worker creates
+    // its own encoder instance.
+    const bool has_h264 = immersive::hw_encoder_available(immersive::VideoCodec::H264);
+    const bool has_h265 = immersive::hw_encoder_available(immersive::VideoCodec::H265);
+    const bool has_av1  = immersive::hw_encoder_available(immersive::VideoCodec::AV1);
     std::cout << "[Host] Encoders available: MJPEG (software)"
               << (has_h264 ? ", H.264" : "")
               << (has_h265 ? ", HEVC" : "")
@@ -230,7 +245,8 @@ int main(int argc, char* argv[]) {
     }
 
     // 3. Input injector
-    auto input_injector = immersive::create_input_injector();
+    auto input_injector = stub ? immersive::create_stub_input_injector()
+                               : immersive::create_input_injector();
     input_injector->initialize();
     input_injector->set_displays(displays);
 
@@ -246,7 +262,7 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<immersive::IAudioCapture> audio_capture;
     if (audio_enable) {
         audio_capture = immersive::create_audio_capture();
-        if (!audio_capture->start()) {
+        if (!audio_capture || !audio_capture->start()) {
             std::cerr << "[Host] Audio capture failed to start — audio disabled\n";
             audio_enable = false;
         }
@@ -300,17 +316,6 @@ int main(int argc, char* argv[]) {
                              ActiveStream* ctx) {
         const uint8_t monitor_id = display.id;
 
-        // WGC is non-exclusive and should never return E_ACCESSDENIED; the retry
-        // loop is a safety net for transient failures (mode changes, etc.).
-        auto stream_capture = immersive::create_wgc_capture();
-        while (!stream_capture->start_capture(monitor_id)) {
-            if (!g_running || ctx->stop) return;
-            std::cerr << "[Host] Capture unavailable on monitor " << (int)monitor_id
-                      << " — retrying in 3 s...\n";
-            for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
         // --- Resolve effective settings (client config overrides CLI) ---
         // Protocol codec values: 0=H.264, 1=HEVC, 2=MJPEG, 3=AV1, 0xFF=default
         uint8_t requested_codec = (cfg.codec != 0xFF) ? cfg.codec : default_codec;
@@ -322,6 +327,22 @@ int main(int argc, char* argv[]) {
             out_w = cfg.max_width & ~1u;
             out_h = (static_cast<uint32_t>(display.height) * out_w / display.width) & ~1u;
             if (out_h < 2) out_h = 2;
+        }
+
+        // The retry loop is a safety net for transient failures (mode changes,
+        // a Wayland portal being re-created, a permission prompt).
+        std::unique_ptr<immersive::IScreenCapture> stream_capture;
+        for (;;) {
+            if (!stream_capture) {  // a backend can be unavailable for a while
+                stream_capture = make_capture();
+                if (stream_capture) stream_capture->set_output_size(out_w, out_h);
+            }
+            if (stream_capture && stream_capture->start_capture(monitor_id)) break;
+            if (!g_running || ctx->stop) return;
+            std::cerr << "[Host] Capture unavailable on monitor " << (int)monitor_id
+                      << " — retrying in 3 s...\n";
+            for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
         immersive::EncoderConfig enc_config;
@@ -352,7 +373,7 @@ int main(int argc, char* argv[]) {
 
         auto try_mf_codec = [&](immersive::VideoCodec vc, uint8_t proto_value) -> bool {
             enc_config.codec = vc;
-            auto enc = immersive::create_mf_encoder();
+            auto enc = immersive::create_hw_encoder();
             if (enc && enc->initialize(enc_config)) {
                 stream_encoder = std::move(enc);
                 actual_codec   = proto_value;
@@ -425,9 +446,7 @@ int main(int argc, char* argv[]) {
                   << " (native " << display.width << "x" << display.height << ")"
                   << " cap " << fps_cap << " fps\n";
 
-        const bool scaling = (out_w != display.width || out_h != display.height);
         std::vector<uint8_t> scaled;
-        if (scaling) scaled.resize(static_cast<size_t>(out_w) * out_h * 4);
 
         live_stream_count++;
         uint32_t frame_number = 0;
@@ -440,21 +459,61 @@ int main(int argc, char* argv[]) {
         const uint32_t keyframe_interval = std::max(1u, fps_cap);
         uint32_t frames_since_keyframe = keyframe_interval;  // force one promptly
 
+        // The newest captured frame, and whether it still has to be sent.
+        // Event-driven backends (WGC, ScreenCaptureKit, PipeWire) deliver
+        // nothing while the screen is static, so a frame the pacing below
+        // skipped — the last keystroke, the final position of a dragged
+        // window — would otherwise stay unsent until something else changes,
+        // and a keyframe the client asks for after Wi-Fi loss would never
+        // come. Both are served from this frame when the capture goes idle.
+        std::unique_ptr<immersive::CapturedFrame> last_frame;
+        bool last_frame_unsent = false;
+
         while (g_running && !ctx->stop) {
             auto frame = stream_capture->acquire_frame(16);  // ~60fps timeout
-            if (!frame) continue;
+            auto now = std::chrono::steady_clock::now();
+            if (!frame && stream_capture->is_capturing() && last_frame) {
+                const bool due = now - last_sent >= min_interval;
+                if ((last_frame_unsent && due) || ctx->force_keyframe ||
+                    now - last_sent >= std::chrono::seconds(1)) {
+                    frame = std::move(last_frame);  // idle: (re)send the newest
+                    if (!last_frame_unsent) ctx->force_keyframe = true;
+                }
+            }
+            if (!frame) {
+                // A backend that lost its source for good (monitor unplugged,
+                // screen-share revoked, compositor restart) stops capturing
+                // and returns nullptr at once; without this the loop spins a
+                // core. Restart it with a pause, like the initial start.
+                if (!stream_capture->is_capturing()) {
+                    for (int i = 0; i < 10 && g_running && !ctx->stop; ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (g_running && !ctx->stop &&
+                        !stream_capture->start_capture(monitor_id)) {
+                        std::cerr << "[Host] Capture lost on monitor "
+                                  << (int)monitor_id << ", retrying...\n";
+                    }
+                }
+                continue;
+            }
 
             // Frame pacing
-            auto now = std::chrono::steady_clock::now();
             if (last_sent.time_since_epoch().count() != 0 &&
                 now - last_sent < min_interval) {
+                last_frame = std::move(frame);
+                last_frame_unsent = true;
                 continue;
             }
 
             const uint8_t* pixels = frame->pixels.data();
             uint32_t w = frame->width, h = frame->height, pitch = frame->pitch;
 
-            if (scaling) {
+            // Scale whenever the frame is not the announced stream size: a
+            // client downscale, but also a frame whose size differs from the
+            // enumerated one (HiDPI/fractional scaling, a resolution change
+            // mid-stream). The encoder is fixed at out_w x out_h.
+            if ((w != out_w || h != out_h) && !stream_encoder->scales_input()) {
+                scaled.resize(static_cast<size_t>(out_w) * out_h * 4);
                 scale_bgra_bilinear(pixels, w, h, pitch,
                                     scaled.data(), out_w, out_h);
                 pixels = scaled.data();
@@ -491,6 +550,8 @@ int main(int argc, char* argv[]) {
                 last_sent = now;
                 frames_since_keyframe++;
             }
+            last_frame = std::move(frame);
+            last_frame_unsent = false;
         }
 
         live_stream_count--;
@@ -672,7 +733,26 @@ int main(int argc, char* argv[]) {
 
     server->set_on_input_keyboard([&](uint32_t /*client_id*/,
                                       const immersive::protocol::InputKeyboard& input) {
+        // The client's VR keyboard latches Shift/Ctrl/Alt itself and only
+        // reports them in `modifiers`, never as key events. Press them around
+        // the key, or Shift+A types 'a'.
+        struct Mod { uint8_t bit; uint16_t vk; };
+        static constexpr Mod kMods[] = {{0x01, 0x10}, {0x02, 0x11}, {0x04, 0x12}};
+        const bool is_modifier = (input.scancode >= 0x10 && input.scancode <= 0x12) ||
+                                 (input.scancode >= 0xA0 && input.scancode <= 0xA5);
+        auto send_mods = [&](bool down) {
+            if (is_modifier) return;
+            for (const Mod& m : kMods) {
+                if (!(input.modifiers & m.bit)) continue;
+                immersive::protocol::InputKeyboard mod = input;
+                mod.scancode = m.vk;
+                mod.pressed  = down ? 1 : 0;
+                input_injector->inject_keyboard(mod);
+            }
+        };
+        if (input.pressed) send_mods(true);
         input_injector->inject_keyboard(input);
+        if (!input.pressed) send_mods(false);
     });
 
     // Client lost a frame and asks for an IDR so its inter-frame decoder can
@@ -724,7 +804,6 @@ int main(int argc, char* argv[]) {
     // --- Audio streaming thread ---
     std::thread audio_thread;
     if (audio_enable && audio_capture) {
-#ifdef _WIN32
         audio_thread = std::thread([&]() {
             while (g_running) {
                 if (live_stream_count == 0) {
@@ -755,7 +834,6 @@ int main(int argc, char* argv[]) {
                 server->broadcast_udp(pkt.data(), pkt.size(), audio_port);
             }
         });
-#endif
     }
 
     std::cout << "\n[Host] Ready. Waiting for VR client connections (max " << max_clients << ")...\n";

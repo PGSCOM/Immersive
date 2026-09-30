@@ -873,4 +873,14 @@ bool mf_hardware_encoder_available() {
     return mf_encoder_available(VideoCodec::H264);
 }
 
+#ifdef _WIN32
+std::unique_ptr<IVideoEncoder> create_hw_encoder() {
+    return create_mf_encoder();
+}
+
+bool hw_encoder_available(VideoCodec codec) {
+    return mf_encoder_available(codec);
+}
+#endif
+
 }  // namespace immersive

@@ -11,7 +11,7 @@ screens as floating panels. VR controller input is sent back to the PC.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│        Host (Windows full / Linux+macOS portable mode)           │
+│              Host (Windows / Linux / macOS)                      │
 │                                                                  │
 │  ┌─────────────┐   ┌──────────────┐    ┌───────────────────────┐ │
 │  │ IDD Virtual │──▶│ DXGI Desktop │──▶│ Video Encoder         │ │
@@ -53,7 +53,7 @@ screens as floating panels. VR controller input is sent back to the PC.
 
 ```
 Immersive-2/
-├── host/                    # Host application (Windows + Linux/macOS portable)
+├── host/                    # Host application (Windows, Linux, macOS)
 │   ├── CMakeLists.txt
 │   ├── include/
 │   │   ├── capture/         # DXGI screen capture
@@ -110,7 +110,8 @@ Immersive-2/
 
 ### Host
 - Windows 10/11 (x64) for full DXGI capture + SendInput + IDD features
-- Linux/macOS for portable host mode (network/protocol development and testing)
+- Linux (X11 or Wayland) or macOS 13+ — see [docs/BUILDING.md](docs/BUILDING.md) for the
+  libraries and permissions
 - CMake 3.20+
 - Visual Studio 2022 / MinGW-w64 (Windows) or Clang/GCC (Linux/macOS)
 - **No GPU encoder required** — the built-in MJPEG software encoder works on any CPU
@@ -136,7 +137,7 @@ cmake --build build --config Release
 .\build\Release\immersive2_host.exe
 ```
 
-Linux/macOS (portable host mode):
+Linux/macOS (see [docs/BUILDING.md](docs/BUILDING.md) for dependencies and permissions):
 
 ```bash
 cd host
@@ -152,10 +153,11 @@ Useful host options:
 
 | Option | Description |
 | --- | --- |
-| `--codec mjpeg\|h264\|h265\|av1` | Video codec. `mjpeg` (default) works with every client. The others use the GPU encoder (NVENC/AMF/QSV via Media Foundation); on the client they need the MediaCodec plugin (`client/android-plugin`) — without it the client auto-falls back to MJPEG. If the GPU lacks the codec the host falls back (→ H.264 → MJPEG). |
+| `--codec mjpeg\|h264\|h265\|av1` | Video codec. `mjpeg` (default) works with every client. The others use the hardware encoder (Media Foundation on Windows, VideoToolbox on macOS, FFmpeg NVENC/VAAPI — or libx264 — on Linux); on the client they need the MediaCodec plugin (`client/android-plugin`) — without it the client auto-falls back to MJPEG. If the GPU lacks the codec the host falls back (→ H.264 → MJPEG). |
 | `--jpeg-quality N` | MJPEG quality 10–95 (default 35; raise it on fast networks). |
 | `--no-audio` | Disable audio streaming. |
 | `--max-clients N` | Maximum simultaneous VR clients (default 4). |
+| `--stub` | Fake displays, input only logged — protocol testing without a desktop. |
 
 These are only defaults: the VR client can override codec, bitrate, JPEG
 quality, stream resolution and FPS at runtime from the overlay's
@@ -268,7 +270,8 @@ Then open:
 - [x] Eye-tracking based foveated rendering (OpenXR eye gaze + head-gaze fallback)
 - [x] Hand tracking support (pinch pointer/click, no controllers required)
 - [x] Workspace save/restore (panel transform + monitor assignments)
-- [x] macOS/Linux host support (portable mode + CI builds)
+- [x] macOS host (ScreenCaptureKit capture + audio, CGEvent input)
+- [x] Linux host (X11: XShm + XTEST; Wayland: portal + PipeWire; PulseAudio/PipeWire audio)
 - [x] Web client (WebXR + browser bridge)
 - [x] Passthrough background mode (mixed reality in supported headsets)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)

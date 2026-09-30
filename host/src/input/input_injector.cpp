@@ -9,9 +9,7 @@
 #include <limits>
 #include <unordered_map>
 
-#ifdef _WIN32
 #include <windows.h>
-#endif
 
 namespace immersive {
 
@@ -24,7 +22,6 @@ public:
     }
 
     void set_displays(const std::vector<DisplayInfo>& displays) override {
-#ifdef _WIN32
         monitors_.clear();
         if (displays.empty()) {
             layout_set_ = false;
@@ -56,15 +53,11 @@ public:
         virtual_width_  = std::max<LONG>(1, max_x - min_x);
         virtual_height_ = std::max<LONG>(1, max_y - min_y);
         layout_set_     = true;
-#else
-        (void)displays;
-#endif
     }
 
     void inject_mouse(const protocol::InputMouse& input) override {
         if (!initialized_) return;
 
-#ifdef _WIN32
         // Move event
         POINT target = translate_to_virtual(input.monitor_id, input.x, input.y);
 
@@ -113,45 +106,27 @@ public:
             SendInput(1, &btn, sizeof(INPUT));
         }
         prev_buttons_ = input.buttons;
-#else
-        // Non-Windows stub
-        std::cout << "[InputInjector] Mouse: monitor=" << (int)input.monitor_id
-                  << " x=" << input.x << " y=" << input.y
-                  << " buttons=" << (int)input.buttons << "\n";
-#endif
     }
 
     void inject_keyboard(const protocol::InputKeyboard& input) override {
         if (!initialized_) return;
 
-#ifdef _WIN32
         INPUT win_input = {};
         win_input.type = INPUT_KEYBOARD;
         win_input.ki.wVk = static_cast<WORD>(input.scancode);
         win_input.ki.dwFlags = input.pressed ? 0 : KEYEVENTF_KEYUP;
 
         SendInput(1, &win_input, sizeof(INPUT));
-#else
-        std::cout << "[InputInjector] Key: scancode=" << input.scancode
-                  << " pressed=" << (int)input.pressed
-                  << " modifiers=" << (int)input.modifiers << "\n";
-#endif
     }
 
     void move_cursor(uint8_t monitor_id, uint16_t x, uint16_t y) override {
         if (!initialized_) return;
 
-#ifdef _WIN32
         POINT target = translate_to_virtual(monitor_id, x, y);
         SetCursorPos(target.x, target.y);
-#else
-        std::cout << "[InputInjector] MoveCursor: monitor=" << (int)monitor_id
-                  << " x=" << x << " y=" << y << "\n";
-#endif
     }
 
 private:
-#ifdef _WIN32
     struct MonitorArea {
         LONG left;
         LONG top;
@@ -208,7 +183,6 @@ private:
     LONG virtual_width_  = 1;
     LONG virtual_height_ = 1;
     bool layout_set_     = false;
-#endif
     bool initialized_ = false;
 };
 

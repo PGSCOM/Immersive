@@ -12,7 +12,6 @@
 #include <queue>
 #include <cstring>
 
-#ifdef _WIN32
 #include <windows.h>
 #include <objbase.h>   // CoInitializeEx needed for WASAPI thread init
 #include <mmdeviceapi.h>
@@ -32,7 +31,6 @@ namespace {
     // Packet size: 480 samples per channel @ 48 kHz → 10 ms
     constexpr uint32_t PACKET_SAMPLES     = 480;
 }  // anonymous namespace
-#endif  // _WIN32
 
 namespace immersive {
 
@@ -51,7 +49,6 @@ public:
     bool start() override {
         if (capturing_) return true;
 
-#ifdef _WIN32
         // Initialize COM (for this thread)
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         bool com_owned = SUCCEEDED(hr);
@@ -155,18 +152,12 @@ public:
                   << (int)mix_channels_ << " ch, "
                   << (int)mix_bits_ << " bit)\n";
         return true;
-#else
-        std::cout << "[AudioCapture] Stub mode (non-Windows): no audio\n";
-        capturing_ = true;
-        return true;
-#endif
     }
 
     void stop() override {
         if (!capturing_) return;
         capturing_ = false;
 
-#ifdef _WIN32
         if (capture_thread_.joinable()) capture_thread_.join();
 
         if (audio_client_) {
@@ -178,7 +169,6 @@ public:
             CoUninitialize();
             com_owned_ = false;
         }
-#endif
         std::cout << "[AudioCapture] Stopped\n";
     }
 
@@ -199,7 +189,6 @@ private:
     std::queue<std::unique_ptr<AudioFrame>> frame_queue_;
     uint32_t                       seq_counter_ = 0;
 
-#ifdef _WIN32
     ComPtr<IAudioClient>        audio_client_;
     ComPtr<IAudioCaptureClient> capture_client_;
     uint32_t                    mix_sample_rate_ = 48000;
@@ -309,7 +298,6 @@ private:
 
     std::vector<int16_t> accumulator_;
     double               resample_pos_ = 0.0;  ///< fractional read cursor
-#endif  // _WIN32
 };
 
 // ---------------------------------------------------------------------------

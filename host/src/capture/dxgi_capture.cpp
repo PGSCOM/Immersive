@@ -21,19 +21,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace immersive {
 
-#ifndef _WIN32
-/// Fake monitor layout for the portable (non-Windows) stub backend.
-namespace {
-struct StubDisplay { uint16_t width; uint16_t height; int32_t origin_x; };
-constexpr StubDisplay kStubDisplays[] = {
-    {1920, 1080,    0},
-    {1920, 1200, 1920},
-    {1280,  720, 3840},
-};
-constexpr uint8_t kStubDisplayCount =
-    static_cast<uint8_t>(sizeof(kStubDisplays) / sizeof(kStubDisplays[0]));
-}  // namespace
-#endif
 
 class DxgiCapture : public IScreenCapture {
 public:
@@ -83,25 +70,6 @@ public:
 
                 displays.push_back(std::move(info));
             }
-        }
-#else
-        // Stub for non-Windows platforms (development only). Three displays,
-        // not one: multi-monitor selection, per-monitor workers and the input
-        // scaling map are the parts most likely to regress, and a single stub
-        // display meant host/tools/smoke_client.py could never exercise them.
-        for (uint8_t i = 0; i < kStubDisplayCount; ++i) {
-            const auto& m = kStubDisplays[i];
-            DisplayInfo stub;
-            stub.id           = i;
-            stub.width        = m.width;
-            stub.height       = m.height;
-            stub.refresh_rate = 60;
-            stub.origin_x     = m.origin_x;
-            stub.origin_y     = 0;
-            stub.name         = std::string("Stub Display ") + char('0' + i)
-                              + " (non-Windows)";
-            stub.is_primary   = (i == 0);
-            displays.push_back(stub);
         }
 #endif
 
@@ -312,31 +280,6 @@ public:
         d3d_context_->Unmap(staging, 0);
         duplication_->ReleaseFrame();
 
-        return frame;
-#else
-        // Non-Windows stub: generate a solid-color test frame. Sleep for the
-        // caller's timeout first — a stub that returns instantly turns the
-        // stream worker into a busy loop allocating a full frame buffer as fast
-        // as the CPU allows.
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(std::max(1u, std::min(timeout_ms, 33u))));
-
-        const uint8_t idx = (target_display_id_ < kStubDisplayCount)
-                                ? target_display_id_ : 0;
-        auto frame = std::make_unique<CapturedFrame>();
-        frame->monitor_id = target_display_id_;
-        frame->width  = kStubDisplays[idx].width;
-        frame->height = kStubDisplays[idx].height;
-        frame->pitch  = frame->width * 4;
-        // A distinct shade per display, so a decoded test frame identifies
-        // which monitor it came from.
-        frame->pixels.resize(static_cast<size_t>(frame->pitch) * frame->height,
-                             static_cast<uint8_t>(64 + idx * 48));
-
-        auto now = std::chrono::steady_clock::now();
-        frame->timestamp_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                now.time_since_epoch()).count());
         return frame;
 #endif
     }

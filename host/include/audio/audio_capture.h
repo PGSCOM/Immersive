@@ -2,7 +2,8 @@
 
 /// Audio capture interface for Immersive-2 host.
 ///
-/// Captures system audio (loopback) using WASAPI on Windows.
+/// Captures system audio (loopback): WASAPI on Windows, ScreenCaptureKit on
+/// macOS, PulseAudio/PipeWire on Linux.
 /// Output format: PCM 16-bit, 48 kHz, stereo, interleaved.
 
 #include <cstdint>
@@ -38,8 +39,9 @@ public:
     virtual bool is_capturing() const = 0;
 };
 
-/// Create a WASAPI loopback audio capture instance.
-/// On non-Windows platforms, returns a null-source stub.
+/// Create the system-audio loopback capture for this OS: WASAPI on Windows,
+/// ScreenCaptureKit on macOS, the PulseAudio/PipeWire default monitor
+/// source on Linux. May return nullptr when the host has no audio backend.
 std::unique_ptr<IAudioCapture> create_audio_capture();
 
 }  // namespace immersive
