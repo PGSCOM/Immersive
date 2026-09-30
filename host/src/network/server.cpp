@@ -484,6 +484,9 @@ public:
         on_vdisplay_create_ = std::move(cb);
     }
 
+    void set_on_pin_requested(PinRequestedCallback cb) override {
+        on_pin_requested_ = std::move(cb);
+    }
     void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) override {
         on_vdisplay_remove_ = std::move(cb);
     }
@@ -661,6 +664,8 @@ private:
                                       : "too many wrong PINs, locked out for a minute")
                                   << " (the PIN is shown in this window)\n";
                         send_reject(sock, reject);
+                        if (reject != protocol::REJECT_LOCKED_OUT && on_pin_requested_)
+                            on_pin_requested_(inet_ntoa(peer));
                         rejected = true;
                         break;
                     }
@@ -1072,6 +1077,7 @@ private:
     RequestKeyframeCallback      on_request_keyframe_;
     VirtualDisplayCreateCallback on_vdisplay_create_;
     VirtualDisplayRemoveCallback on_vdisplay_remove_;
+    PinRequestedCallback on_pin_requested_;
     std::atomic<uint8_t>         monitor_count_{0};
 };
 

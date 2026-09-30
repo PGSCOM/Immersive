@@ -96,6 +96,23 @@ namespace {
 #endif
     }
 
+    /// Pop a desktop notification (a message box on Windows) without blocking
+    /// the caller. `body` must hold no quote characters: it goes through a shell.
+    void notify_desktop(const std::string& title, const std::string& body) {
+        std::thread([title, body] {
+#ifdef _WIN32
+            MessageBoxA(nullptr, body.c_str(), title.c_str(),
+                        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+#elif defined(__APPLE__)
+            run_quiet("osascript -e 'display notification \"" + body + "\" with title \""
+                      + title + "\"' 2>/dev/null");
+#else
+            run_quiet("notify-send -a Immersive-2 -u critical \"" + title + "\" \"" + body
+                      + "\" 2>/dev/null");
+#endif
+        }).detach();
+    }
+
     /// Per-user settings directory: %APPDATA%\Immersive2 on Windows,
     /// $XDG_CONFIG_HOME/immersive2 (~/.config/immersive2) elsewhere.
     std::filesystem::path config_dir() {
@@ -1126,6 +1143,19 @@ int main(int argc, char* argv[]) {
     srv_config.host_flags = (view_only ? immersive::protocol::HOST_FLAG_VIEW_ONLY : 0) |
                             (vdm_ok ? immersive::protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0);
     srv_config.pin = pin_arg >= 0 ? static_cast<uint32_t>(pin_arg) : load_or_create_pin();
+
+    // A headset asked to pair: show the PIN on this PC's screen, since the
+    // host may be running with no visible console. At most one every 5 s.
+    server->set_on_pin_requested([pin = srv_config.pin](const std::string& peer_ip) {
+        static std::atomic<int64_t> last_s{-5};
+        const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        int64_t prev = last_s.load();
+        if (now - prev < 5 || !last_s.compare_exchange_strong(prev, now)) return;
+        const std::string p = std::to_string(pin);
+        notify_desktop("Immersive-2 PIN: " + p.substr(0, 3) + " " + p.substr(3),
+                       "A headset at " + peer_ip + " wants to connect. Type this PIN in it.");
+    });
 
     if (!server->start(srv_config)) {
         std::cerr << "[Host] Failed to start network server\n";

@@ -219,7 +219,8 @@ CI builds publish an `immersive2_client_android` artifact containing a debug-sig
 
 - The menu opens on **Connect** and lists the PCs running the host on your
   network. Press **Connect** next to yours (or type its address on the keypad).
-- The first time, type the **PIN** printed in the host window. The headset
+- The first time, type the **PIN** the PC shows in a notification when the
+  headset asks (it is also printed in the host window). The headset
   remembers it, and on the next launch goes straight back to that PC.
 - Your monitors appear as screens on an arc in front of you. Choose which ones
   on the **Screens** tab; **Arrange around me** and **Bring in front** tidy

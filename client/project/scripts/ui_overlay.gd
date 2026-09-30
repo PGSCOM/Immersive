@@ -878,7 +878,7 @@ func _build_connect_tab(body: VBoxContainer) -> void:
 	body.add_child(_pin_box)
 	_lbl_pin_title = _label("Pair with this PC", 30, UiTheme.INK, true)
 	_pin_box.add_child(_lbl_pin_title)
-	var hint := _label("Type the six-digit PIN shown in the Immersive-2 host window on the PC. You only do this once.", 19, UiTheme.INK_2)
+	var hint := _label("Your PC just showed a notification with a six-digit PIN. Type it here. You only do this once.", 19, UiTheme.INK_2)
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_pin_box.add_child(hint)
 	var pin_row := _hbox(26)
@@ -899,7 +899,7 @@ func _build_connect_tab(body: VBoxContainer) -> void:
 	pad_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pin_row.add_child(pad_col)
 	pad_col.add_child(_keypad(["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK"], _on_pin_key))
-	_lbl_pin_error = _label("That PIN did not match. Check the host window and try again.", 18, UiTheme.CLAY)
+	_lbl_pin_error = _label("That PIN did not match. Check the notification on the PC and try again.", 18, UiTheme.CLAY)
 	_lbl_pin_error.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_lbl_pin_error.hide()
 	_pin_box.add_child(_lbl_pin_error)
