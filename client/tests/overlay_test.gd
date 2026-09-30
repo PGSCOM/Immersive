@@ -197,6 +197,23 @@ func _run() -> void:
 	await _click(_btn("HEVC"))
 	await create_timer(0.8).timeout  # the change applies after a short pause
 	check(events.back() == ["stream", 1], "Quality: HEVC applies on its own -> %s" % [events.back()])
+	# Dragging the bitrate slider, pausing on the way, applies once: on release.
+	var bitrates: Array = []
+	ov.stream_settings_changed.connect(func(_c, b, _j, _r, _f): bitrates.append(b))
+	var r: Rect2 = ov._slider_bitrate.get_global_rect()
+	var at := func(f: float) -> Vector2:
+		return (r.position + Vector2(r.size.x * f, r.size.y / 2.0)) / Vector2(ov._viewport.size)
+	ov.inject_pointer_move(at.call(0.2))
+	await _frames(2)
+	ov.inject_pointer_button(true)
+	for f in [0.4, 0.6, 0.8]:
+		ov.inject_pointer_move(at.call(f))
+		await create_timer(0.6).timeout  # longer than the apply pause
+	ov.inject_pointer_button(false)
+	var during := bitrates.size()
+	await create_timer(0.8).timeout
+	check(during == 0 and bitrates.size() == 1 and bitrates[0] == ov._bitrate_kbps and bitrates[0] > 60000,
+		"Quality: a bitrate drag applies once, on release -> %s (%d while held)" % [bitrates, during])
 	await _step("quality")
 
 	await _click(_btn("Close"))

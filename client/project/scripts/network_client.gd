@@ -612,7 +612,9 @@ func select_monitors(monitor_ids: Array) -> void:
 	payload[4] = 0  # reserved
 	_send_control_message(MSG_MULTI_MONITOR_SELECT, payload)
 
-## Send stream quality settings. The host restarts active streams to apply.
+## Send stream quality settings. A new codec or size restarts the streams;
+## bitrate, JPEG quality and fps are retuned live (they are ceilings: the
+## host adapts below them to the link).
 ## codec: 0 = H.264, 2 = MJPEG, 0xFF = host default. Zero values = default.
 func send_stream_config(codec: int, bitrate_kbps: int, jpeg_quality: int,
 		max_width: int, max_fps: int) -> void:

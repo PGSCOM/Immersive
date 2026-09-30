@@ -193,6 +193,18 @@ public:
 
     void request_keyframe() override { force_keyframe_ = true; }
 
+    bool reconfigure(const EncoderConfig& cfg) override {
+        if (cfg.width != config_.width || cfg.height != config_.height || cfg.codec != config_.codec)
+            return false;
+        config_ = cfg;
+        // VideoToolbox takes these between frames; a closed session picks
+        // them up when encode() re-opens it.
+        if (session_) {
+            @autoreleasepool { apply_rate(); }
+        }
+        return true;
+    }
+
     // There is no VideoToolbox value; only hardware-vs-software matters.
     EncoderBackend backend() const override {
         return mode_ == kSoftware ? EncoderBackend::SOFTWARE : EncoderBackend::NVENC;
@@ -221,22 +233,7 @@ private:
 
         const bool hevc = config_.codec == VideoCodec::H265;
         const bool low_latency = mode_ == kLowLatency;
-        const double fps = std::max<uint32_t>(1, config_.fps);
-        const double bps = static_cast<double>(config_.bitrate_kbps) * 1000.0;
-        // Same small VBV as mf_encoder.cpp (~50 ms, at most 600 kbit), as a
-        // leaky bucket over one frame: an IDR stays a few dozen UDP chunks.
-        const double vbv_bits = std::min(bps * 0.05, 600000.0);
-        NSArray* data_rate_limits =
-            @[ @(static_cast<int64_t>((vbv_bits + bps / fps) / 8.0)), @(1.0 / fps) ];
-
-        auto set = [&](CFStringRef key, id value) {
-            const OSStatus st = VTSessionSetProperty(session_, key, (__bridge CFTypeRef)value);
-            if (st != noErr) {
-                std::cerr << "[VtEncoder] " << ((__bridge NSString*)key).UTF8String
-                          << " not applied (" << st << ")\n";
-            }
-            return st == noErr;
-        };
+        auto set = [&](CFStringRef key, id value) { return set_property(key, value); };
         set(kVTCompressionPropertyKey_RealTime, @YES);
         // Low-latency mode never reorders; elsewhere B-frames would break the
         // one-encode-one-access-unit contract, so this one is mandatory.
@@ -247,9 +244,7 @@ private:
         set(kVTCompressionPropertyKey_ProfileLevel,
             (__bridge NSString*)(hevc ? kVTProfileLevel_HEVC_Main_AutoLevel
                                       : kVTProfileLevel_H264_High_AutoLevel));
-        set(kVTCompressionPropertyKey_AverageBitRate, @(static_cast<int32_t>(bps)));
-        set(kVTCompressionPropertyKey_DataRateLimits, data_rate_limits);
-        set(kVTCompressionPropertyKey_ExpectedFrameRate, @(fps));
+        apply_rate();
         // Low-latency mode is an infinite GOP driven by ForceKeyFrame and may
         // refuse this; main.cpp requests an IDR every second anyway.
         if (!low_latency) {
@@ -270,6 +265,29 @@ private:
         VTCompressionSessionPrepareToEncodeFrames(session_);
         force_keyframe_ = true;
         return true;
+    }
+
+    bool set_property(CFStringRef key, id value) {
+        const OSStatus st = VTSessionSetProperty(session_, key, (__bridge CFTypeRef)value);
+        if (st != noErr) {
+            std::cerr << "[VtEncoder] " << ((__bridge NSString*)key).UTF8String
+                      << " not applied (" << st << ")\n";
+        }
+        return st == noErr;
+    }
+
+    /// Bitrate and frame rate, at open and live (reconfigure()).
+    void apply_rate() {
+        const double fps = std::max<uint32_t>(1, config_.fps);
+        const double bps = static_cast<double>(config_.bitrate_kbps) * 1000.0;
+        // Same small VBV as mf_encoder.cpp (~50 ms, at most 600 kbit), as a
+        // leaky bucket over one frame: an IDR stays a few dozen UDP chunks.
+        const double vbv_bits = std::min(bps * 0.05, 600000.0);
+        NSArray* data_rate_limits =
+            @[ @(static_cast<int64_t>((vbv_bits + bps / fps) / 8.0)), @(1.0 / fps) ];
+        set_property(kVTCompressionPropertyKey_AverageBitRate, @(static_cast<int32_t>(bps)));
+        set_property(kVTCompressionPropertyKey_DataRateLimits, data_rate_limits);
+        set_property(kVTCompressionPropertyKey_ExpectedFrameRate, @(fps));
     }
 
     void close_session() {

@@ -301,6 +301,30 @@ public:
         force_keyframe_ = true;
     }
 
+    /// Bitrate through ICodecAPI, which hardware MFTs take mid-stream. The
+    /// frame rate is part of the negotiated media types: a new one returns
+    /// false (main.cpp then retunes the bitrate alone, or re-initializes).
+    bool reconfigure(const EncoderConfig& cfg) override {
+#ifdef _WIN32
+        if (!initialized_ || !codec_api_ || cfg.width != config_.width ||
+            cfg.height != config_.height || cfg.codec != config_.codec || cfg.fps != config_.fps) {
+            return false;
+        }
+        VARIANT v;
+        VariantInit(&v);
+        v.vt = VT_UI4;
+        v.ulVal = cfg.bitrate_kbps * 1000;
+        if (FAILED(codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v))) return false;
+        v.ulVal = std::min<uint32_t>(cfg.bitrate_kbps * 50u, 600000u);
+        codec_api_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);  // best effort, as at init
+        config_ = cfg;
+        return true;
+#else
+        (void)cfg;
+        return false;
+#endif
+    }
+
     EncoderBackend backend() const override {
 #ifdef _WIN32
         return is_hardware_ ? EncoderBackend::NVENC : EncoderBackend::SOFTWARE;

@@ -1027,7 +1027,7 @@ func _on_stream_stopped(monitor_id: int) -> void:
 	_stream_info.erase(monitor_id)
 	var panel := _find_panel_for_monitor(monitor_id)
 	if panel:
-		# Remember where it was: a quality change restarts every stream, and
+		# Remember where it was: a codec or resolution change restarts every stream, and
 		# the screen must come back in the same place.
 		_layouts[monitor_id] = panel.get_layout_state()
 		screen_panels.erase(panel)

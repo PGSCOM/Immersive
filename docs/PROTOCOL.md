@@ -324,17 +324,25 @@ stops all streams.
 
 ### `0x21` STREAM_CONFIG — Client → Host
 
-Stream quality settings. Applies to all streams; the host restarts the active
-streams (STREAM_STOP then a new STREAM_START per monitor) so the change takes
-effect immediately. The reference client keeps each screen where it was.
+Stream quality settings. Applies to all streams. A new `codec` or `max_width`
+restarts the active streams (STREAM_STOP then a new STREAM_START per monitor);
+the reference client keeps each screen where it was. A message that changes
+only `bitrate_kbps`, `jpeg_quality` or `max_fps` is applied to the running
+encoders: no STREAM_STOP/START, the client keeps its decoder (a backend that
+has to re-open its encoder continues with an IDR carrying its parameter sets).
+
+`bitrate_kbps` and `jpeg_quality` are ceilings. The host adapts below them to
+the link, per client, from its FRAME_ACKs (see FRAME_ACK); the frame rate is
+also lowered, below `max_fps`, when MJPEG needs it or when the host's encoder
+cannot keep up (a CPU encoder such as libx264 defaults to 30 fps).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | codec | uint8 | 0 = H.264, 1 = H.265/HEVC, 2 = MJPEG, 3 = AV1, 0xFF = host default. If the host cannot encode the requested codec it falls back (→ H.264 → MJPEG) and announces the actual codec in STREAM_START. |
-| bitrate_kbps | uint32 LE | H.264 bitrate; 0 = host default |
+| bitrate_kbps | uint32 LE | H.264/HEVC/AV1 bitrate ceiling; 0 = host default (20000) |
 | jpeg_quality | uint8 | MJPEG quality 10–95; 0 = host default |
 | max_width | uint16 LE | Downscale streams to this width (aspect preserved, host clamps to native); 0 = native resolution |
-| max_fps | uint8 | FPS cap; 0 = auto (display refresh for H.264, 24 for MJPEG) |
+| max_fps | uint8 | FPS cap; 0 = auto (display refresh for a GPU encoder, 30 for a CPU H.264 encoder, 24 for MJPEG) |
 
 When a stream is downscaled the host announces the scaled dimensions in
 STREAM_START and maps incoming INPUT_MOUSE coordinates (which are in stream
@@ -380,7 +388,18 @@ VIRTUAL_DISPLAY_RESULT, then a new MONITOR_LIST to every client.
 
 ### `0x30` FRAME_ACK — Client → Host
 
-Acknowledges receipt of a video frame. Used for flow control.
+Acknowledges a video frame the client has completed (sent for every one).
+The host's adaptive bitrate runs on these, per client across all its monitors:
+
+- frames skipped between two ACKs of a monitor (within a second) were lost;
+- the time from sending a frame to its ACK is the queue on the way;
+- no ACK at all for 1.5 s while frames are sent is a stall.
+
+More than 1 frame in 20 lost, an ACK later than 250 ms, or a stall cuts the
+rate to 70 % (at most once a second, down to 5 % of the ceiling); after 4 s
+without a cut each clean second raises it by 10 % + 2 % of the ceiling. A
+connection starts at half the ceiling. Clients that never send FRAME_ACK are
+not throttled. Losing ACKs never stops the stream.
 
 ```
  0         1         5

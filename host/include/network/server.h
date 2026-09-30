@@ -116,6 +116,12 @@ public:
     virtual void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) = 0;
     virtual void set_on_pin_requested(PinRequestedCallback cb) = 0;
 
+    /// Share (0.05-1) of the configured video bitrate the client's link
+    /// carries right now, adapted from its FRAME_ACKs across all its streams:
+    /// cut at once on lost frames or a growing backlog, raised slowly while
+    /// clean. Starts at 0.5 per connection; 1 for an unknown client.
+    virtual float link_rate_scale(uint32_t client_id) const = 0;
+
     /// Check if server is running
     virtual bool is_running() const = 0;
 

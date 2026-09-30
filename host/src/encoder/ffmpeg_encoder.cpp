@@ -206,6 +206,29 @@ public:
 
     void request_keyframe() override { force_keyframe_ = true; }
 
+    bool reconfigure(const EncoderConfig& config) override {
+        if (config.width != config_.width || config.height != config_.height ||
+            config.codec != config_.codec) {
+            return false;
+        }
+        config_ = config;
+        if (!ctx_) return true;  // failed session: reopen() picks the new config up
+        // libx264 and NVENC take a new bitrate between frames (libavcodec
+        // re-reads bit_rate / rc_max_rate / rc_buffer_size on every frame),
+        // and set_rate() folds a new frame rate into it.
+        if (name_.find("vaapi") == std::string::npos) {
+            set_rate();
+            return true;
+        }
+        // VAAPI fixes rate control at open: re-open at the same size. The
+        // next frame is an IDR with its parameter sets, which the client's
+        // decoder takes mid-stream.
+        const std::string name = name_;
+        close();
+        if (!open(name)) fail("re-open with the new settings failed");
+        return true;
+    }
+
     EncoderBackend backend() const override {
         return name_ == "libx264" ? EncoderBackend::SOFTWARE
              : name_.find("vaapi") != std::string::npos ? EncoderBackend::QSV
@@ -226,16 +249,12 @@ private:
         const int fps = static_cast<int>(std::max(1u, config_.fps));
         ctx_->width        = static_cast<int>(config_.width);
         ctx_->height       = static_cast<int>(config_.height);
+        open_fps_          = static_cast<uint32_t>(fps);
         ctx_->time_base    = {1, fps};
         ctx_->framerate    = {fps, 1};
         ctx_->gop_size     = static_cast<int>(config_.gop_size);
         ctx_->max_b_frames = 0;
-        ctx_->bit_rate     = static_cast<int64_t>(config_.bitrate_kbps) * 1000;
-        ctx_->rc_max_rate  = ctx_->bit_rate;
-        // ~50 ms of bitrate, capped at 600 kbit: an IDR must fit, so it stays
-        // a few dozen UDP chunks (same reasoning as mf_encoder.cpp).
-        ctx_->rc_buffer_size = static_cast<int>(
-            std::min<int64_t>(static_cast<int64_t>(config_.bitrate_kbps) * 50, 600000));
+        set_rate();
         ctx_->color_range     = AVCOL_RANGE_MPEG;
         ctx_->colorspace      = AVCOL_SPC_SMPTE170M;
         ctx_->color_primaries = AVCOL_PRI_SMPTE170M;
@@ -290,6 +309,20 @@ private:
         pts_      = 0;
         force_keyframe_ = true;
         return true;
+    }
+
+    /// CBR at config_.bitrate_kbps with ~50 ms of VBV, capped at 600 kbit: an
+    /// IDR must fit, so it stays a few dozen UDP chunks (same reasoning as
+    /// mf_encoder.cpp).
+    /// The encoders budget bits per frame from the frame rate they were
+    /// opened with (measured: x264 fed 30 fps opened at 60 spends 3.2 of
+    /// 8 Mbps), so a lower config_.fps scales the rate they are given up.
+    void set_rate() {
+        ctx_->bit_rate       = static_cast<int64_t>(config_.bitrate_kbps) * 1000 *
+                               open_fps_ / std::max(1u, config_.fps);
+        ctx_->rc_max_rate    = ctx_->bit_rate;
+        ctx_->rc_buffer_size = static_cast<int>(
+            std::min<int64_t>(static_cast<int64_t>(config_.bitrate_kbps) * 50, 600000));
     }
 
     bool init_vaapi() {
@@ -381,6 +414,7 @@ private:
     AVPacket*       pkt_       = nullptr;
     SwsContext*     sws_       = nullptr;
     int64_t         pts_       = 0;
+    uint32_t        open_fps_  = 30;   ///< frame rate the session was opened with
     bool            force_keyframe_ = true;
     int             failures_  = 0;
     std::chrono::steady_clock::time_point next_reopen_{};
@@ -415,7 +449,14 @@ bool hw_encoder_available(VideoCodec codec) {
     probe.height = 360;
     probe.bitrate_kbps = 2000;
     FfmpegEncoder enc(false);
-    return cache[codec] = enc.initialize(probe);
+    const bool ok = cache[codec] = enc.initialize(probe);
+    if (ok && enc.backend() == EncoderBackend::SOFTWARE) {
+        std::cout << "[Host] No GPU video encoder: H.264 runs on the CPU (libx264), about\n"
+                     "       30 fps at 1080p on several cores. For the GPU encoder install\n"
+                     "       its VA-API driver (Intel: intel-media-va-driver-non-free,\n"
+                     "       AMD: mesa-va-drivers) or NVIDIA's driver (NVENC), then restart.\n";
+    }
+    return ok;
 }
 
 }  // namespace immersive
