@@ -48,7 +48,7 @@ NSImage* mark_image() {
     }
     NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(18, 18)];
     [image addRepresentation:rep];
-    image.template = YES;
+    [image setTemplate:YES];
     return image;
 }
 
