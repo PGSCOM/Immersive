@@ -165,10 +165,14 @@ bool autostart_enabled() {
     const bool on = RegQueryValueExW(key, kRunValue, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
     RegCloseKey(key);
     return on;
-#elif defined(__APPLE__)
-    return std::filesystem::exists(launch_agent());
 #else
-    return std::filesystem::exists(autostart_file());
+    // error_code: a folder we can't read (odd permissions) means "off", not a crash.
+    std::error_code ec;
+#ifdef __APPLE__
+    return std::filesystem::exists(launch_agent(), ec);
+#else
+    return std::filesystem::exists(autostart_file(), ec);
+#endif
 #endif
 }
 
