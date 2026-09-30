@@ -12,7 +12,11 @@ The host application runs on your Windows PC and:
 1. **Discovers monitors** — enumerates physical and virtual displays
 2. **Captures screen content** — uses DXGI Desktop Duplication API
 3. **Encodes video** — hardware-accelerated H.264/H.265 encoding
-4. **Streams over network** — sends encoded video via UDP
+4. **Streams over network** — sends encoded video via UDP, adapting the
+   bitrate (and MJPEG's frame rate) to the link from the client's frame
+   ACKs, below the client's settings; a CPU encoder is paced to what it
+   sustains. Bitrate / quality / fps changes apply to the running encoder
+   without restarting the stream (see STREAM_CONFIG in PROTOCOL.md)
 5. **Receives input** — processes mouse/keyboard events from VR
 
 #### Component Architecture

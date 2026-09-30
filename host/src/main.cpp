@@ -419,6 +419,11 @@ int main(int argc, char* argv[]) {
         std::atomic<uint16_t> width{0}, height{0};
         std::atomic<uint32_t> fps_cap{0};
         std::atomic<uint64_t> frames{0}, bytes{0};
+        // A STREAM_CONFIG that keeps codec and size: the worker retunes its
+        // encoder in place instead of being restarted.
+        std::mutex        cfg_mutex;
+        immersive::protocol::StreamConfig new_cfg{};
+        std::atomic<bool> cfg_changed{false};
     };
 
     std::mutex ops_mutex;
@@ -609,14 +614,88 @@ int main(int argc, char* argv[]) {
         }
 
         const bool is_mjpeg = (actual_codec == 2);
+        const bool cpu_encoder = !is_mjpeg &&
+            stream_encoder->backend() == immersive::EncoderBackend::SOFTWARE;
 
-        // FPS cap: explicit from the client, otherwise 24 for MJPEG (WiFi
-        // friendly) or the display refresh rate for H.264.
-        uint32_t fps_cap = cfg.max_fps > 0
-            ? cfg.max_fps
-            : (is_mjpeg ? 24u : static_cast<uint32_t>(display.refresh_rate));
-        fps_cap = std::max(1u, std::min(fps_cap, 120u));
-        const auto min_interval = std::chrono::microseconds(1000000u / fps_cap);
+        // The client's settings are ceilings: retune() scales them to what the
+        // link carries (the server's rate control, from FRAME_ACKs) and what
+        // this thread encodes in time, and applies that to the running encoder.
+        uint32_t ceil_kbps = 0, ceil_quality = 0, fps_cap = 0;
+        auto take_cfg = [&](const immersive::protocol::StreamConfig& c) {
+            ceil_kbps = c.bitrate_kbps > 0 ? std::min<uint32_t>(c.bitrate_kbps, 100000)
+                                           : immersive::EncoderConfig{}.bitrate_kbps;
+            ceil_quality = (c.jpeg_quality >= 10 && c.jpeg_quality <= 95) ? c.jpeg_quality
+                                                                          : jpeg_quality.load();
+            // FPS cap: explicit from the client, otherwise 24 for MJPEG (Wi-Fi
+            // friendly), 30 for a CPU H.264 encoder (libx264 needs ~22 ms for
+            // a 1920x1200 frame on a 2025 laptop), else the refresh rate.
+            const uint32_t hz = display.refresh_rate ? display.refresh_rate : 60;
+            fps_cap = c.max_fps > 0 ? c.max_fps
+                    : is_mjpeg ? 24u : cpu_encoder ? std::min(30u, hz) : hz;
+            fps_cap = std::max(1u, std::min(fps_cap, 120u));
+        };
+        take_cfg(cfg);
+
+        uint32_t cpu_fps = 120;  // what this thread encodes in time (measured below)
+        uint32_t fps = fps_cap;  // paced rate: the cap, lowered for the link / the CPU
+        auto min_interval = std::chrono::microseconds(1000000u / fps);
+        bool auto_tune = true;   // off once the encoder refused a live change
+
+        // `forced`: the client changed its settings, which must take effect
+        // (re-opening the encoder if it can't retune live). Returns false only
+        // when that re-open failed and the stream is dead.
+        auto retune = [&](bool forced) -> bool {
+            const float share = server->link_rate_scale(client_id);
+            immersive::EncoderConfig c = enc_config;
+            uint32_t f = std::min(fps_cap, cpu_fps);
+            if (is_mjpeg) {
+                // A JPEG's size follows its quality, the stream's also the frame rate.
+                c.jpeg_quality = 10 + static_cast<uint32_t>((ceil_quality - 10) * share + 0.5f);
+                f = std::min(f, std::max(1u, static_cast<uint32_t>(
+                                                 fps_cap * std::min(1.0f, 2 * share) + 0.5f)));
+            } else {
+                c.bitrate_kbps = std::max(std::min(ceil_kbps, 1000u),
+                                          static_cast<uint32_t>(ceil_kbps * share));
+            }
+            c.fps = f;
+            const bool same = c.fps == enc_config.fps && c.jpeg_quality == enc_config.jpeg_quality;
+            const uint32_t kbps_delta = c.bitrate_kbps > enc_config.bitrate_kbps
+                ? c.bitrate_kbps - enc_config.bitrate_kbps : enc_config.bitrate_kbps - c.bitrate_kbps;
+            if (same && (forced ? kbps_delta == 0 : kbps_delta * 20 < enc_config.bitrate_kbps))
+                return true;  // automatic: ignore changes under 5%
+            if (!forced && !auto_tune) return true;
+
+            immersive::EncoderConfig live = c;
+            bool ok = stream_encoder->reconfigure(live);
+            if (!ok && c.fps != enc_config.fps) {
+                live.fps = enc_config.fps;  // Media Foundation: the rate live, not the frame rate
+                ok = stream_encoder->reconfigure(live);
+            }
+            if (!ok && forced) {
+                // Re-open at the same size and codec: the stream goes on from
+                // an IDR, and the client keeps its decoder.
+                live = c;
+                if (!stream_encoder->initialize(live)) return false;
+                ok = true;
+            }
+            if (!ok) {
+                auto_tune = false;
+                std::cout << "[Host] Monitor " << (int)monitor_id << ": " << stream_encoder->name()
+                          << " cannot change its rate while running; adaptive bitrate off\n";
+                return true;
+            }
+            enc_config = live;
+            fps = f;
+            min_interval = std::chrono::microseconds(1000000u / fps);
+            if (forced) {
+                std::cout << "[Host] Monitor " << (int)monitor_id << " retuned: "
+                          << (is_mjpeg ? "JPEG quality " + std::to_string(live.jpeg_quality)
+                                       : std::to_string(live.bitrate_kbps) + " kbps")
+                          << ", " << fps << " fps\n";
+            }
+            return true;
+        };
+        retune(false);  // this client's current link share, the CPU default
 
         // Register the mouse-coordinate scale for this monitor
         {
@@ -649,7 +728,11 @@ int main(int argc, char* argv[]) {
                   << " to client " << client_id
                   << " at " << out_w << "x" << out_h
                   << " (native " << display.width << "x" << display.height << ")"
-                  << " cap " << fps_cap << " fps\n";
+                  << " cap " << fps_cap << " fps, "
+                  << (is_mjpeg ? "JPEG quality " + std::to_string(enc_config.jpeg_quality)
+                               : std::to_string(enc_config.bitrate_kbps) + " of "
+                                     + std::to_string(ceil_kbps) + " kbps to start")
+                  << "\n";
 
         std::vector<uint8_t> scaled;
 
@@ -661,8 +744,23 @@ int main(int argc, char* argv[]) {
         // the MFT honours its GOP, this bounds how long any inter-frame
         // corruption can persist; the client's on-demand REQUEST_KEYFRAME clears
         // it faster (within a round-trip) when loss is actually detected.
-        const uint32_t keyframe_interval = std::max(1u, fps_cap);
-        uint32_t frames_since_keyframe = keyframe_interval;  // force one promptly
+        // On-demand IDRs at most every 200 ms: a client that keeps asking
+        // while the last one is still on its way gets it once, not per ask.
+        uint32_t frames_since_keyframe = fps;  // force one promptly
+        auto last_idr = std::chrono::steady_clock::time_point{};
+        const auto kIdrGap = std::chrono::milliseconds(200);
+
+        // Encoder overload: the CPU time of one frame (scale + encode)
+        // against the frame interval. A CPU encoder that can't keep up
+        // otherwise delivers whatever rate it manages while budgeting its
+        // bits for frames that never come; paced to what it holds, with 15%
+        // headroom, the frames it does send get the whole bitrate.
+        // Judged only while frames flow (an idle screen sends one IDR a
+        // second) and after the encoder's slow first frames.
+        double busy_ms = 0;        // moving average
+        uint32_t encoded = 0;      // frames encoded, all time
+        uint32_t tick_frames = 0;  // since the last tune tick
+        auto next_tune = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
 
         // The newest captured frame, and whether it still has to be sent.
         // Event-driven backends (WGC, ScreenCaptureKit, PipeWire) deliver
@@ -677,9 +775,43 @@ int main(int argc, char* argv[]) {
         while (g_running && !ctx->stop) {
             auto frame = stream_capture->acquire_frame(16);  // ~60fps timeout
             auto now = std::chrono::steady_clock::now();
+
+            if (ctx->cfg_changed.exchange(false)) {
+                immersive::protocol::StreamConfig c;
+                {
+                    std::lock_guard<std::mutex> lock(ctx->cfg_mutex);
+                    c = ctx->new_cfg;
+                }
+                take_cfg(c);
+                if (!retune(true)) {
+                    std::cerr << "[Host] Encoder failed to re-open on monitor "
+                              << (int)monitor_id << ", stopping its stream\n";
+                    break;
+                }
+            }
+            if (now >= next_tune) {
+                next_tune = now + std::chrono::milliseconds(500);
+                if (busy_ms > 0 && tick_frames >= 5) {
+                    const uint32_t can = std::min(fps_cap, std::max(5u,
+                        static_cast<uint32_t>(1000.0 / (busy_ms * 1.15))));
+                    const uint32_t cur = std::min(cpu_fps, fps_cap);
+                    if (can + 2 < cur || can >= cur + 5 || (can == fps_cap && cur < fps_cap)) {
+                        cpu_fps = can;
+                        std::cout << "[Host] Monitor " << (int)monitor_id << ": a frame takes "
+                                  << static_cast<int>(busy_ms + 0.5) << " ms to encode, "
+                                  << (can < fps_cap ? "streaming at " + std::to_string(can) + " of "
+                                                    : std::string("back to "))
+                                  << fps_cap << " fps\n";
+                    }
+                }
+                tick_frames = 0;
+                retune(false);
+            }
+
             if (!frame && stream_capture->is_capturing() && last_frame) {
                 const bool due = now - last_sent >= min_interval;
-                if ((last_frame_unsent && due) || ctx->force_keyframe ||
+                if ((last_frame_unsent && due) ||
+                    (ctx->force_keyframe && now - last_idr >= kIdrGap) ||
                     now - last_sent >= std::chrono::seconds(1)) {
                     frame = std::move(last_frame);  // idle: (re)send the newest
                     if (!last_frame_unsent) ctx->force_keyframe = true;
@@ -740,17 +872,25 @@ int main(int argc, char* argv[]) {
             // how long a dropped P-frame can leave artefacts on screen; the
             // on-demand request clears them within a round-trip. Both are no-ops
             // for MJPEG (every frame is already independent).
-            bool want_keyframe = ctx->force_keyframe.exchange(false);
-            if (frames_since_keyframe >= keyframe_interval) {
+            bool want_keyframe = frames_since_keyframe >= fps;
+            if (ctx->force_keyframe && now - last_idr >= kIdrGap) {
+                ctx->force_keyframe = false;
                 want_keyframe = true;
             }
             if (want_keyframe) {
                 stream_encoder->request_keyframe();
                 frames_since_keyframe = 0;
+                last_idr = now;
             }
 
             auto packets = stream_encoder->encode(
                 pixels, w, h, pitch, frame->timestamp_us);
+            const double work_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - now).count();
+            if (++encoded > 5) {
+                busy_ms = busy_ms > 0 ? busy_ms * 0.95 + work_ms * 0.05 : work_ms;
+                ++tick_frames;
+            }
 
             for (const auto& pkt : packets) {
                 server->send_video_packet(
@@ -951,24 +1091,35 @@ int main(int argc, char* argv[]) {
             apply_selection(client_id, monitor_ids);
         });
 
-    // Restart the active streams so a new stream configuration takes effect.
-    // STREAM_STOP *is* sent for each monitor first: the client rebuilds its
-    // panel and decoder from the following STREAM_START, and an Android panel
-    // that kept its old ExternalTexture would otherwise show a frozen image.
+    // A new stream configuration. Bitrate, JPEG quality and frame rate are
+    // retuned in the running workers: the picture goes on. A new codec or
+    // size restarts the active streams, STREAM_STOP first for each monitor:
+    // the client rebuilds its panel and decoder from the following
+    // STREAM_START, and an Android panel that kept its old ExternalTexture
+    // would otherwise show a frozen image.
     // One ops_mutex hold: no other client's selection can slip in between.
     server->set_on_stream_config(
         [&](uint32_t client_id, const immersive::protocol::StreamConfig& cfg) {
             std::lock_guard<std::mutex> ops(ops_mutex);
             std::vector<uint8_t> ids;
+            const bool same_picture = cfg.codec == stream_cfg.codec &&
+                                      cfg.max_width == stream_cfg.max_width;
             {
                 std::lock_guard<std::mutex> lock(streams_mutex);
                 if (!active_streams.empty() && client_id != streams_client_id) {
                     return;  // only the streaming client may reconfigure
                 }
-                for (const auto& [id, ctx] : active_streams) ids.push_back(id);
+                for (const auto& [id, ctx] : active_streams) {
+                    ids.push_back(id);
+                    if (!same_picture) continue;
+                    std::lock_guard<std::mutex> cfg_lock(ctx->cfg_mutex);
+                    ctx->new_cfg = cfg;
+                    ctx->cfg_changed = true;
+                }
             }
             stream_cfg = cfg;  // after the check: a bystander client must
                                // not poison the next restart's settings
+            if (same_picture) return;
             stop_all_locked(true);
             if (!ids.empty()) apply_selection_locked(streams_client_id, ids);
         });

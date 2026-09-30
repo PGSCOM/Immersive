@@ -231,8 +231,15 @@ private:
 
     static void on_core_error(void* data, uint32_t id, int /*seq*/, int res, const char* message) {
         // Errors on the stream's own node also reach on_state_changed.
-        if (id != PW_ID_CORE) return;
         auto* self = static_cast<PortalCapture*>(data);
+        // When the shared screen's node goes away (sharing stopped, screen
+        // locked, monitor change) the session manager destroys our stream
+        // ("defined target not found"), and the node updates libpipewire
+        // still had in flight come back as a burst of "unknown resource 2
+        // op:2/op:3". Nothing is wrong beyond the failure already reported
+        // (reproduced with a private PipeWire + WirePlumber: none of them
+        // come from stop_capture()).
+        if (id != PW_ID_CORE || self->failed_) return;
         std::cerr << "[Capture] PipeWire connection error: " << (message ? message : "") << "\n";
         if (res == -EPIPE) self->fail();
     }

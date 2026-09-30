@@ -6,6 +6,7 @@
 #include "network/server.h"
 
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -75,11 +76,28 @@ struct ClientState {
     bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
     std::string         name;
     struct FlowState {
+        uint32_t first_frame = 0;  ///< this stream's first frame; older ACKs are the last stream's
+        uint32_t last_sent = 0;
         uint32_t last_ack = 0;
         bool     ack_seen = false;
-        std::chrono::steady_clock::time_point last_log{};
+        std::chrono::steady_clock::time_point last_ack_time{}, last_log{};
+        std::array<std::chrono::steady_clock::time_point, 128> sent_at{};  ///< by frame % 128
     };
     std::unordered_map<uint8_t, FlowState> flow_state;
+
+    /// Adaptive bitrate for this client; all its monitors share one link.
+    /// Fed by FRAME_ACK (the client acks every frame it completes): frames
+    /// skipped over were lost; frames sent while one was in flight mean a
+    /// queue filling up on the way; no ACK at all for a while is a stall.
+    /// Each cuts the rate at once, a clean spell raises it slowly — the
+    /// user's setting is the ceiling.
+    struct RateControl {
+        float    scale = 0.5f;  ///< share of the configured bitrate; starts at half
+        uint32_t sent = 0, lost = 0;  ///< this window
+        std::chrono::milliseconds worst_delay{0};  ///< this window: send -> ACK
+        bool     stalled = false;                  ///< this window
+        std::chrono::steady_clock::time_point window_start{}, last_cut{}, last_ack{};
+    } rate;
 };
 
 class NetworkServer : public INetworkServer {
@@ -90,7 +108,11 @@ public:
         stop();
     }
 
-    static constexpr uint32_t kMaxInFlightFrames = 6;
+    /// Rate control (see ClientState::RateControl). A frame confirmed later
+    /// than this after sending sat in a queue: Wi-Fi round trips are tens of
+    /// ms, and the small VBV keeps any frame's own transfer near 50-100 ms.
+    static constexpr std::chrono::milliseconds kMaxFrameDelay{250};
+    static constexpr float kMinRateScale = 0.05f;
 
     /// Hard ceiling on a control-message payload. Every message defined in
     /// protocol.h is a few dozen bytes; anything larger is a corrupt stream or a
@@ -306,7 +328,14 @@ public:
             // the previous stream's acknowledgements.
             std::lock_guard<std::mutex> lock(clients_mutex_);
             auto it = clients_.find(client_id);
-            if (it != clients_.end()) it->second.flow_state.erase(info.monitor_id);
+            if (it != clients_.end()) {
+                ClientState::FlowState fresh;
+                fresh.first_frame = info.first_frame;
+                it->second.flow_state[info.monitor_id] = fresh;
+                // A restart pauses the ACKs (no frames, a new decoder): not a stall.
+                if (it->second.rate.last_ack.time_since_epoch().count())
+                    it->second.rate.last_ack = std::chrono::steady_clock::now();
+            }
         }
         send_control_message(client_id,
                              protocol::MessageType::STREAM_START,
@@ -330,6 +359,20 @@ public:
             auto it = clients_.find(client_id);
             if (it == clients_.end() || !it->second.udp_addr_set) return;
             dest = it->second.udp_addr;
+
+            auto& flow = it->second.flow_state[monitor_id];
+            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+                flow.ack_seen = false;
+                flow.last_ack = frame_number;
+            }
+            // A client falling behind is never a reason to stop sending:
+            // catching up needs the newest frames, and refusing them froze the
+            // stream for good (the client could never ACK again). The rate
+            // control sends less instead.
+            const auto now = std::chrono::steady_clock::now();
+            flow.last_sent = frame_number;
+            flow.sent_at[frame_number % flow.sent_at.size()] = now;
+            rate_on_sent(it->second, now);
 
             if (it->second.tcp_media) {
                 // TCP never loses a frame, it queues it (in adb, the kernels,
@@ -362,36 +405,6 @@ public:
                                   &vfh, sizeof(vfh), data, size);
                 unacked.push_back(frame_number);
                 return;
-            }
-
-            auto& flow = it->second.flow_state[monitor_id];
-            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
-                flow.ack_seen = false;
-                flow.last_ack = frame_number;
-            }
-            if (flow.ack_seen) {
-                uint32_t backlog = (frame_number >= flow.last_ack)
-                    ? (frame_number - flow.last_ack)
-                    : 0;
-                if (backlog > kMaxInFlightFrames) {
-                    // The client has fallen behind (slow decode or Wi-Fi chunk
-                    // loss). Do NOT stop sending: catching up requires frames
-                    // we'd be refusing to send, so a `return` here deadlocks
-                    // the stream into a permanent black screen (the client can
-                    // never ACK, so last_ack stays frozen and every future
-                    // frame is dropped). Instead resync the flow window to the
-                    // present and keep streaming the freshest frame.
-                    auto now = std::chrono::steady_clock::now();
-                    if (flow.last_log.time_since_epoch().count() == 0 ||
-                        std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
-                        std::cout << "[Server] Client " << client_id
-                                  << " monitor " << static_cast<int>(monitor_id)
-                                  << " lagging (backlog " << backlog << " > "
-                                  << kMaxInFlightFrames << "), resyncing flow window\n";
-                        flow.last_log = now;
-                    }
-                    flow.last_ack = frame_number;
-                }
             }
         }
 
@@ -562,6 +575,12 @@ public:
         }
         std::cout << "[Server] Client " << client_id << " disconnected from the settings panel\n";
         shutdown(it->second.tcp_socket, SHUTDOWN_BOTH);
+    }
+
+    float link_rate_scale(uint32_t client_id) const override {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.find(client_id);
+        return it == clients_.end() ? 1.0f : it->second.rate.scale;
     }
 
     bool is_running() const override { return running_; }
@@ -868,16 +887,41 @@ private:
                 break;
             }
             case protocol::MessageType::FRAME_ACK: {
-                // Flow control: client acknowledged a frame — currently logged only
+                // The client completed a frame. Frame numbers only count sent
+                // frames, so the ones skipped over were lost on the way —
+                // unless this monitor's last ACK is old: then it was idle (one
+                // frame a second) or the link stalled, which is reported
+                // already; counted again, the recovery would read as loss.
+                // Its send-to-ACK delay is the queue in front of it.
                 if (payload.size() >= sizeof(protocol::FrameAck)) {
                     protocol::FrameAck ack;
                     std::memcpy(&ack, payload.data(), sizeof(ack));
+                    const auto now = std::chrono::steady_clock::now();
                     std::lock_guard<std::mutex> lock(clients_mutex_);
                     auto it = clients_.find(client_id);
                     if (it != clients_.end()) {
                         auto& flow = it->second.flow_state[ack.monitor_id];
+                        auto& rate = it->second.rate;
+                        if (ack.frame_number < flow.first_frame) break;  // the previous stream's
+                        if (flow.ack_seen && ack.frame_number > flow.last_ack + 1 &&
+                            now - flow.last_ack_time < std::chrono::seconds(1)) {
+                            rate.lost += ack.frame_number - flow.last_ack - 1;
+                        }
+                        if (flow.last_sent - ack.frame_number < flow.sent_at.size()) {
+                            const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - flow.sent_at[ack.frame_number % flow.sent_at.size()]);
+                            rate.worst_delay = std::max(rate.worst_delay, delay);
+                            if (delay > kMaxFrameDelay && now - flow.last_log > std::chrono::seconds(2)) {
+                                std::cout << "[Server] Client " << client_id << " monitor "
+                                          << static_cast<int>(ack.monitor_id) << " lagging ("
+                                          << delay.count() << " ms from send to ACK)\n";
+                                flow.last_log = now;
+                            }
+                        }
+                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, ack.frame_number)
+                                                      : ack.frame_number;
                         flow.ack_seen = true;
-                        flow.last_ack = std::max(flow.last_ack, ack.frame_number);
+                        flow.last_ack_time = rate.last_ack = now;
                     }
                 }
                 break;
@@ -952,6 +996,45 @@ private:
 
         std::cout << "[Server] Client " << client_id << " disconnected\n";
         if (on_disconnected_) on_disconnected_(client_id);
+    }
+
+    /// One sent frame for the client's rate control; once a second decide.
+    /// Caller holds clients_mutex_.
+    /// ponytail: fixed thresholds, no delay-gradient estimator; a queue shows
+    /// once it is kMaxFrameDelay deep.
+    void rate_on_sent(ClientState& client, std::chrono::steady_clock::time_point now) {
+        using namespace std::chrono_literals;
+        auto& r = client.rate;
+        if (r.window_start.time_since_epoch().count() == 0) r.window_start = r.last_cut = now;
+        ++r.sent;
+        // Sending, and no ACK for 1.5 s (an idle screen still sends one
+        // frame a second): the link or the client has stalled. Clients that
+        // never ACK (older ones, the web bridge) are left alone.
+        if (r.last_ack.time_since_epoch().count() && now - r.last_ack > 1500ms) r.stalled = true;
+        if (now - r.window_start < 1s) return;
+
+        // More than 1 frame in 20 lost costs an IDR request each, and each
+        // frame is more UDP chunks that can go missing the higher the rate.
+        const bool lossy = r.lost >= 2 && r.lost * 20 > r.sent;
+        const bool queued = r.stalled || r.worst_delay > kMaxFrameDelay;
+        if ((lossy || queued) && now - r.last_cut >= 1s) {
+            r.scale = std::max(kMinRateScale, r.scale * 0.7f);
+            r.last_cut = now;
+            std::cout << "[Server] Client " << client.id << " link congested ("
+                      << r.lost << "/" << r.sent << " frames lost, "
+                      << (r.stalled ? std::string("no ACKs")
+                                    : std::to_string(r.worst_delay.count()) + " ms to ACK")
+                      << "): video bitrate down to "
+                      << static_cast<int>(r.scale * 100 + 0.5f) << "%\n";
+        } else if (!lossy && !queued && r.sent >= 5 && r.scale < 1.0f && now - r.last_cut >= 4s) {
+            r.scale = std::min(1.0f, r.scale * 1.1f + 0.02f);  // floor to full: ~20 s
+            if (r.scale == 1.0f)
+                std::cout << "[Server] Client " << client.id << " link clean: full video bitrate\n";
+        }
+        r.window_start = now;
+        r.sent = r.lost = 0;
+        r.worst_delay = 0ms;
+        r.stalled = false;
     }
 
     /// 0 when a HELLO carrying `pin` from `peer` may proceed, else the

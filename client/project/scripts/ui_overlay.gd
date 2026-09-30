@@ -152,6 +152,7 @@ var _slider_jpegq: HSlider
 var _lbl_jpegq_value: Label
 var _lbl_auto_info: Label
 var _apply_debounce: Timer
+var _slider_held := false  ## a Quality slider is being dragged
 
 # Styles
 var _st_button: Dictionary
@@ -1225,16 +1226,24 @@ func _build_quality_tab(body: VBoxContainer) -> void:
 	r = _slider_row(body, "JPEG quality", 10, 95, 5, _on_jpegq_changed)
 	_slider_jpegq = r[0]
 	_lbl_jpegq_value = r[1]
+	# A drag applies once, where it is let go, however long it pauses on the way.
+	for s: HSlider in [_slider_bitrate, _slider_jpegq]:
+		s.drag_started.connect(func():
+			_slider_held = true
+			_apply_debounce.stop())
+		s.drag_ended.connect(func(_changed: bool):
+			_slider_held = false
+			_schedule_auto_apply())
 	_lbl_auto_info = _label("", 17, UiTheme.INK_3)
 	_lbl_auto_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_lbl_auto_info.hide()
 	body.add_child(_lbl_auto_info)
-	var note := _label("Changes apply a moment after you make them. Bitrate matters for H.264, HEVC and AV1; JPEG quality for MJPEG.", 17, UiTheme.INK_3)
+	var note := _label("Changes apply a moment after you make them. Bitrate and JPEG quality are upper limits: the PC lowers them while the network is struggling.", 17, UiTheme.INK_3)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(note)
 
 func _schedule_auto_apply() -> void:
-	if _apply_debounce and _apply_debounce.is_inside_tree():
+	if _apply_debounce and _apply_debounce.is_inside_tree() and not _slider_held:
 		_apply_debounce.start(AUTO_APPLY_DELAY)
 
 func _emit_stream_settings() -> void:

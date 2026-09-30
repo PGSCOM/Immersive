@@ -12,7 +12,9 @@ Start the host with the PIN this script sends:  immersive2_host --stub --pin 246
 Exercises: LAN discovery, PIN pairing (no PIN / wrong PIN refused, nothing
 served before HELLO), HELLO handshake (host flags), MONITOR_LIST (with its
 per-monitor flags), MULTI_MONITOR_SELECT, video frame reassembly (all
-selected monitors) and STREAM_STOP on deselection, then virtual displays
+selected monitors), a quality-only STREAM_CONFIG retuning the running streams
+(no STREAM_STOP/START), the adaptive rate (stop sending FRAME_ACKs: the rate
+falls; resume: it climbs back) and STREAM_STOP on deselection, then virtual displays
 (create -> RESULT + new list, stream it, remove -> STREAM_STOP + list, the
 limit of 4). Then a second connection from 127.0.0.1 (trusted, like a USB
 headset) asks for HELLO_FLAG_TCP_MEDIA (the USB / adb-reverse mode) and checks
@@ -21,6 +23,7 @@ client that stops acknowledging frames gets a few, not a growing queue, and
 live frames again once it acknowledges.
 """
 import os
+import select
 import socket
 import struct
 import sys
@@ -231,6 +234,67 @@ def receive_frames(udp, monitors_expected, seconds, min_frames):
               f"first bytes {first[mon].hex()}")
     return complete
 
+def measure(udp, s, mon, seconds, ack):
+    """Reassemble frames for `seconds`; FRAME_ACK every complete one when
+    `ack`. Returns (frames/s, kbit/s) of monitor `mon`. Fails on a
+    STREAM_START / STREAM_STOP meanwhile: the stream must go on."""
+    frames, n, size = {}, 0, 0
+    end = time.time() + seconds
+    while time.time() < end:
+        readable, _, _ = select.select([udp, s], [], [], 0.1)
+        if s in readable:
+            mtype, _ = recv_msg(s)
+            if mtype in (0x05, 0x06):
+                fail(f"a quality-only STREAM_CONFIG restarted the stream ({MSG_NAMES[mtype]})")
+        if udp not in readable:
+            continue
+        pkt, _ = udp.recvfrom(2048)
+        if len(pkt) < 9:
+            continue
+        fmon, fnum, cidx, ccnt = struct.unpack_from("<BIHH", pkt, 0)
+        chunks = frames.setdefault((fmon, fnum), {})
+        chunks[cidx] = len(pkt) - 9
+        if len(chunks) < ccnt:
+            continue
+        del frames[(fmon, fnum)]
+        if ack:
+            s.sendall(struct.pack("<BIBI", 0x30, 5, fmon, fnum))
+        if fmon == mon:
+            n += 1
+            size += sum(chunks.values())
+    return n / seconds, size * 8 / 1000 / seconds
+
+def check_live_config_and_rate(s, udp, selection):
+    """A bitrate / quality / fps-only STREAM_CONFIG retunes the running
+    streams (no STREAM_STOP/START), and a client that stops acknowledging
+    frames (a stalled link) gets a lower rate, which then climbs back."""
+    mon = 2 if 2 in selection else selection[-1]  # the stub's animated monitor
+    send_stream_config(s, codec=2, bitrate_kbps=20000, jpeg_quality=90, max_width=960, max_fps=30)
+    measure(udp, s, mon, 1, ack=True)
+    fps, kbps = measure(udp, s, mon, 2, ack=True)
+    print(f"[client] live retune, no restart; acknowledging: {fps:.0f} fps, {kbps:.0f} kbit/s")
+    if fps < 5:
+        fail("frames stopped after a live retune")
+
+    # Stop acknowledging: to the host the frames pile up unconfirmed. (The
+    # stub's flat picture barely shrinks with JPEG quality: this is mostly
+    # the frame rate MJPEG also gives up.)
+    measure(udp, s, mon, 5, ack=False)
+    slow_fps, slow_kbps = measure(udp, s, mon, 2, ack=False)
+    print(f"[client] not acknowledging: {slow_fps:.0f} fps, {slow_kbps:.0f} kbit/s")
+    if slow_kbps > 0.6 * kbps:
+        fail(f"host kept the rate up for a stalled client ({slow_kbps:.0f} of {kbps:.0f} kbit/s)")
+
+    # Acknowledge again: after 4 clean seconds the rate climbs 10 % a second.
+    low_fps, low_kbps = measure(udp, s, mon, 1.5, ack=True)
+    measure(udp, s, mon, 8, ack=True)
+    back_fps, back_kbps = measure(udp, s, mon, 2, ack=True)
+    print(f"[client] acknowledging again: {low_fps:.0f} fps, {low_kbps:.0f} kbit/s, "
+          f"10 s later {back_fps:.0f} fps, {back_kbps:.0f} kbit/s")
+    if back_kbps < 1.3 * low_kbps:
+        fail("the rate did not recover once frames were acknowledged again")
+    print("[client] OK: live retune without restart, adaptive rate down and back up")
+
 def check_idle_dropped(idle):
     """Sockets that never sent HELLO are closed by the host after ~5 s."""
     for sock in idle:
@@ -372,6 +436,8 @@ def main():
         note = "" if actual == req else f"  (fallback from {CODEC_NAMES[req]})"
         print(f"[client] codec request {CODEC_NAMES[req]:6} -> "
               f"streams {CODEC_NAMES.get(actual, actual)}{note}")
+
+    check_live_config_and_rate(s, udp, selection)
 
     # --- Deselect everything and expect STREAM_STOP per monitor ---
     send_multi_select(s, [])
