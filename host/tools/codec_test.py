@@ -74,7 +74,7 @@ def wait_stream_starts(s, ids, timeout=10):
         except socket.timeout:
             continue
         if mtype == 0x05:
-            mid, w, h, codec = struct.unpack("<BHHB", payload)
+            mid, w, h, codec = struct.unpack_from("<BHHB", payload)
             starts[mid] = (w, h, codec)
     return starts
 
@@ -159,7 +159,8 @@ def main():
         return
     exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         ROOT, "host", "build", "immersive2_host")
-    host = subprocess.Popen([exe, "--stub", "--no-usb"],
+    host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-pin",
+                             "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(2)

@@ -12,7 +12,7 @@ const FAKE_MAIN := """
 extends Node3D
 var sent: Array = []
 func get_ui_hit_from_ray(_o, _d): return {}
-func send_keyboard_pointer(_o, _d, _p): return false
+func send_keyboard_pointer(_o, _d, _p) -> float: return -1.0
 func get_panel_hit_from_ray(o: Vector3, d: Vector3) -> Dictionary:
 	var t := (-1.5 - o.z) / d.z
 	var p := o + d * t

@@ -147,6 +147,7 @@ elseif(UNIX)
         target_sources(immersive2_host PRIVATE
             src/capture/portal_session.cpp
             src/capture/pipewire_capture.cpp
+            src/capture/mutter_virtual.cpp
             src/input/portal_input.cpp
         )
         target_link_libraries(immersive2_host PRIVATE PkgConfig::IM2_PORTAL)

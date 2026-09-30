@@ -13,15 +13,21 @@
 #include "protocol.h"
 
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <set>
 #include <csignal>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -90,6 +96,38 @@ namespace {
 #endif
     }
 
+    /// Per-user settings directory: %APPDATA%\Immersive2 on Windows,
+    /// $XDG_CONFIG_HOME/immersive2 (~/.config/immersive2) elsewhere.
+    std::filesystem::path config_dir() {
+#ifdef _WIN32
+        const char* appdata = std::getenv("APPDATA");
+        return std::filesystem::path(appdata ? appdata : ".") / "Immersive2";
+#else
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        const char* home = std::getenv("HOME");
+        return ((xdg && *xdg) ? std::filesystem::path(xdg)
+                              : std::filesystem::path(home ? home : ".") / ".config") / "immersive2";
+#endif
+    }
+
+    /// The pairing PIN, generated once and kept in the config dir so a
+    /// headset paired once stays paired across host restarts.
+    uint32_t load_or_create_pin() {
+        const auto path = config_dir() / "pairing-pin";
+        uint32_t pin = 0;
+        std::ifstream(path) >> pin;
+        if (pin >= 100000 && pin <= 999999) return pin;
+        std::random_device rd;
+        pin = std::uniform_int_distribution<uint32_t>(100000, 999999)(rd);
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        std::ofstream(path, std::ios::trunc) << pin << "\n";
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, ec);
+        return pin;
+    }
+
     /// Print usage and exit.
     [[noreturn]] void usage(const char* prog) {
         std::cerr << "Usage: " << prog << " [options]\n"
@@ -106,6 +144,12 @@ namespace {
                   << "                      FFmpeg with libx264 as fallback) and need the\n"
                   << "                      client's MediaCodec decoder (Quest/Pico).\n"
                   << "  --jpeg-quality N    MJPEG quality 10-95 (default: 35)\n"
+                  << "  --pin NNNNNN        Pairing PIN headsets must enter (6 digits). By\n"
+                  << "                      default a random one is created once and kept in\n"
+                  << "                      the settings folder\n"
+                  << "  --no-pin            Let any device on the network connect without a PIN\n"
+                  << "  --view-only         Share the screens but ignore mouse and keyboard\n"
+                  << "                      from headsets (no remote control)\n"
                   << "  --stub              Fake displays and logged-only input, for protocol\n"
                   << "                      tests without touching the real desktop\n"
                   << "  --install-idd-cert  Install a self-signed code-signing certificate\n"
@@ -143,6 +187,8 @@ int main(int argc, char* argv[]) {
     uint8_t  default_codec = 2;  // protocol VideoCodec: 0=H264 1=H265 2=MJPEG 3=AV1
     uint32_t jpeg_quality = 35;
     bool     stub         = false;
+    int64_t  pin_arg      = -1;  // -1: persistent random PIN, 0: --no-pin
+    bool     view_only    = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -164,6 +210,16 @@ int main(int argc, char* argv[]) {
             audio_enable = false;
         } else if (arg == "--no-usb") {
             usb_enable = false;
+        } else if (arg == "--no-pin") {
+            pin_arg = 0;
+        } else if (arg == "--view-only") {
+            view_only = true;
+        } else if (arg == "--pin" && i + 1 < argc) {
+            pin_arg = std::strtoll(argv[++i], nullptr, 10);
+            if (pin_arg < 100000 || pin_arg > 999999) {
+                std::cerr << "[Host] --pin needs six digits (100000-999999)\n";
+                usage(argv[0]);
+            }
         } else if (arg == "--install-idd-cert") {
             immersive::install_idd_signing_certificate();
             return 0;
@@ -203,6 +259,15 @@ int main(int argc, char* argv[]) {
     if (stub) {
         std::cout << "[Host] --stub: fake displays, input is only logged\n";
     }
+    // Virtual displays: extra monitors made on a headset's request. Made
+    // first: on X11 it clears ones a killed host left behind.
+    auto vdm = stub ? immersive::create_stub_virtual_display_manager()
+                    : immersive::create_virtual_display_manager();
+    const bool vdm_ok = vdm->can_create_displays();
+#ifdef _WIN32
+    vdm->is_driver_installed();  // logs whether an IDD driver is present
+#endif
+
     auto capture = make_capture();
     auto displays = capture ? capture->enumerate_displays()
                             : std::vector<immersive::DisplayInfo>{};
@@ -214,7 +279,9 @@ int main(int argc, char* argv[]) {
                   << (d.is_primary ? " (primary)" : "") << "\n";
     }
 
-    if (displays.empty()) {
+    if (displays.empty() && vdm_ok) {
+        std::cout << "[Host] No physical display: add a virtual screen from the headset\n";
+    } else if (displays.empty()) {
         std::cerr << "[Host] No displays found. Exiting.\n"
 #ifdef __APPLE__
                   << "       Grant Screen Recording to this binary (or its terminal) in\n"
@@ -250,14 +317,6 @@ int main(int argc, char* argv[]) {
     input_injector->initialize();
     input_injector->set_displays(displays);
 
-    // 4. Virtual display manager (optional)
-    auto vdm = immersive::create_virtual_display_manager();
-    if (vdm->is_driver_installed()) {
-        std::cout << "[Host] IDD driver found — virtual displays available\n";
-    } else {
-        std::cout << "[Host] IDD driver not installed — using physical displays only\n";
-    }
-
     // 5. Audio capture (WASAPI loopback)
     std::unique_ptr<immersive::IAudioCapture> audio_capture;
     if (audio_enable) {
@@ -271,42 +330,118 @@ int main(int argc, char* argv[]) {
     // 6. Network server
     auto server = immersive::create_network_server();
 
-    // Prepare monitor info for the protocol
+    // The monitor list as sent to clients, rebuilt whenever a virtual
+    // display comes or goes. displays_mutex guards `displays` and these two
+    // (read by network threads, rewritten under ops_mutex).
+    std::mutex displays_mutex;
     std::vector<immersive::protocol::MonitorInfo> proto_monitors;
-    for (const auto& d : displays) {
-        immersive::protocol::MonitorInfo info = {};
-        info.monitor_id   = d.id;
-        info.width        = d.width;
-        info.height       = d.height;
-        info.refresh_rate = d.refresh_rate;
-        strncpy(info.name, d.name.c_str(), sizeof(info.name) - 1);
-        proto_monitors.push_back(info);
-    }
+    std::vector<uint8_t> monitor_flags;  // MONITOR_FLAG_* per entry
+    auto build_proto_monitors = [&]() {  // caller holds displays_mutex
+        proto_monitors.clear();
+        monitor_flags.clear();
+        for (const auto& d : displays) {
+            immersive::protocol::MonitorInfo info = {};
+            info.monitor_id   = d.id;
+            info.width        = d.width;
+            info.height       = d.height;
+            info.refresh_rate = d.refresh_rate;
+            strncpy(info.name, d.name.c_str(), sizeof(info.name) - 1);
+            proto_monitors.push_back(info);
+            monitor_flags.push_back(
+                (d.id >= immersive::protocol::VIRTUAL_MONITOR_ID_BASE
+                     ? immersive::protocol::MONITOR_FLAG_VIRTUAL : 0) |
+                (d.is_primary ? immersive::protocol::MONITOR_FLAG_PRIMARY : 0));
+        }
+    };
+    build_proto_monitors();
 
     // --- Multi-monitor streaming state ---
     // One worker per selected monitor, each with its own capture (DXGI
-    // duplication) and encoder instance. streams_mutex guards the map and
-    // is held while starting/stopping workers (network-thread callbacks).
+    // duplication) and encoder instance.
+    //  - ops_mutex serialises whole selection/restart/stop operations,
+    //    including the wait for workers to stop, so two clients' requests
+    //    can't interleave half-way.
+    //  - streams_mutex only guards the map and streams_client_id for short
+    //    reads (REQUEST_KEYFRAME), so those never wait on a stopping worker.
+    // Lock order: ops_mutex -> streams_mutex / input_mutex / graveyard_mutex.
     struct ActiveStream {
         std::atomic<bool> stop{false};
         std::atomic<bool> force_keyframe{false};  // set by REQUEST_KEYFRAME (loss recovery)
+        std::atomic<bool> done{false};            // worker returned: join() won't block
         std::thread       worker;
     };
 
+    std::mutex ops_mutex;
     std::mutex streams_mutex;
     std::map<uint8_t, std::unique_ptr<ActiveStream>> active_streams;
+    // Last frame number sent per monitor, across stream restarts.
+    std::array<std::atomic<uint32_t>, 256> frame_high_water{};
     uint32_t streams_client_id = 0;
     std::atomic<int> live_stream_count{0};  // streams actively sending (gates audio)
 
-    // Client-requested stream quality (protected by streams_mutex).
+    // Workers that did not stop in time (stuck in a capture backend, e.g. a
+    // Wayland share dialog nobody answers). The main loop joins them once they
+    // return; nothing else waits on them.
+    std::mutex graveyard_mutex;
+    std::vector<std::unique_ptr<ActiveStream>> graveyard;
+
+    // Client-requested stream quality (protected by ops_mutex).
     // Defaults mean "use the host CLI settings".
     immersive::protocol::StreamConfig stream_cfg = {};
     stream_cfg.codec = 0xFF;
 
     // Per-monitor scale from stream pixels to native pixels, used to map
-    // incoming mouse coordinates when the stream is downscaled.
+    // incoming mouse coordinates when the stream is downscaled. `owner` is
+    // the worker that registered it, so a late-exiting old worker can't erase
+    // the entry of its replacement.
+    struct InputScale {
+        double sx, sy;
+        uint16_t native_w, native_h;
+        const ActiveStream* owner;
+    };
     std::mutex input_scale_mutex;
-    std::map<uint8_t, std::pair<double, double>> input_scale;
+    std::map<uint8_t, InputScale> input_scale;
+
+    // Input: only the streaming client drives it (input_client_id mirrors
+    // streams_client_id for this hot path). input_mutex serialises every
+    // injector call (their button/scroll state is not thread-safe) and the
+    // record of what is held down, released when that client goes away.
+    std::atomic<uint32_t> input_client_id{0};
+    std::mutex input_mutex;
+    immersive::protocol::InputMouse held_mouse = {};  // last injected, native px
+    std::set<uint16_t> held_keys;                      // VKs injected down, not yet up
+
+    auto release_input = [&]() {
+        std::lock_guard<std::mutex> lock(input_mutex);
+        if (held_mouse.buttons) {
+            immersive::protocol::InputMouse up = held_mouse;
+            up.buttons = 0;
+            up.scroll_delta = up.scroll_delta_h = 0;
+            input_injector->inject_mouse(up);
+            held_mouse.buttons = 0;
+        }
+        for (uint16_t vk : held_keys) {
+            immersive::protocol::InputKeyboard k = {};
+            k.monitor_id = held_mouse.monitor_id;
+            k.scancode = vk;
+            input_injector->inject_keyboard(k);
+        }
+        held_keys.clear();
+    };
+
+    // Re-read the display layout after a capture had to restart (monitor
+    // unplugged, resolution or arrangement changed), so input lands where the
+    // stream now shows. Returns the fresh list (empty on failure).
+    auto refresh_input_displays = [&]() {
+        auto probe = make_capture();
+        auto now_displays = probe ? probe->enumerate_displays()
+                                  : std::vector<immersive::DisplayInfo>{};
+        if (!now_displays.empty()) {
+            std::lock_guard<std::mutex> lock(input_mutex);
+            input_injector->set_displays(now_displays);
+        }
+        return now_displays;
+    };
 
     // Capture → encode → send loop for a single monitor.
     // `cfg` is a snapshot of the client stream settings taken at start time.
@@ -324,10 +459,13 @@ int main(int argc, char* argv[]) {
         uint32_t out_w = display.width;
         uint32_t out_h = display.height;
         if (cfg.max_width >= 320 && cfg.max_width < display.width) {
-            out_w = cfg.max_width & ~1u;
-            out_h = (static_cast<uint32_t>(display.height) * out_w / display.width) & ~1u;
-            if (out_h < 2) out_h = 2;
+            out_w = cfg.max_width;
+            out_h = static_cast<uint32_t>(display.height) * out_w / display.width;
         }
+        // Even at native size too: a scaled desktop can report e.g. 1707x960,
+        // which x264/NVENC/VAAPI refuse and NV12 conversion would overrun.
+        out_w = std::max(2u, out_w & ~1u);
+        out_h = std::max(2u, out_h & ~1u);
 
         // The retry loop is a safety net for transient failures (mode changes,
         // a Wayland portal being re-created, a permission prompt).
@@ -343,6 +481,12 @@ int main(int argc, char* argv[]) {
                       << " — retrying in 3 s...\n";
             for (int i = 0; i < 30 && g_running && !ctx->stop; ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        // Stopped while start_capture() was blocked (a share dialog, say):
+        // don't announce a stream that has already been replaced.
+        if (!g_running || ctx->stop) {
+            stream_capture->stop_capture();
+            return;
         }
 
         immersive::EncoderConfig enc_config;
@@ -429,15 +573,22 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lock(input_scale_mutex);
             input_scale[monitor_id] = {
                 static_cast<double>(display.width)  / out_w,
-                static_cast<double>(display.height) / out_h
+                static_cast<double>(display.height) / out_h,
+                display.width, display.height, ctx
             };
         }
 
+        // Frame numbers keep growing across restarts of this monitor's stream
+        // (with a margin for a previous worker still winding down), so the
+        // client can tell this stream's frames from late ones of the last.
+        const uint32_t first_frame = frame_high_water[monitor_id].load() + 1000;
+
         immersive::protocol::StreamStart start_info = {};
-        start_info.monitor_id = monitor_id;
-        start_info.width      = static_cast<uint16_t>(out_w);
-        start_info.height     = static_cast<uint16_t>(out_h);
-        start_info.codec      = actual_codec;  // 0=H264 1=HEVC 2=MJPEG 3=AV1
+        start_info.monitor_id  = monitor_id;
+        start_info.width       = static_cast<uint16_t>(out_w);
+        start_info.height      = static_cast<uint16_t>(out_h);
+        start_info.codec       = actual_codec;  // 0=H264 1=HEVC 2=MJPEG 3=AV1
+        start_info.first_frame = first_frame;
         server->send_stream_start(client_id, start_info);
 
         std::cout << "[Host] Streaming monitor " << (int)monitor_id
@@ -449,7 +600,7 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> scaled;
 
         live_stream_count++;
-        uint32_t frame_number = 0;
+        uint32_t frame_number = first_frame;
         auto last_sent = std::chrono::steady_clock::time_point{};
 
         // Guaranteed periodic IDR (~1 s of sent frames). Independent of whether
@@ -488,10 +639,20 @@ int main(int argc, char* argv[]) {
                 if (!stream_capture->is_capturing()) {
                     for (int i = 0; i < 10 && g_running && !ctx->stop; ++i)
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if (g_running && !ctx->stop &&
-                        !stream_capture->start_capture(monitor_id)) {
-                        std::cerr << "[Host] Capture lost on monitor "
-                                  << (int)monitor_id << ", retrying...\n";
+                    if (g_running && !ctx->stop) {
+                        if (!stream_capture->start_capture(monitor_id)) {
+                            std::cerr << "[Host] Capture lost on monitor "
+                                      << (int)monitor_id << ", retrying...\n";
+                        } else {
+                            for (const auto& d : refresh_input_displays()) {
+                                if (d.id != monitor_id || !d.width || !d.height) continue;
+                                std::lock_guard<std::mutex> lock(input_scale_mutex);
+                                input_scale[monitor_id] = {
+                                    static_cast<double>(d.width) / out_w,
+                                    static_cast<double>(d.height) / out_h,
+                                    d.width, d.height, ctx};
+                            }
+                        }
                     }
                 }
                 continue;
@@ -546,6 +707,7 @@ int main(int argc, char* argv[]) {
                     static_cast<uint32_t>(pkt.data.size()));
             }
             if (!packets.empty()) {
+                frame_high_water[monitor_id].store(frame_number);
                 frame_number++;  // number only frames actually sent
                 last_sent = now;
                 frames_since_keyframe++;
@@ -557,112 +719,144 @@ int main(int argc, char* argv[]) {
         live_stream_count--;
         {
             std::lock_guard<std::mutex> lock(input_scale_mutex);
-            input_scale.erase(monitor_id);
+            auto it = input_scale.find(monitor_id);
+            if (it != input_scale.end() && it->second.owner == ctx) input_scale.erase(it);
         }
         stream_capture->stop_capture();
         std::cout << "[Host] Stopped streaming monitor " << (int)monitor_id << "\n";
     };
 
+    // Stop workers without letting a stuck one hold up the caller: ask all of
+    // them to stop, wait up to 5 s (a TCP-media send can hold one for its 3 s
+    // SO_SNDTIMEO), join the ones that returned and park the rest for the
+    // main loop.
+    auto retire = [&](std::vector<std::unique_ptr<ActiveStream>> ctxs) {
+        for (auto& c : ctxs) c->stop = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        for (auto& c : ctxs) {
+            while (!c->done && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (c->done) {
+                if (c->worker.joinable()) c->worker.join();
+                continue;
+            }
+            std::cerr << "[Host] A stream worker is stuck in its capture backend;"
+                         " it will be cleaned up when it returns\n";
+            std::lock_guard<std::mutex> lock(graveyard_mutex);
+            graveyard.push_back(std::move(c));
+        }
+    };
+
+    auto send_stream_stop = [&](uint32_t client_id, uint8_t monitor_id) {
+        immersive::protocol::StreamStop stop_msg = { monitor_id };
+        server->send_control_message(client_id,
+                                     immersive::protocol::MessageType::STREAM_STOP,
+                                     &stop_msg, sizeof(stop_msg));
+    };
+
+    // Stop every stream. Caller holds ops_mutex.
+    auto stop_all_locked = [&](bool notify_client) {
+        std::vector<uint8_t> ids;
+        std::vector<std::unique_ptr<ActiveStream>> ctxs;
+        {
+            std::lock_guard<std::mutex> lock(streams_mutex);
+            for (auto& [id, ctx] : active_streams) {
+                ids.push_back(id);
+                ctxs.push_back(std::move(ctx));
+            }
+            active_streams.clear();
+        }
+        retire(std::move(ctxs));
+        if (notify_client)
+            for (uint8_t id : ids) send_stream_stop(streams_client_id, id);
+    };
+
     // Reconcile the set of active streams with the client's selection:
     // stops deselected monitors, starts newly selected ones, keeps the rest.
-    auto apply_selection = [&](uint32_t client_id, std::vector<uint8_t> ids) {
+    // Caller holds ops_mutex.
+    auto apply_selection_locked = [&](uint32_t client_id, std::vector<uint8_t> ids) {
         if (ids.size() > 3) ids.resize(3);  // protocol limit
 
-        std::lock_guard<std::mutex> lock(streams_mutex);
-
         // Stop streams that are no longer selected (or belong to another client)
-        for (auto it = active_streams.begin(); it != active_streams.end();) {
-            bool keep = (client_id == streams_client_id) &&
-                        std::find(ids.begin(), ids.end(), it->first) != ids.end();
-            if (keep) { ++it; continue; }
-
-            it->second->stop = true;
-            if (it->second->worker.joinable()) it->second->worker.join();
-
-            immersive::protocol::StreamStop stop_msg = { it->first };
-            server->send_control_message(
-                streams_client_id,
-                immersive::protocol::MessageType::STREAM_STOP,
-                &stop_msg, sizeof(stop_msg));
-
-            it = active_streams.erase(it);
+        std::vector<uint8_t> stopped_ids;
+        std::vector<std::unique_ptr<ActiveStream>> stopping;
+        {
+            std::lock_guard<std::mutex> lock(streams_mutex);
+            for (auto it = active_streams.begin(); it != active_streams.end();) {
+                const bool keep = (client_id == streams_client_id) &&
+                                  std::find(ids.begin(), ids.end(), it->first) != ids.end();
+                if (keep) { ++it; continue; }
+                stopped_ids.push_back(it->first);
+                stopping.push_back(std::move(it->second));
+                it = active_streams.erase(it);
+            }
         }
-        streams_client_id = client_id;
+        retire(std::move(stopping));
+        for (uint8_t id : stopped_ids) send_stream_stop(streams_client_id, id);
+
+        if (client_id != streams_client_id) {
+            // Another client takes over: whatever the previous one held down
+            // would stay pressed, since its input is ignored from now on.
+            input_client_id = client_id;
+            release_input();
+            std::lock_guard<std::mutex> lock(streams_mutex);
+            streams_client_id = client_id;
+        }
 
         // Start newly selected streams
         for (uint8_t id : ids) {
-            if (active_streams.count(id)) continue;
-
-            const immersive::DisplayInfo* selected = nullptr;
-            for (const auto& d : displays) {
-                if (d.id == id) { selected = &d; break; }
+            {
+                std::lock_guard<std::mutex> lock(streams_mutex);
+                if (active_streams.count(id)) continue;
             }
-            if (!selected) {
+
+            immersive::DisplayInfo display;
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> lock(displays_mutex);
+                for (const auto& d : displays) {
+                    if (d.id == id) { display = d; found = true; break; }
+                }
+            }
+            if (!found) {
                 std::cerr << "[Host] Monitor " << (int)id << " not found\n";
                 continue;
             }
 
             auto ctx = std::make_unique<ActiveStream>();
             ActiveStream* ctx_ptr = ctx.get();
-            immersive::DisplayInfo display = *selected;
             immersive::protocol::StreamConfig cfg_snapshot = stream_cfg;
             ctx->worker = std::thread(
                 [&stream_worker, client_id, display, cfg_snapshot, ctx_ptr]() {
                     stream_worker(client_id, display, cfg_snapshot, ctx_ptr);
+                    ctx_ptr->done = true;
                 });
+            std::lock_guard<std::mutex> lock(streams_mutex);
             active_streams[id] = std::move(ctx);
         }
     };
 
-    // Restart the active streams so a new stream configuration takes effect.
-    // STREAM_STOP *is* sent for each monitor first: the client rebuilds its
-    // panel and decoder from the following STREAM_START, and an Android panel
-    // that kept its old ExternalTexture would otherwise show a frozen image.
-    auto restart_streams = [&]() {
-        std::vector<uint8_t> ids;
-        uint32_t client_id;
-        {
-            std::lock_guard<std::mutex> lock(streams_mutex);
-            client_id = streams_client_id;
-            for (auto& [id, ctx] : active_streams) {
-                ids.push_back(id);
-                ctx->stop = true;
-                if (ctx->worker.joinable()) ctx->worker.join();
-            }
-            active_streams.clear();
-        }
-        for (uint8_t id : ids) {
-            immersive::protocol::StreamStop stop_msg = { id };
-            server->send_control_message(
-                client_id,
-                immersive::protocol::MessageType::STREAM_STOP,
-                &stop_msg, sizeof(stop_msg));
-        }
-        if (!ids.empty()) {
-            apply_selection(client_id, ids);
-        }
+    auto apply_selection = [&](uint32_t client_id, std::vector<uint8_t> ids) {
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        apply_selection_locked(client_id, std::move(ids));
     };
 
     auto stop_all_streams = [&](bool notify_client) {
-        std::lock_guard<std::mutex> lock(streams_mutex);
-        for (auto& [id, ctx] : active_streams) {
-            ctx->stop = true;
-            if (ctx->worker.joinable()) ctx->worker.join();
-            if (notify_client) {
-                immersive::protocol::StreamStop stop_msg = { id };
-                server->send_control_message(
-                    streams_client_id,
-                    immersive::protocol::MessageType::STREAM_STOP,
-                    &stop_msg, sizeof(stop_msg));
-            }
-        }
-        active_streams.clear();
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        stop_all_locked(notify_client);
     };
 
     // Set up server callbacks
     server->set_on_client_connected([&](uint32_t client_id) {
         std::cout << "[Host] Client " << client_id << " connected, sending monitor list\n";
-        server->send_monitor_list(client_id, proto_monitors);
+        std::vector<immersive::protocol::MonitorInfo> monitors;
+        std::vector<uint8_t> flags;
+        {
+            std::lock_guard<std::mutex> lock(displays_mutex);
+            monitors = proto_monitors;
+            flags = monitor_flags;
+        }
+        server->send_monitor_list(client_id, monitors, flags);
 
         // Notify about audio stream if enabled
         if (audio_enable) {
@@ -681,14 +875,13 @@ int main(int argc, char* argv[]) {
 
     server->set_on_client_disconnected([&](uint32_t client_id) {
         std::cout << "[Host] Client " << client_id << " disconnected\n";
-        bool is_streaming_client;
-        {
-            std::lock_guard<std::mutex> lock(streams_mutex);
-            is_streaming_client = (client_id == streams_client_id);
-        }
-        if (is_streaming_client) {
-            stop_all_streams(false);
-        }
+        // Check and stop under one lock: another client taking over in
+        // between must not have its fresh streams killed.
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        if (client_id != streams_client_id) return;
+        stop_all_locked(false);
+        input_client_id = 0;
+        release_input();  // a drag or key held when Wi-Fi dropped
     });
 
     server->set_on_monitor_select([&](uint32_t client_id, uint8_t monitor_id) {
@@ -702,56 +895,89 @@ int main(int argc, char* argv[]) {
             apply_selection(client_id, monitor_ids);
         });
 
+    // Restart the active streams so a new stream configuration takes effect.
+    // STREAM_STOP *is* sent for each monitor first: the client rebuilds its
+    // panel and decoder from the following STREAM_START, and an Android panel
+    // that kept its old ExternalTexture would otherwise show a frozen image.
+    // One ops_mutex hold: no other client's selection can slip in between.
     server->set_on_stream_config(
         [&](uint32_t client_id, const immersive::protocol::StreamConfig& cfg) {
+            std::lock_guard<std::mutex> ops(ops_mutex);
+            std::vector<uint8_t> ids;
             {
                 std::lock_guard<std::mutex> lock(streams_mutex);
                 if (!active_streams.empty() && client_id != streams_client_id) {
                     return;  // only the streaming client may reconfigure
                 }
-                stream_cfg = cfg;  // after the check: a bystander client must
-                                   // not poison the next restart's settings
+                for (const auto& [id, ctx] : active_streams) ids.push_back(id);
             }
-            restart_streams();
+            stream_cfg = cfg;  // after the check: a bystander client must
+                               // not poison the next restart's settings
+            stop_all_locked(true);
+            if (!ids.empty()) apply_selection_locked(streams_client_id, ids);
         });
 
-    server->set_on_input_mouse([&](uint32_t /*client_id*/,
+    // --view-only: the headsets watch, they never drive this PC.
+    std::atomic<bool> view_only_logged{false};
+    auto refuse_input = [&]() {
+        if (!view_only) return false;
+        if (!view_only_logged.exchange(true))
+            std::cout << "[Host] View-only: ignoring mouse and keyboard from headsets\n";
+        return true;
+    };
+
+    server->set_on_input_mouse([&](uint32_t client_id,
                                    const immersive::protocol::InputMouse& input) {
+        if (refuse_input()) return;
+        if (client_id != input_client_id) return;  // a second headset or the web bridge
         // Mouse coordinates arrive in stream pixels; map them to native
-        // monitor pixels when the stream is downscaled.
+        // monitor pixels when the stream is downscaled, clamped to the
+        // monitor (casting a double past uint16 is UB, and in practice wraps
+        // an overshoot to the opposite edge).
         immersive::protocol::InputMouse scaled_input = input;
         {
             std::lock_guard<std::mutex> lock(input_scale_mutex);
             auto it = input_scale.find(input.monitor_id);
             if (it != input_scale.end()) {
-                scaled_input.x = static_cast<uint16_t>(input.x * it->second.first);
-                scaled_input.y = static_cast<uint16_t>(input.y * it->second.second);
+                const InputScale& sc = it->second;
+                scaled_input.x = static_cast<uint16_t>(
+                    std::min<double>(input.x * sc.sx, sc.native_w - 1));
+                scaled_input.y = static_cast<uint16_t>(
+                    std::min<double>(input.y * sc.sy, sc.native_h - 1));
             }
         }
+        std::lock_guard<std::mutex> lock(input_mutex);
         input_injector->inject_mouse(scaled_input);
+        held_mouse = scaled_input;
     });
 
-    server->set_on_input_keyboard([&](uint32_t /*client_id*/,
+    server->set_on_input_keyboard([&](uint32_t client_id,
                                       const immersive::protocol::InputKeyboard& input) {
-        // The client's VR keyboard latches Shift/Ctrl/Alt itself and only
+        if (refuse_input()) return;
+        if (client_id != input_client_id) return;
+        // The client's VR keyboard latches Shift/Ctrl/Alt/Win itself and only
         // reports them in `modifiers`, never as key events. Press them around
         // the key, or Shift+A types 'a'.
         struct Mod { uint8_t bit; uint16_t vk; };
-        static constexpr Mod kMods[] = {{0x01, 0x10}, {0x02, 0x11}, {0x04, 0x12}};
+        static constexpr Mod kMods[] = {{0x01, 0x10}, {0x02, 0x11}, {0x04, 0x12}, {0x08, 0x5B}};
         const bool is_modifier = (input.scancode >= 0x10 && input.scancode <= 0x12) ||
-                                 (input.scancode >= 0xA0 && input.scancode <= 0xA5);
+                                 (input.scancode >= 0xA0 && input.scancode <= 0xA5) ||
+                                 input.scancode == 0x5B || input.scancode == 0x5C;
+        std::lock_guard<std::mutex> lock(input_mutex);
+        auto key = [&](uint16_t vk, bool down) {
+            immersive::protocol::InputKeyboard k = input;
+            k.scancode = vk;
+            k.pressed  = down ? 1 : 0;
+            input_injector->inject_keyboard(k);
+            if (down) held_keys.insert(vk); else held_keys.erase(vk);
+        };
         auto send_mods = [&](bool down) {
             if (is_modifier) return;
-            for (const Mod& m : kMods) {
-                if (!(input.modifiers & m.bit)) continue;
-                immersive::protocol::InputKeyboard mod = input;
-                mod.scancode = m.vk;
-                mod.pressed  = down ? 1 : 0;
-                input_injector->inject_keyboard(mod);
-            }
+            for (const Mod& m : kMods)
+                if (input.modifiers & m.bit) key(m.vk, down);
         };
         if (input.pressed) send_mods(true);
-        input_injector->inject_keyboard(input);
+        key(input.scancode, input.pressed != 0);
         if (!input.pressed) send_mods(false);
     });
 
@@ -764,6 +990,107 @@ int main(int argc, char* argv[]) {
         if (it != active_streams.end()) {
             it->second->force_keyframe = true;
         }
+    });
+
+    // --- Virtual displays ---
+    // Re-read the monitors after one came or went: the list clients see,
+    // the input mapping and the count in HELLO_ACK / discovery. Returns
+    // whether `want` (if not 0xFF) is in the new list. Caller holds ops_mutex.
+    auto refresh_displays = [&](uint8_t want) {
+        auto probe = make_capture();
+        auto fresh = probe ? probe->enumerate_displays()
+                           : std::vector<immersive::DisplayInfo>{};
+        bool has = want == 0xFF;
+        for (const auto& d : fresh) has = has || d.id == want;
+        {
+            std::lock_guard<std::mutex> lock(displays_mutex);
+            displays = fresh;
+            build_proto_monitors();
+            server->set_monitor_count(static_cast<uint8_t>(std::min<size_t>(displays.size(), 255)));
+        }
+        {
+            std::lock_guard<std::mutex> lock(input_mutex);
+            input_injector->set_displays(fresh);
+        }
+        return has;
+    };
+    auto broadcast_monitor_list = [&]() {
+        std::vector<immersive::protocol::MonitorInfo> monitors;
+        std::vector<uint8_t> flags;
+        {
+            std::lock_guard<std::mutex> lock(displays_mutex);
+            monitors = proto_monitors;
+            flags = monitor_flags;
+        }
+        server->send_monitor_list(0, monitors, flags);
+    };
+    auto send_vresult = [&](uint32_t client_id, uint8_t status, bool removed, uint8_t id) {
+        immersive::protocol::VirtualDisplayResult r{status, static_cast<uint8_t>(removed ? 1 : 0), id};
+        server->send_control_message(client_id,
+                                     immersive::protocol::MessageType::VIRTUAL_DISPLAY_RESULT,
+                                     &r, sizeof(r));
+    };
+
+    server->set_on_virtual_display_create(
+        [&](uint32_t client_id, const immersive::protocol::VirtualDisplayCreate& req) {
+            namespace p = immersive::protocol;
+            std::lock_guard<std::mutex> ops(ops_mutex);
+            uint8_t status = p::VDISPLAY_OK, id = 0xFF;
+            if (!vdm_ok) {
+                status = p::VDISPLAY_UNSUPPORTED;
+            } else if (vdm->get_active_displays().size() >= p::MAX_VIRTUAL_DISPLAYS) {
+                status = p::VDISPLAY_LIMIT;
+            } else {
+                immersive::VirtualDisplayConfig c;
+                // Even sizes (encoders), within what every backend accepts.
+                c.width  = static_cast<uint16_t>(std::clamp<int>(req.width, 640, 7680) & ~1);
+                c.height = static_cast<uint16_t>(std::clamp<int>(req.height, 480, 4320) & ~1);
+                c.refresh_rate = req.refresh_rate ? std::clamp<uint8_t>(req.refresh_rate, 24, 144) : 60;
+                id = vdm->create_display(c);
+                // A new monitor can take a moment to show up (macOS).
+                bool listed = id != 0;
+                for (int i = 0; listed && !refresh_displays(id); ++i) {
+                    if (i == 30) { listed = false; break; }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (!listed) {
+                    if (id) vdm->remove_display(id);
+                    refresh_displays(0xFF);
+                    status = p::VDISPLAY_FAILED;
+                    id = 0xFF;
+                }
+                std::cout << "[Host] Client " << client_id << " asked for a " << c.width << "x"
+                          << c.height << " virtual screen: "
+                          << (status == p::VDISPLAY_OK ? "monitor " + std::to_string(id)
+                                                       : std::string("failed")) << "\n";
+            }
+            send_vresult(client_id, status, false, id);
+            if (status == p::VDISPLAY_OK) broadcast_monitor_list();
+        });
+
+    server->set_on_virtual_display_remove([&](uint32_t client_id, uint8_t id) {
+        namespace p = immersive::protocol;
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        const auto active = vdm->get_active_displays();
+        if (std::find(active.begin(), active.end(), id) == active.end()) {
+            send_vresult(client_id, vdm_ok ? p::VDISPLAY_FAILED : p::VDISPLAY_UNSUPPORTED, true, id);
+            return;
+        }
+        // Stop its stream first (STREAM_STOP to whoever watches it).
+        std::vector<uint8_t> keep;
+        bool streaming = false;
+        {
+            std::lock_guard<std::mutex> lock(streams_mutex);
+            for (const auto& [sid, ctx] : active_streams) {
+                if (sid == id) streaming = true; else keep.push_back(sid);
+            }
+        }
+        if (streaming) apply_selection_locked(streams_client_id, keep);
+        vdm->remove_display(id);
+        refresh_displays(0xFF);
+        std::cout << "[Host] Client " << client_id << " removed virtual monitor " << (int)id << "\n";
+        send_vresult(client_id, p::VDISPLAY_OK, true, id);
+        broadcast_monitor_list();
     });
 
     // --- USB ---
@@ -795,6 +1122,10 @@ int main(int argc, char* argv[]) {
     srv_config.tcp_port    = tcp_port;
     srv_config.udp_port    = udp_port;
     srv_config.max_clients = max_clients;
+    srv_config.monitor_count = static_cast<uint8_t>(std::min<size_t>(displays.size(), 255));
+    srv_config.host_flags = (view_only ? immersive::protocol::HOST_FLAG_VIEW_ONLY : 0) |
+                            (vdm_ok ? immersive::protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0);
+    srv_config.pin = pin_arg >= 0 ? static_cast<uint32_t>(pin_arg) : load_or_create_pin();
 
     if (!server->start(srv_config)) {
         std::cerr << "[Host] Failed to start network server\n";
@@ -805,39 +1136,60 @@ int main(int argc, char* argv[]) {
     std::thread audio_thread;
     if (audio_enable && audio_capture) {
         audio_thread = std::thread([&]() {
+            // 288 stereo frames (6 ms) = 1160-byte packets: under any Wi-Fi
+            // MTU, so a packet is never IP-fragmented (one lost fragment
+            // loses the whole datagram).
+            constexpr size_t kFramesPerPacket = 288;
+            uint32_t seq = 0;
+            std::vector<uint8_t> pkt;
             while (g_running) {
-                if (live_stream_count == 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    continue;
-                }
-
                 auto audio_frame = audio_capture->get_frame();
                 if (!audio_frame) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     continue;
                 }
+                // Nobody streaming: drop it, so the next stream starts with
+                // live audio instead of a backlog.
+                if (live_stream_count == 0 || audio_frame->channels == 0) continue;
 
-                // Build UDP audio packet
-                immersive::protocol::AudioPacketHeader ahdr;
-                ahdr.seq      = audio_frame->seq;
-                ahdr.samples  = static_cast<uint16_t>(
-                    audio_frame->samples.size() / audio_frame->channels);
-                ahdr.channels = audio_frame->channels;
-                ahdr.reserved = 0;
-
-                size_t pcm_bytes = audio_frame->samples.size() * sizeof(int16_t);
-                std::vector<uint8_t> pkt(sizeof(ahdr) + pcm_bytes);
-                std::memcpy(pkt.data(), &ahdr, sizeof(ahdr));
-                std::memcpy(pkt.data() + sizeof(ahdr),
-                            audio_frame->samples.data(), pcm_bytes);
-
-                server->broadcast_udp(pkt.data(), pkt.size(), audio_port);
+                const size_t ch = audio_frame->channels;
+                const size_t total = audio_frame->samples.size() / ch;
+                for (size_t off = 0; off < total; off += kFramesPerPacket) {
+                    const size_t n = std::min(kFramesPerPacket, total - off);
+                    immersive::protocol::AudioPacketHeader ahdr;
+                    ahdr.seq      = seq++;
+                    ahdr.samples  = static_cast<uint16_t>(n);
+                    ahdr.channels = audio_frame->channels;
+                    ahdr.reserved = 0;
+                    const size_t pcm_bytes = n * ch * sizeof(int16_t);
+                    pkt.resize(sizeof(ahdr) + pcm_bytes);
+                    std::memcpy(pkt.data(), &ahdr, sizeof(ahdr));
+                    std::memcpy(pkt.data() + sizeof(ahdr),
+                                audio_frame->samples.data() + off * ch, pcm_bytes);
+                    server->broadcast_udp(pkt.data(), pkt.size(), audio_port);
+                }
             }
         });
     }
 
-    std::cout << "\n[Host] Ready. Waiting for VR client connections (max " << max_clients << ")...\n";
-    std::cout << "[Host] Press Ctrl+C to quit.\n\n";
+    // What the person at the PC needs to connect the headset: the app finds
+    // this PC by itself on the LAN, so the PIN is the one thing to type.
+    const std::string lan_ip = immersive::primary_ipv4();
+    std::cout << "\n[Host] Ready. Waiting for VR client connections (max " << max_clients << ")...\n"
+              << "\n    PC name   " << immersive::local_host_name() << "\n"
+              << "    Address   " << (lan_ip.empty() ? "no network" : lan_ip) << "\n";
+    if (srv_config.pin) {
+        const std::string p = std::to_string(srv_config.pin);
+        std::cout << "    PIN       " << p.substr(0, 3) << " " << p.substr(3)
+                  << "   (asked once per headset; --no-pin to turn off)\n";
+    } else {
+        std::cout << "    PIN       off: any device on this network can connect\n";
+    }
+    std::cout << "    Control   " << (view_only ? "off (--view-only): headsets can only watch"
+                                               : "on: headsets drive the mouse and keyboard") << "\n"
+              << "    Virtual   " << (vdm_ok ? "headsets can add up to 4 virtual screens"
+                                           : "no virtual screens on this desktop") << "\n";
+    std::cout << "\n[Host] Press Ctrl+C to quit.\n\n";
 
     // --- Main loop ---
     // Streaming happens in per-monitor worker threads; the main thread just
@@ -846,12 +1198,21 @@ int main(int argc, char* argv[]) {
     // (re-running it is idempotent, and just fails with no device attached).
     // ponytail: plain `adb reverse` fails with several Android devices plugged
     // in; loop over `adb devices` with -s if that ever matters.
+    auto reap_graveyard = [&](bool wait) {
+        std::lock_guard<std::mutex> lock(graveyard_mutex);
+        for (auto it = graveyard.begin(); it != graveyard.end();) {
+            if (!wait && !(*it)->done) { ++it; continue; }
+            if ((*it)->worker.joinable()) (*it)->worker.join();
+            it = graveyard.erase(it);
+        }
+    };
     auto next_adb = std::chrono::steady_clock::now();
     while (g_running) {
         if (usb_enable && std::chrono::steady_clock::now() >= next_adb) {
             run_quiet(adb_reverse);
             next_adb = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         }
+        reap_graveyard(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
@@ -864,6 +1225,7 @@ int main(int argc, char* argv[]) {
     // std::thread at return is std::terminate.
     server->stop();
     stop_all_streams(false);
+    reap_graveyard(true);  // they reference this frame's locals
     if (audio_thread.joinable()) audio_thread.join();
     if (audio_capture)            audio_capture->stop();
     vdm->remove_all_displays();

@@ -27,7 +27,7 @@ jobs:
       - name: Smoke test (--stub)
         shell: bash
         run: |
-          ./host/build/Release/immersive2_host.exe --stub --no-usb > host.log 2>&1 &
+          ./host/build/Release/immersive2_host.exe --stub --no-usb --pin 246810 > host.log 2>&1 &
           sleep 3
           python host/tools/smoke_client.py || { cat host.log; exit 1; }
 
@@ -67,7 +67,7 @@ jobs:
 
       - name: Smoke test (--stub)
         run: |
-          ./host/build/immersive2_host --stub --no-usb > host.log 2>&1 &
+          ./host/build/immersive2_host --stub --no-usb --pin 246810 > host.log 2>&1 &
           sleep 2
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
@@ -106,7 +106,7 @@ jobs:
         run: |
           # The smoke client talks from 127.0.0.2, which macOS does not route by default.
           sudo ifconfig lo0 alias 127.0.0.2 up
-          ./host/build/immersive2_host --stub --no-usb > host.log 2>&1 &
+          ./host/build/immersive2_host --stub --no-usb --pin 246810 > host.log 2>&1 &
           sleep 2
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
@@ -221,6 +221,7 @@ jobs:
           cp -R "${CLIENT_DIR}/project/scenes" "${CI_PROJECT_DIR}/scenes"
           cp -R "${CLIENT_DIR}/project/scripts" "${CI_PROJECT_DIR}/scripts"
           cp -R "${CLIENT_DIR}/project/shaders" "${CI_PROJECT_DIR}/shaders"
+          cp -R "${CLIENT_DIR}/project/fonts" "${CI_PROJECT_DIR}/fonts"
           # MUST copy addons/: this holds the im2_decoder editor export plugin
           # and its MediaCodec AAR. Without it the EditorExportPlugin never runs,
           # the AAR is not bundled, and the APK ships with NO hardware decoder

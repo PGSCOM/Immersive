@@ -3,73 +3,95 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Immersive-2 Web Client</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <meta name="color-scheme" content="dark" />
+  <title>Immersive-2 Bridge</title>
+  <link rel="preload" href="/fonts/Grotesk-04Gras.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <main class="page">
-    <header class="header">
-      <div>
-        <h1 class="title">Immersive-2 WebXR Client</h1>
-        <p class="subtitle">Browser control surface + MJPEG stream preview with one-click WebXR scene.</p>
+  <header class="bar">
+    <svg class="mark" viewBox="0 0 40 28" aria-hidden="true">
+      <!-- A desktop screen seen through a headset lens: the lens arc swallows the screen's lower edge. -->
+      <path d="M5 3.5h22a2.5 2.5 0 0 1 2.5 2.5v11" />
+      <path d="M2.5 17V6A2.5 2.5 0 0 1 5 3.5" />
+      <path d="M2 21.5c6 5 30 5 36 0" />
+      <path d="M16 12.5c3-2.2 9-2.2 12 0" />
+    </svg>
+    <span class="wordmark">Immersive-2</span>
+    <span class="role">web bridge</span>
+  </header>
+
+  <main class="desk">
+    <section class="feed" aria-label="Live preview">
+      <div class="frame" id="frame">
+        <div class="screen" id="screen">
+          <img id="streamImg" alt="Live view of the selected monitor" hidden />
+          <div class="nosignal" id="nosignal">
+            <p class="nosignal-title" id="nosignalTitle">No signal</p>
+            <p class="nosignal-text" id="nosignalText">Connect a host to see its desktop here.</p>
+          </div>
+        </div>
       </div>
-      <div class="badge">Bridge over HTTP + MJPEG</div>
-    </header>
 
-    <section class="grid">
-      <aside class="panel controls">
-        <h2>Connection</h2>
-
-        <div class="field">
-          <label for="host">Host IP</label>
-          <input id="host" type="text" value="127.0.0.1" />
+      <dl class="slate">
+        <div class="slate-state">
+          <dt class="visually-hidden">Status</dt>
+          <dd><span class="tally" id="tally" aria-hidden="true"></span><span id="stateLabel" role="status">Checking the bridge…</span></dd>
         </div>
-
-        <div class="field">
-          <label for="tcpPort">TCP Port</label>
-          <input id="tcpPort" type="number" value="19800" />
-        </div>
-
-        <div class="field">
-          <label for="udpPort">UDP Port</label>
-          <input id="udpPort" type="number" value="19801" />
-        </div>
-
-        <div class="actions">
-          <button id="connectBtn" class="primary">Connect Host</button>
-          <button id="disconnectBtn" class="warn">Disconnect</button>
-        </div>
-
-        <div class="field">
-          <label for="monitorId">Monitor</label>
-          <select id="monitorId"></select>
-        </div>
-
-        <div class="actions">
-          <button id="selectBtn">Select Monitor</button>
-          <button id="refreshBtn" class="ghost">Refresh State</button>
-        </div>
-
-        <div class="status-box" id="statusBox"></div>
-      </aside>
-
-      <section class="panel viewer">
-        <div class="viewer-top">
-          <h2>Live Stream</h2>
-          <button id="vrBtn" class="primary">Open WebXR Scene</button>
-        </div>
-
-        <div class="viewer-frame">
-          <img id="streamImg" alt="Immersive stream" />
-        </div>
-
-        <p class="tip" id="streamMeta"></p>
-        <p class="tip">Tip: run the bridge with --connect to auto-connect on startup. WebXR support depends on browser/device.</p>
-      </section>
+        <div><dt>Monitor</dt><dd id="slateMonitor">–</dd></div>
+        <div><dt>Size</dt><dd id="slateSize">–</dd></div>
+        <div><dt>Codec</dt><dd id="slateCodec">–</dd></div>
+        <div><dt>Frame</dt><dd id="slateFrame">–</dd></div>
+      </dl>
     </section>
+
+    <aside class="rack">
+      <form class="block" id="linkForm" novalidate>
+        <h2>Host</h2>
+        <label class="field" for="host">
+          <span class="field-label">Address</span>
+          <input id="host" name="host" type="text" inputmode="url" autocomplete="off" spellcheck="false" value="127.0.0.1" />
+        </label>
+
+        <details class="ports">
+          <summary>Ports</summary>
+          <div class="ports-row">
+            <label class="field" for="tcpPort">
+              <span class="field-label">Control (TCP)</span>
+              <input id="tcpPort" name="tcpPort" type="number" min="1" max="65535" value="19800" />
+            </label>
+            <label class="field" for="udpPort">
+              <span class="field-label">Video (UDP)</span>
+              <input id="udpPort" name="udpPort" type="number" min="1" max="65535" value="19801" />
+            </label>
+          </div>
+        </details>
+
+        <label class="field" for="pin" id="pinField" hidden>
+          <span class="field-label">Pairing PIN</span>
+          <input id="pin" name="pin" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\d{6}" placeholder="6 digits" />
+          <span class="field-help">Printed in the host's console when it starts.</span>
+        </label>
+
+        <button class="action" id="connectBtn" type="submit">Connect</button>
+        <p class="notice" id="notice" role="alert" hidden></p>
+      </form>
+
+      <fieldset class="block monitors" id="monitorBlock" disabled>
+        <legend><h2>Monitor</h2></legend>
+        <div class="monitor-list" id="monitorList">
+          <span class="selection" id="selection" aria-hidden="true" hidden></span>
+          <p class="empty" id="monitorEmpty">Monitors appear once a host is connected.</p>
+        </div>
+      </fieldset>
+
+      <section class="block" aria-labelledby="headsetTitle">
+        <h2 id="headsetTitle">On the headset</h2>
+        <p class="lede">Open this address in the headset's browser, then press Enter VR.</p>
+        <ul class="urls" id="urlList"></ul>
+        <a class="quiet-link" href="/vr.html" target="_blank" rel="noopener">Open the WebXR scene on this PC</a>
+      </section>
+    </aside>
   </main>
 
   <script src="/app.js" defer></script>

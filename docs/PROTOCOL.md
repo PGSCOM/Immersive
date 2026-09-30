@@ -1,6 +1,6 @@
 # Immersive-2 Wire Protocol
 
-This document describes the network protocol used between the Windows host and the VR client.
+This document describes the network protocol used between the host (Windows, Linux or macOS) and the VR client.
 
 All multi-byte integers are **little-endian** unless noted otherwise.
 
@@ -13,6 +13,7 @@ All multi-byte integers are **little-endian** unless noted otherwise.
 | Control | TCP      | 19800       | Bidirectional| Handshake, control, input |
 | Video   | UDP      | 19801       | Host → Client| Video frame chunks |
 | Audio   | UDP      | 19802       | Host → Client| PCM-16 stereo 48 kHz system audio |
+| Discovery | UDP    | 19800       | Client ↔ Host| LAN discovery (a separate namespace from the TCP control port) |
 
 The host's UDP socket is send-only and binds an ephemeral port; the client owns
 19801/19802 for receiving. (Binding them on the host too would stop a client on
@@ -23,6 +24,55 @@ no UDP at all: video and audio arrive on the control socket as `VIDEO_FRAME`
 (0x50) and `AUDIO_DATA` (0x51) messages. This is how a headset on a USB cable
 works — the host runs `adb reverse tcp:19800 tcp:19800`, the headset connects to
 its own `127.0.0.1:19800`, and `adb reverse` can only tunnel TCP.
+
+---
+
+## LAN Discovery (UDP)
+
+The host listens on **UDP `<tcp_port>`** (19800 by default). A client finds
+hosts without an IP by broadcasting a request there (to `255.255.255.255` and
+to its subnet's `x.y.z.255`); every host answers the sender with a unicast
+reply. Sending broadcasts and reading unicast replies needs no multicast lock
+on Android.
+
+**DiscoveryRequest** (5 bytes): `magic` uint32 LE = `0x3F324D49` ("IM2?"),
+`protocol_version` uint8.
+
+**DiscoveryReply** (73 bytes):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| magic | uint32 LE | `0x21324D49` ("IM2!") |
+| protocol_version | uint8 | |
+| tcp_port | uint16 LE | Control port to connect to |
+| monitor_count | uint8 | Number of displays |
+| flags | uint8 | Bit 0 `DISCOVERY_FLAG_PIN`: connecting needs the pairing PIN |
+| host_name | char[64] | The PC's name, UTF-8, NUL-padded |
+
+---
+
+## Pairing
+
+Everything the host does — sending the desktop, injecting mouse and keyboard
+— waits for a HELLO that passed the pairing check:
+
+- Connections from **127.0.0.1** are trusted: a process on the PC itself, or a
+  headset on the USB cable (`adb reverse`, which the headset authorised).
+- Everyone else must put the host's **PIN** in HELLO. The host prints it at
+  start-up; by default it is six random digits created once and kept in the
+  settings folder (`%APPDATA%\Immersive2\pairing-pin`,
+  `~/.config/immersive2/pairing-pin`). `--pin NNNNNN` sets it, `--no-pin`
+  turns pairing off.
+- A wrong PIN costs half a second; five from one address lock it out for a
+  minute (`REJECT_LOCKED_OUT`).
+- Any other message before an accepted HELLO drops the connection. A socket
+  that sends no accepted HELLO within 5 s is closed, and `--max-clients`
+  counts paired clients only, so idle connections cannot lock a headset out.
+- Mouse and keyboard input is only taken from the client that owns the
+  streams (the last one to select monitors); when that client goes away the
+  host releases any button or key it was holding.
+
+The client remembers the PIN per PC and sends it on every connection.
 
 ---
 
@@ -50,10 +100,10 @@ All control messages use a **TLV (Type-Length-Value)** framing:
 Sent immediately after TCP connection is established.
 
 ```
- 0         1                      33       34
- +---------+----------------------+--------+
- | version | client_name[32]      | flags  |
- +---------+----------------------+--------+
+ 0         1                      33       34                38
+ +---------+----------------------+--------+-----------------+
+ | version | client_name[32]      | flags  | pin (uint32 LE) |
+ +---------+----------------------+--------+-----------------+
 ```
 
 | Field | Type | Description |
@@ -61,6 +111,10 @@ Sent immediately after TCP connection is established.
 | version | uint8 | Protocol version (currently 1) |
 | client_name | char[32] | UTF-8 null-terminated display name |
 | flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP |
+| pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing) |
+
+The host answers with HELLO_ACK, then MONITOR_LIST (and AUDIO_START when it
+captures audio) — or with HELLO_REJECT and closes.
 
 ---
 
@@ -69,10 +123,10 @@ Sent immediately after TCP connection is established.
 Response to HELLO.
 
 ```
- 0         1         3         4
- +---------+---------+---------+
- | version | udp_port| mon_cnt |
- +---------+---------+---------+
+ 0         1         3         4                  68
+ +---------+---------+---------+------------------+
+ | version | udp_port| mon_cnt | host_name[64]    |
+ +---------+---------+---------+------------------+
 ```
 
 | Field | Type | Description |
@@ -80,6 +134,20 @@ Response to HELLO.
 | version | uint8 | Protocol version |
 | udp_port | uint16 LE | UDP port for video stream |
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
+| host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
+
+---
+
+### `0x09` HELLO_REJECT — Host → Client
+
+Sent instead of HELLO_ACK; the host closes the connection right after.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| reason | uint8 | 1 `REJECT_PIN_REQUIRED` (no PIN sent), 2 `REJECT_WRONG_PIN`, 3 `REJECT_SERVER_FULL` (`--max-clients` reached), 4 `REJECT_LOCKED_OUT` (too many wrong PINs, retry in a minute) |
+
+A client should ask the user for the PIN on 1 and 2 instead of retrying, and
+stop retrying on 4.
 
 ---
 
@@ -127,10 +195,10 @@ Request to stream a single monitor.
 Confirms stream is starting for a monitor.
 
 ```
- 0         1         3         5         6
- +---------+---------+---------+---------+
- | mon_id  | width   | height  | codec   |
- +---------+---------+---------+---------+
+ 0         1         3         5         6                  10
+ +---------+---------+---------+---------+------------------+
+ | mon_id  | width   | height  | codec   | first_frame      |
+ +---------+---------+---------+---------+------------------+
 ```
 
 | Field | Type | Description |
@@ -139,6 +207,7 @@ Confirms stream is starting for a monitor.
 | width | uint16 LE | Frame width |
 | height | uint16 LE | Frame height |
 | codec | uint8 | 0=H.264, 1=H.265/HEVC, 2=MJPEG, 3=AV1 |
+| first_frame | uint32 LE | Optional (older hosts send 6 bytes and start at 0). Number of this stream's first frame. Frame numbers keep growing across restarts of a monitor's stream, so frames numbered below it are late leftovers of the previous stream and are dropped |
 
 ---
 
@@ -197,7 +266,8 @@ Mouse input event on a specific monitor.
 | x | uint16 LE | Pixel X coordinate |
 | y | uint16 LE | Pixel Y coordinate |
 | buttons | uint8 | Bitmask: bit0=left, bit1=right, bit2=middle |
-| scroll_delta | int16 LE | Vertical scroll amount |
+| scroll_delta | int16 LE | Vertical scroll, in Windows wheel units (120 = one notch; smaller values accumulate) |
+| scroll_delta_h | int16 LE | Horizontal scroll, same units |
 
 ---
 
@@ -215,9 +285,9 @@ Keyboard input event.
 | Field | Type | Description |
 |-------|------|-------------|
 | monitor_id | uint8 | Target monitor (for focus) |
-| scancode | uint16 LE | USB HID scancode |
+| scancode | uint16 LE | Windows virtual-key code (`VK_*`) on every OS; Linux and macOS hosts translate it |
 | pressed | uint8 | 1=key down, 0=key up |
-| modifiers | uint8 | Bitmask: bit0=Shift, bit1=Ctrl, bit2=Alt |
+| modifiers | uint8 | Bitmask: bit0=Shift, bit1=Ctrl, bit2=Alt, bit3=Win/Super. The host presses these around the key (the VR keyboard latches them itself) |
 
 ---
 
@@ -248,8 +318,8 @@ stops all streams.
 ### `0x21` STREAM_CONFIG — Client → Host
 
 Stream quality settings. Applies to all streams; the host restarts the active
-streams in place (new STREAM_START per monitor, no STREAM_STOP) so the change
-takes effect immediately.
+streams (STREAM_STOP then a new STREAM_START per monitor) so the change takes
+effect immediately. The reference client keeps each screen where it was.
 
 | Field | Type | Description |
 |-------|------|-------------|

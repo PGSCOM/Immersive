@@ -160,6 +160,10 @@ void install_idd_signing_certificate() {
 #endif
 }
 
+#ifdef _WIN32
+// Detection of the itsmikethetech driver. It does not override
+// can_create_displays(): attaching its monitors does not yet give them the
+// stable ids the capture needs, so the protocol reports "unsupported".
 class VirtualDisplayManagerImpl : public IVirtualDisplayManager {
 public:
     bool is_driver_installed() const override {
@@ -318,5 +322,6 @@ private:
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {
     return std::make_unique<VirtualDisplayManagerImpl>();
 }
+#endif  // _WIN32
 
 }  // namespace immersive

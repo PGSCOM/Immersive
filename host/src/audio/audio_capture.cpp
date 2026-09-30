@@ -51,92 +51,11 @@ public:
 
         // Initialize COM (for this thread)
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        bool com_owned = SUCCEEDED(hr);
+        com_owned_ = SUCCEEDED(hr);
 
-        // Get the default audio render endpoint
-        ComPtr<IMMDeviceEnumerator> enumerator;
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
-                              CLSCTX_ALL,
-                              IID_PPV_ARGS(&enumerator));
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] CoCreateInstance(MMDeviceEnumerator) failed (0x"
-                      << std::hex << hr << ")\n";
-            if (com_owned) CoUninitialize();
-            return false;
-        }
-
-        ComPtr<IMMDevice> device;
-        hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] GetDefaultAudioEndpoint failed (0x"
-                      << std::hex << hr << ")\n";
-            if (com_owned) CoUninitialize();
-            return false;
-        }
-
-        // Activate IAudioClient
-        ComPtr<IAudioClient> audio_client;
-        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
-                               nullptr, reinterpret_cast<void**>(audio_client.GetAddressOf()));
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] IAudioClient activate failed (0x"
-                      << std::hex << hr << ")\n";
-            if (com_owned) CoUninitialize();
-            return false;
-        }
-
-        // Get the mix format
-        WAVEFORMATEX* mix_fmt = nullptr;
-        audio_client->GetMixFormat(&mix_fmt);
-
-        // Initialize in loopback mode (AUDCLNT_STREAMFLAGS_LOOPBACK)
-        hr = audio_client->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            10000000LL,   // 1 second buffer (100-ns units)
-            0,
-            mix_fmt,
-            nullptr);
-
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] IAudioClient::Initialize failed (0x"
-                      << std::hex << hr << ")\n";
-            CoTaskMemFree(mix_fmt);
-            if (com_owned) CoUninitialize();
-            return false;
-        }
-
-        // Save mix format details for conversion
-        mix_sample_rate_ = mix_fmt->nSamplesPerSec;
-        mix_channels_    = mix_fmt->nChannels;
-        mix_bits_        = mix_fmt->wBitsPerSample;
-
-        CoTaskMemFree(mix_fmt);
-        mix_fmt = nullptr;
-
-        // Get the capture client
-        ComPtr<IAudioCaptureClient> capture_client;
-        hr = audio_client->GetService(__uuidof(IAudioCaptureClient),
-                                       reinterpret_cast<void**>(capture_client.GetAddressOf()));
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] GetService(IAudioCaptureClient) failed (0x"
-                      << std::hex << hr << ")\n";
-            if (com_owned) CoUninitialize();
-            return false;
-        }
-
-        audio_client_   = audio_client;
-        capture_client_ = capture_client;
-        com_owned_      = com_owned;
-
-        // Start the audio stream
-        hr = audio_client_->Start();
-        if (FAILED(hr)) {
-            std::cerr << "[AudioCapture] IAudioClient::Start failed (0x"
-                      << std::hex << hr << ")\n";
-            audio_client_.Reset();
-            capture_client_.Reset();
+        if (!_open_device()) {
             if (com_owned_) CoUninitialize();
+            com_owned_ = false;
             return false;
         }
 
@@ -146,11 +65,6 @@ public:
 
         // Start capture thread
         capture_thread_ = std::thread([this]() { _capture_loop(); });
-
-        std::cout << "[AudioCapture] WASAPI loopback started ("
-                  << mix_sample_rate_ << " Hz, "
-                  << (int)mix_channels_ << " ch, "
-                  << (int)mix_bits_ << " bit)\n";
         return true;
     }
 
@@ -196,6 +110,102 @@ private:
     uint8_t                     mix_bits_        = 16;
     bool                        com_owned_       = false;
 
+    /// Open the current default render endpoint in loopback mode and start
+    /// it. Called by start() and again from the capture thread when the
+    /// device goes away (headphones plugged in, Bluetooth connected), which
+    /// changes the default endpoint. Both threads are in the MTA.
+    bool _open_device() {
+        // Get the default audio render endpoint
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                      CLSCTX_ALL,
+                                      IID_PPV_ARGS(&enumerator));
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] CoCreateInstance(MMDeviceEnumerator) failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        ComPtr<IMMDevice> device;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] GetDefaultAudioEndpoint failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        // Activate IAudioClient
+        ComPtr<IAudioClient> audio_client;
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+                               nullptr, reinterpret_cast<void**>(audio_client.GetAddressOf()));
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] IAudioClient activate failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        // Get the mix format
+        WAVEFORMATEX* mix_fmt = nullptr;
+        hr = audio_client->GetMixFormat(&mix_fmt);
+        if (FAILED(hr) || !mix_fmt) {
+            std::cerr << "[AudioCapture] GetMixFormat failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        // Initialize in loopback mode (AUDCLNT_STREAMFLAGS_LOOPBACK)
+        hr = audio_client->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            10000000LL,   // 1 second buffer (100-ns units)
+            0,
+            mix_fmt,
+            nullptr);
+
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] IAudioClient::Initialize failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            CoTaskMemFree(mix_fmt);
+            return false;
+        }
+
+        // Save mix format details for conversion
+        mix_sample_rate_ = mix_fmt->nSamplesPerSec;
+        mix_channels_    = static_cast<uint8_t>(mix_fmt->nChannels);
+        mix_bits_        = static_cast<uint8_t>(mix_fmt->wBitsPerSample);
+
+        CoTaskMemFree(mix_fmt);
+        mix_fmt = nullptr;
+
+        // Get the capture client
+        ComPtr<IAudioCaptureClient> capture_client;
+        hr = audio_client->GetService(__uuidof(IAudioCaptureClient),
+                                       reinterpret_cast<void**>(capture_client.GetAddressOf()));
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] GetService(IAudioCaptureClient) failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        // Start the audio stream
+        hr = audio_client->Start();
+        if (FAILED(hr)) {
+            std::cerr << "[AudioCapture] IAudioClient::Start failed (0x"
+                      << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
+
+        audio_client_   = audio_client;
+        capture_client_ = capture_client;
+        resample_pos_   = 0.0;
+
+        std::cout << "[AudioCapture] WASAPI loopback started ("
+                  << mix_sample_rate_ << " Hz, "
+                  << (int)mix_channels_ << " ch, "
+                  << (int)mix_bits_ << " bit)\n";
+        return true;
+    }
+
     void _capture_loop() {
         // WASAPI interfaces are MTA; a thread that never entered an apartment
         // is not a legal caller for them.
@@ -212,7 +222,20 @@ private:
 
             UINT32 next_packet_size = 0;
             HRESULT hr = capture_client_->GetNextPacketSize(&next_packet_size);
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) {
+                // Usually AUDCLNT_E_DEVICE_INVALIDATED: the output device
+                // changed. Reopen the (new) default one instead of going
+                // silent for the rest of the session.
+                std::cerr << "[AudioCapture] Audio device lost (0x" << std::hex << hr
+                          << std::dec << "), reopening the default output...\n";
+                audio_client_->Stop();
+                capture_client_.Reset();
+                audio_client_.Reset();
+                while (capturing_ && !_open_device()) {
+                    for (int i = 0; i < 20 && capturing_; ++i) Sleep(50);
+                }
+                continue;
+            }
 
             while (next_packet_size > 0) {
                 BYTE*  data       = nullptr;
@@ -289,10 +312,10 @@ private:
                                accumulator_.begin() + samples_per_packet);
 
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            // Limit queue depth to avoid unbounded memory growth
-            if (frame_queue_.size() < 32) {
-                frame_queue_.push(std::move(frame));
-            }
+            // Limit queue depth to avoid unbounded memory growth. Drop the
+            // oldest: a reader that falls behind should resume on live audio.
+            if (frame_queue_.size() >= 32) frame_queue_.pop();
+            frame_queue_.push(std::move(frame));
         }
     }
 

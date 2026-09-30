@@ -9,23 +9,28 @@ extends SceneTree
 ## prefix it also saves a PNG of the menu at each step, to eyeball the layout.
 ## Kept outside client/project so it never ships in an export.
 
-const CONFIG := "user://immersive2_config.cfg"
-
 var ov
 var out := ""
 var fails := 0
-var connects: Array = []
-var saved_config = null  # the test clicks Connect, which saves the IP
+var events: Array = []
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	out = args[0] if args.size() > 0 else ""
-	if FileAccess.file_exists(CONFIG):
-		saved_config = FileAccess.get_file_as_string(CONFIG)
 	root.add_child(Camera3D.new())
 	ov = load("res://scripts/ui_overlay.gd").new()
 	root.add_child(ov)
-	ov.connect_requested.connect(func(ip, _t, _u): connects.append(ip))
+	ov.connect_requested.connect(func(ip, t, _u): events.append(["connect", ip, t]))
+	ov.pin_entered.connect(func(pin): events.append(["pin", pin]))
+	ov.monitor_selected.connect(func(id): events.append(["monitor", id]))
+	ov.look_changed.connect(func(l): events.append(["look", l]))
+	ov.arrange_requested.connect(func(): events.append(["arrange"]))
+	ov.stream_settings_changed.connect(func(c, _b, _j, _r, _f): events.append(["stream", c]))
+	ov.virtual_screen_requested.connect(func(w, h): events.append(["virtual", w, h]))
+	ov.virtual_screen_remove_requested.connect(func(id): events.append(["unvirtual", id]))
+	ov.control_toggled.connect(func(on): events.append(["control", on]))
+	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
+	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
 	_run()
 
 func check(cond: bool, what: String) -> void:
@@ -38,6 +43,9 @@ func _frames(n: int) -> void:
 		await process_frame
 
 func _click(ctrl: Control) -> void:
+	if ctrl == null:
+		check(false, "control to click exists")
+		return
 	var r := ctrl.get_global_rect()
 	var uv := (r.position + r.size / 2.0) / Vector2(ov._viewport.size)
 	ov.inject_pointer_move(uv)
@@ -49,94 +57,149 @@ func _click(ctrl: Control) -> void:
 	ov.inject_pointer_button(false)
 	await _frames(3)
 
-func _key(text: String) -> Button:
-	for n in ov._viewport.find_children("*", "Button", true, false):
+## The visible button labelled `text` (optionally inside `under`).
+func _btn(text: String, under: Node = null) -> Button:
+	for n in (under if under else ov._viewport).find_children("*", "Button", true, false):
 		if n.text.strip_edges() == text and n.is_visible_in_tree():
 			return n
 	return null
 
 func _type(s: String) -> void:
 	for ch in s:
-		await _click(_key(ch))
+		await _click(_btn(ch, ov._manual_box))
 
-## Layout check (nothing pushed past the fixed-size panel) plus optional PNG.
+## Layout check (the open tab fits without scrolling) plus optional PNG.
 func _step(name: String) -> void:
 	await _frames(4)
-	var need: float = ov._canvas.get_child(0).get_combined_minimum_size().y
-	check(need <= ov._viewport.size.y,
-		"%s: menu fits the panel (%d of %d px)" % [name, need, ov._viewport.size.y])
+	var page: ScrollContainer = ov._tab_pages[ov._tab]
+	var need: float = page.get_child(0).get_combined_minimum_size().y
+	check(need <= page.size.y and ov._canvas.get_child(0).get_combined_minimum_size().y <= ov._viewport.size.y,
+		"%s: fits the panel without scrolling (%d of %d px)" % [name, need, page.size.y])
 	if out != "":
 		await RenderingServer.frame_post_draw
 		ov._viewport.get_texture().get_image().save_png("%s_%s.png" % [out, name])
 
-func _focus() -> Control:
-	return ov._viewport.gui_get_focus_owner()
-
 func _run() -> void:
 	await _frames(2)
 	ov.toggle_visibility()
-	await _step("closed")
+	await _step("connect")
 	check(not ov._input_ip.virtual_keyboard_enabled, "IP field never raises the system keyboard")
 
-	await _click(ov._input_ip)
-	check(ov._kbd_container.visible, "tapping the IP field opens the keypad")
-	check(_focus() == ov._input_ip, "IP field focused")
-
-	await _click(_key("✕  Clear"))
+	# --- Address by hand ----------------------------------------------------
+	ov._input_ip.text = ""
 	await _type("192.168.33.181")
-	check(ov._input_ip.text == "192.168.33.181", "typing -> '%s'" % ov._input_ip.text)
-	check(_focus() == ov._input_ip, "IP field keeps focus while typing")
-	await _step("typing")
-
-	ov._input_ip.caret_column = 3
-	await _click(_key("⌫  Back"))
-	check(ov._input_ip.text == "19.168.33.181", "backspace at the caret -> '%s'" % ov._input_ip.text)
-	await _type("2")
-	check(ov._input_ip.text == "192.168.33.181", "digit at the caret -> '%s'" % ov._input_ip.text)
-
-	await _click(_key("✕  Clear"))
+	check(ov._input_ip.text == "192.168.33.181", "keypad types -> '%s'" % ov._input_ip.text)
+	await _click(_btn("⌫", ov._manual_box))
+	check(ov._input_ip.text == "192.168.33.18", "backspace -> '%s'" % ov._input_ip.text)
+	ov._input_ip.text = ""
 	await _type("1.2")
 	await _click(ov._btn_connect)
-	check(connects.is_empty(), "invalid IP does not connect")
-	check(ov._lbl_ip_error.visible, "invalid IP shows an error")
-	check(ov._kbd_container.visible, "keypad stays open to fix it")
+	check(events.is_empty(), "an invalid address does not connect")
+	check(ov._lbl_ip_error.visible, "an invalid address says why")
 	await _step("invalid")
 	await _type("5")
 	check(not ov._lbl_ip_error.visible, "typing clears the error")
-
-	await _click(_key("✓  Done"))
-	check(not ov._kbd_container.visible, "Done closes the keypad")
-	check(_focus() != ov._input_ip, "Done releases the field")
-	await _click(ov._input_ip)
-	check(ov._kbd_container.visible, "tapping again reopens it")
-
-	await _click(_key("✕  Clear"))
+	ov._input_ip.text = ""
 	await _type("10.0.0.7")
 	await _click(ov._btn_connect)
-	check(connects == ["10.0.0.7"], "valid IP connects -> %s" % [connects])
-	check(not ov._kbd_container.visible, "keypad closes on connect")
+	check(events.back() == ["connect", "10.0.0.7", 19800], "valid address connects -> %s" % [events.back()])
 	await _click(ov._btn_usb)
-	check(connects == ["10.0.0.7", "127.0.0.1"], "USB connects to loopback -> %s" % [connects])
+	check(events.back() == ["connect", "127.0.0.1", 19800], "USB connects to loopback")
 
+	# --- PCs found on the network -------------------------------------------
+	ov.set_discovered_hosts([
+		{"ip": "192.168.1.34", "port": 19800, "monitors": 3, "pin_required": true, "name": "desk-pc"},
+		{"ip": "192.168.1.52", "port": 19850, "monitors": 1, "pin_required": false, "name": "studio"}])
+	await _frames(2)
+	var cards: Array = ov._hosts_list.get_children()
+	check(cards.size() == 2, "both PCs listed")
+	await _click(_btn("Connect", cards[1]))
+	check(events.back() == ["connect", "192.168.1.52", 19850], "a PC's button connects to it -> %s" % [events.back()])
+	await _step("hosts")
+
+	# --- PIN pairing --------------------------------------------------------
+	ov.show_pin_prompt(1, "desk-pc")
+	await _frames(2)
+	check(ov._pin_box.visible and not ov._connect_main.visible, "PIN prompt replaces the connect view")
+	for d in "24681":
+		await _click(_btn(d, ov._pin_box))
+	await _click(_btn("OK", ov._pin_box))
+	check(events.back()[0] != "pin", "OK needs all six digits")
+	await _click(_btn("0", ov._pin_box))
+	await _step("pin")
+	await _click(_btn("OK", ov._pin_box))
+	check(events.back() == ["pin", 246810], "six digits + OK sends the PIN -> %s" % [events.back()])
+	check(not ov._pin_box.visible, "prompt closes after OK")
+	ov.show_pin_prompt(2, "desk-pc")
+	await _frames(2)
+	check(ov._lbl_pin_error.visible, "a wrong PIN says so")
+	await _click(_btn("Cancel", ov._pin_box))
+	check(not ov._pin_box.visible, "Cancel closes the prompt")
+
+	# --- Connected: status, screens -----------------------------------------
+	ov.set_state(ov.ConnectionState.CONNECTING)
+	ov.set_host_label("desk-pc")
+	ov.set_state(ov.ConnectionState.CONNECTED)
+	check(ov._tab == 1, "connecting opens the Screens tab")
 	ov.set_state(ov.ConnectionState.STREAMING)
+	ov.set_latency(12.4)
+	ov.set_stream_stats(59.8, 31.2)
+	ov.set_host_capabilities(false, true)
 	ov.set_monitor_list([
 		{"id": 0, "name": "Monitor A", "width": 3840, "height": 2160, "refresh_rate": 60},
 		{"id": 1, "name": "Monitor B", "width": 2560, "height": 1440, "refresh_rate": 144},
-		{"id": 2, "name": "Monitor C", "width": 1920, "height": 1080, "refresh_rate": 60}])
-	ov.set_active_monitors([0, 2])
-	check(not ov._input_ip.editable, "IP read-only while connected")
-	check(ov._btn_usb.disabled, "USB disabled while connected")
-	await _click(ov._input_ip)  # used to crash (focus released inside focus_entered)
-	check(not ov._kbd_container.visible, "no keypad while connected")
-	check(ov._mon_hdr.visible, "monitor controls shown while connected")
-	await _step("streaming")
+		{"id": 100, "name": "Virtual 1", "width": 1920, "height": 1080, "refresh_rate": 60, "virtual": true}])
+	ov.set_active_monitors([0, 100])
+	await _frames(2)
+	check(ov._lbl_status.text.contains("12 ms") and ov._lbl_status.text.contains("60 fps"),
+		"status line shows delay and frame rate -> '%s'" % ov._lbl_status.text)
+	var rows: Array = ov._monitor_list.find_children("*", "CheckButton", true, false)
+	check(rows.size() == 3 and rows[0].button_pressed and not rows[1].button_pressed,
+		"monitor switches show what streams")
+	await _click(rows[1])
+	check(events.back() == ["monitor", 1], "a switch toggles that monitor")
+	await _click(ov._btn_arrange)
+	check(events.back() == ["arrange"], "Arrange around me")
+	check(ov._virtual_row.visible, "a PC that can make virtual screens offers them")
+	await _click(_btn("2560 × 1440", ov._virtual_row))
+	check(events.back() == ["virtual", 2560, 1440], "asks for a 2560x1440 virtual screen -> %s" % [events.back()])
+	await _click(_btn("Remove", ov._monitor_list))
+	check(events.back() == ["unvirtual", 100], "Remove on the virtual screen -> %s" % [events.back()])
+	await _step("screens")
+	ov.set_host_capabilities(false, false)
+	check(not ov._virtual_row.visible, "no virtual screens offered when the PC can't make them")
 
-	ov.set_state(ov.ConnectionState.DISCONNECTED)
-	check(not ov._mon_hdr.visible, "monitor controls hidden when disconnected")
+	await _click(ov._tab_buttons[0])
+	check(ov._connected_box.visible and not ov._input_ip.editable, "connected: address locked")
+	ov.set_connection_details([["Address", "192.168.1.34:19800"], ["Link", "Network"]])
+	await _frames(3)  # the new rows move the switch down
+	check(ov._chk_control.button_pressed and not ov._lbl_control_note.visible, "control is on by default")
+	await _click(ov._chk_control)
+	check(events.back() == ["control", false] and ov._lbl_control_note.visible,
+		"the switch turns control off and says what that means -> %s" % [events.back()])
+	await _step("connected")
+	ov.set_host_capabilities(true, false)
+	check(ov._chk_control.disabled and not ov._chk_control.button_pressed, "a view-only PC: control off and locked")
+	await _step("viewonly")
+	ov.set_host_capabilities(false, false)
+	ov.set_input_settings(true, true)
 
-	if saved_config == null:
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(CONFIG))
-	else:
-		FileAccess.open(CONFIG, FileAccess.WRITE).store_string(saved_config)
+	await _click(ov._tab_buttons[2])
+	await _click(_btn("Dusk"))
+	check(events.back() == ["look", "dusk"], "Space: pick Dusk")
+	await _click(ov._chk_layers)
+	check(events.back() == ["layers", true], "Space: sharper-text switch")
+	await _click(ov._chk_haptics)
+	check(events.back() == ["haptics", false], "Space: vibration switch")
+	await _step("space")
+
+	await _click(ov._tab_buttons[3])
+	await _click(_btn("HEVC"))
+	await create_timer(0.8).timeout  # the change applies after a short pause
+	check(events.back() == ["stream", 1], "Quality: HEVC applies on its own -> %s" % [events.back()])
+	await _step("quality")
+
+	await _click(_btn("Close"))
+	check(not ov.visible, "Close hides the menu")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)

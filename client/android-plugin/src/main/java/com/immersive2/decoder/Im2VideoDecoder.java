@@ -109,6 +109,9 @@ public class Im2VideoDecoder extends GodotPlugin {
     @UsedByGodot
     public boolean create_with_surface(int streamId, int glTexId, String mime, int width, int height) {
         release_decoder(streamId);
+        SurfaceTexture st = null;
+        Surface surf = null;
+        MediaCodec codec = null;
         try {
             if (glTexId <= 0) {
                 Log.w(TAG, "create_with_surface: invalid glTexId=" + glTexId + " for stream=" + streamId);
@@ -130,12 +133,12 @@ public class Im2VideoDecoder extends GodotPlugin {
             GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0);
 
             // --- SurfaceTexture + Surface using Godot's GL texture ---
-            SurfaceTexture st = new SurfaceTexture(glTexId);
+            st = new SurfaceTexture(glTexId);
             st.setDefaultBufferSize(width, height);
-            Surface surf = new Surface(st);
+            surf = new Surface(st);
 
             // --- MediaCodec ---
-            MediaCodec codec = MediaCodec.createDecoderByType(mime);
+            codec = MediaCodec.createDecoderByType(mime);
             // No KEY_COLOR_FORMAT — the driver chooses the optimal internal format
             // when a Surface output is provided.
             MediaFormat fmt = MediaFormat.createVideoFormat(mime, width, height);
@@ -179,7 +182,12 @@ public class Im2VideoDecoder extends GodotPlugin {
             return true;
 
         } catch (Exception e) {
+            // e.g. no decoder for this codec (AV1 on Quest 2): free what was
+            // created so a failed attempt doesn't leak a codec and a surface.
             Log.w(TAG, "create_with_surface failed for stream=" + streamId + ": " + e);
+            if (codec != null) try { codec.release(); } catch (Exception ignored) {}
+            if (surf != null) try { surf.release(); } catch (Exception ignored) {}
+            if (st != null) try { st.release(); } catch (Exception ignored) {}
             return false;
         }
     }
@@ -205,7 +213,10 @@ public class Im2VideoDecoder extends GodotPlugin {
 
             long pts = (System.nanoTime() - sd.startTimeNs) / 1000; // µs
 
-            int idx = sd.codec.dequeueInputBuffer(10_000);
+            // Short wait: this runs on Godot's main thread. No free buffer
+            // means the frame is dropped and false is returned, so the caller
+            // can ask the host for a keyframe.
+            int idx = sd.codec.dequeueInputBuffer(1_000);
             if (idx >= 0) {
                 ByteBuffer in = sd.codec.getInputBuffer(idx);
                 if (in != null) {
@@ -239,8 +250,13 @@ public class Im2VideoDecoder extends GodotPlugin {
     @UsedByGodot
     public boolean update_tex_image(int streamId) {
         StreamDecoder sd = streams.get(streamId);
-        if (sd == null || !sd.frameAvailable) return false;
+        if (sd == null) return false;
         try {
+            // Drain here too, not only after submit(): a frame the codec
+            // finished after the last submit would otherwise wait for the
+            // next one (up to the host's 1 s idle refresh on a still desktop).
+            drain(sd);
+            if (!sd.frameAvailable) return false;
             sd.frameAvailable = false;
             sd.surfaceTexture.updateTexImage();
             sd.surfaceTexture.getTransformMatrix(sd.transformMatrix);
@@ -306,8 +322,10 @@ public class Im2VideoDecoder extends GodotPlugin {
     public void release_decoder(int streamId) {
         StreamDecoder sd = streams.remove(streamId);
         if (sd == null) return;
-        try { sd.codec.stop(); }    catch (Exception ignored) {}
-        try { sd.codec.release(); } catch (Exception ignored) {}
+        synchronized (sd) {  // not while the render thread drains it
+            try { sd.codec.stop(); }    catch (Exception ignored) {}
+            try { sd.codec.release(); } catch (Exception ignored) {}
+        }
         try {
             if (sd.surface != null) sd.surface.release();
         } catch (Exception ignored) {}
@@ -349,6 +367,14 @@ public class Im2VideoDecoder extends GodotPlugin {
      * SurfaceTexture, triggering onFrameAvailableListener.
      */
     private void drain(StreamDecoder sd) {
+        // Called from the main thread (submit) and the render thread
+        // (update_tex_image); MediaCodec output calls must not interleave.
+        synchronized (sd) {
+            drainLocked(sd);
+        }
+    }
+
+    private void drainLocked(StreamDecoder sd) {
         while (true) {
             int out = sd.codec.dequeueOutputBuffer(sd.info, 0);
             if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED

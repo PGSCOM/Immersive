@@ -1,10 +1,14 @@
 /// X11 screen capture: RandR monitors, MIT-SHM grabs of the root window,
-/// XFixes cursor composited on top.
+/// XFixes cursor composited on top. Also the X11 virtual displays: RandR 1.5
+/// user monitors named IM2-VIRTUAL-<n> over framebuffer space no output
+/// shows, captured like any other monitor under id 100 + n.
 ///
 /// Each instance owns its own Display connection (the stream workers run one
 /// capture per thread), so no Xlib locking is shared between monitors.
 
 #include "capture/linux_backends.h"
+#include "driver/idd_manager.h"
+#include "protocol.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -19,7 +23,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace immersive {
@@ -50,10 +56,21 @@ namespace {
 
 struct Rect { int x, y, w, h; };
 
-/// Monitors in RandR order, primary flagged. Falls back to the whole root
-/// window when RandR has nothing (Xvfb without outputs, old servers).
+constexpr char kVirtualPrefix[] = "IM2-VIRTUAL-";
+
+/// n of a monitor named IM2-VIRTUAL-<n> (n < MAX_VIRTUAL_DISPLAYS), else -1.
+int virtual_index(const std::string& name) {
+    const size_t len = sizeof(kVirtualPrefix) - 1;
+    if (name.size() != len + 1 || name.compare(0, len, kVirtualPrefix) != 0) return -1;
+    const int n = name[len] - '0';
+    return (n >= 0 && n < protocol::MAX_VIRTUAL_DISPLAYS) ? n : -1;
+}
+
+/// Monitors in RandR order, primary flagged, then our virtual ones (ids
+/// 100 + n, which stay put while physical ones come and go). Falls back to
+/// the whole root window when RandR has nothing (Xvfb without outputs).
 std::vector<DisplayInfo> query_monitors(Display* dpy) {
-    std::vector<DisplayInfo> out;
+    std::vector<DisplayInfo> out, virt;
     const Window root = DefaultRootWindow(dpy);
 
     int ev_base = 0, err_base = 0, count = 0;
@@ -61,9 +78,8 @@ std::vector<DisplayInfo> query_monitors(Display* dpy) {
     if (XRRQueryExtension(dpy, &ev_base, &err_base)) {
         mons = XRRGetMonitors(dpy, root, True, &count);
     }
-    for (int i = 0; mons && i < count && out.size() < 255; ++i) {
+    for (int i = 0; mons && i < count && out.size() < protocol::VIRTUAL_MONITOR_ID_BASE; ++i) {
         DisplayInfo d;
-        d.id           = static_cast<uint8_t>(out.size());
         d.width        = static_cast<uint16_t>(mons[i].width);
         d.height       = static_cast<uint16_t>(mons[i].height);
         d.refresh_rate = 60;
@@ -74,11 +90,21 @@ std::vector<DisplayInfo> query_monitors(Display* dpy) {
         char* name = mons[i].name ? XGetAtomName(dpy, mons[i].name) : nullptr;
         d.name = name ? name : "X11 Monitor " + std::to_string(i);
         if (name) XFree(name);
-        if (d.width > 0 && d.height > 0) out.push_back(d);
+        if (d.width == 0 || d.height == 0) continue;
+        const int v = virtual_index(d.name);
+        if (v >= 0) {
+            d.id = static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + v);
+            d.name = "Virtual screen " + std::to_string(v + 1);
+            virt.push_back(d);
+        } else {
+            d.id = static_cast<uint8_t>(out.size());
+            out.push_back(d);
+        }
     }
     if (mons) XRRFreeMonitors(mons);
+    std::sort(virt.begin(), virt.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
 
-    if (out.empty()) {
+    if (out.empty() && virt.empty()) {
         XWindowAttributes attr{};
         XGetWindowAttributes(dpy, root, &attr);
         DisplayInfo d;
@@ -88,6 +114,7 @@ std::vector<DisplayInfo> query_monitors(Display* dpy) {
         d.is_primary = true; d.name = "X11 Screen";
         out.push_back(d);
     }
+    out.insert(out.end(), virt.begin(), virt.end());
     return out;
 }
 
@@ -114,12 +141,14 @@ public:
 
         // Re-query: the layout may have changed since startup (and this is
         // also the restart path after a failed grab).
-        auto displays = query_monitors(dpy_);
-        if (display_id >= displays.size()) {
+        const auto displays = query_monitors(dpy_);
+        auto found = std::find_if(displays.begin(), displays.end(),
+                                  [&](const DisplayInfo& d) { return d.id == display_id; });
+        if (found == displays.end()) {
             std::cerr << "[X11Capture] Display " << (int)display_id << " not found\n";
             return false;
         }
-        const auto& d = displays[display_id];
+        const auto& d = *found;
         rect_ = {d.origin_x, d.origin_y, d.width, d.height};
         display_id_ = display_id;
 
@@ -297,7 +326,161 @@ private:
     std::chrono::steady_clock::time_point last_grab_{};
 };
 
+/// Virtual displays as RandR 1.5 user monitors with no output: the screen
+/// (framebuffer) is grown to the right to make room when it has to be, and
+/// shrunk back as they go. Nothing lights up on a physical screen; windows
+/// moved there are seen in VR only.
+class X11VirtualDisplayManager : public IVirtualDisplayManager {
+public:
+    explicit X11VirtualDisplayManager(Display* dpy) : dpy_(dpy) {
+        const int screen = DefaultScreen(dpy_);
+        base_w_  = DisplayWidth(dpy_, screen);
+        base_h_  = DisplayHeight(dpy_, screen);
+        base_mm_w_ = DisplayWidthMM(dpy_, screen);
+        base_mm_h_ = DisplayHeightMM(dpy_, screen);
+        // Leftovers of a host that was killed: remove them, or they would
+        // count against the limit and hold screen space forever.
+        for (const auto& d : query_monitors(dpy_)) {
+            if (d.id >= protocol::VIRTUAL_MONITOR_ID_BASE) {
+                delete_monitor(d.id - protocol::VIRTUAL_MONITOR_ID_BASE);
+                std::cout << "[X11Virtual] Removed a virtual screen left by an earlier run\n";
+            }
+        }
+        fit_screen();
+    }
+
+    ~X11VirtualDisplayManager() override {
+        remove_all_displays();
+        XCloseDisplay(dpy_);
+    }
+
+    bool can_create_displays() const override { return true; }
+
+    uint8_t create_display(const VirtualDisplayConfig& config) override {
+        int n = 0;
+        while (n < protocol::MAX_VIRTUAL_DISPLAYS && active_.count(n)) ++n;
+        if (n == protocol::MAX_VIRTUAL_DISPLAYS) return 0;
+
+        // To the right of every monitor, top-aligned: in framebuffer space
+        // no output shows if there is some, else the screen grows.
+        int x = 0;
+        for (const auto& d : query_monitors(dpy_)) x = std::max(x, d.origin_x + d.width);
+        const Rect r{x, 0, config.width, config.height};
+        active_[n] = r;
+        if (!fit_screen()) {
+            active_.erase(n);
+            fit_screen();
+            return 0;
+        }
+
+        XRRMonitorInfo mon{};
+        mon.name      = XInternAtom(dpy_, (kVirtualPrefix + std::to_string(n)).c_str(), False);
+        mon.primary   = False;
+        mon.automatic = False;
+        mon.noutput   = 0;
+        mon.x = r.x;
+        mon.y = r.y;
+        mon.width  = r.w;
+        mon.height = r.h;
+        mon.mwidth  = mm(r.w, base_w_, base_mm_w_);
+        mon.mheight = mm(r.h, base_h_, base_mm_h_);
+        XRRSetMonitor(dpy_, DefaultRootWindow(dpy_), &mon);
+        XSync(dpy_, False);
+
+        const uint8_t id = static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + n);
+        for (const auto& d : query_monitors(dpy_)) {
+            if (d.id == id) {
+                std::cout << "[X11Virtual] Virtual screen " << n + 1 << ": " << r.w << "x"
+                          << r.h << " at " << r.x << "," << r.y << "\n";
+                return id;
+            }
+        }
+        std::cerr << "[X11Virtual] The X server did not take the new RandR monitor\n";
+        active_.erase(n);
+        fit_screen();
+        return 0;
+    }
+
+    bool remove_display(uint8_t id) override {
+        const int n = id - protocol::VIRTUAL_MONITOR_ID_BASE;
+        if (!active_.erase(n)) return false;
+        delete_monitor(n);
+        fit_screen();
+        std::cout << "[X11Virtual] Removed virtual screen " << n + 1 << "\n";
+        return true;
+    }
+
+    void remove_all_displays() override {
+        while (!active_.empty()) {
+            remove_display(static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE +
+                                                active_.begin()->first));
+        }
+    }
+
+    std::vector<uint8_t> get_active_displays() const override {
+        std::vector<uint8_t> ids;
+        for (const auto& [n, r] : active_)
+            ids.push_back(static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + n));
+        return ids;
+    }
+
+private:
+    static int mm(int px, int base_px, int base_mm) {
+        return base_px > 0 && base_mm > 0 ? px * base_mm / base_px : px * 254 / 960;
+    }
+
+    void delete_monitor(int n) {
+        XRRDeleteMonitor(dpy_, DefaultRootWindow(dpy_),
+                         XInternAtom(dpy_, (kVirtualPrefix + std::to_string(n)).c_str(), False));
+        XSync(dpy_, False);
+    }
+
+    /// Screen size = the original size, grown to hold every virtual display.
+    /// False when the server cannot make it that big.
+    bool fit_screen() {
+        int w = base_w_, h = base_h_;
+        for (const auto& [n, r] : active_) {
+            w = std::max(w, r.x + r.w);
+            h = std::max(h, r.y + r.h);
+        }
+        const int screen = DefaultScreen(dpy_);
+        if (w == DisplayWidth(dpy_, screen) && h == DisplayHeight(dpy_, screen)) return true;
+        const Window root = DefaultRootWindow(dpy_);
+        int min_w = 0, min_h = 0, max_w = 0, max_h = 0;
+        if (!XRRGetScreenSizeRange(dpy_, root, &min_w, &min_h, &max_w, &max_h) ||
+            w > max_w || h > max_h) {
+            // e.g. Xvfb, whose framebuffer is fixed at start-up.
+            std::cerr << "[X11Virtual] The X screen cannot grow to " << w << "x" << h
+                      << " (largest " << max_w << "x" << max_h << ")\n";
+            return false;
+        }
+        XRRSetScreenSize(dpy_, root, w, h, mm(w, base_w_, base_mm_w_), mm(h, base_h_, base_mm_h_));
+        XSync(dpy_, False);
+        XWindowAttributes attr{};
+        XGetWindowAttributes(dpy_, root, &attr);
+        return attr.width == w && attr.height == h;
+    }
+
+    Display* dpy_;
+    int base_w_ = 0, base_h_ = 0, base_mm_w_ = 0, base_mm_h_ = 0;
+    std::map<int, Rect> active_;  // n -> placement
+};
+
 }  // namespace
+
+std::unique_ptr<IVirtualDisplayManager> create_x11_virtual_display_manager() {
+    init_xlib_once();
+    Display* dpy = XOpenDisplay(nullptr);
+    if (!dpy) return std::make_unique<IVirtualDisplayManager>();
+    int ev = 0, err = 0, major = 0, minor = 0;
+    if (!XRRQueryExtension(dpy, &ev, &err) || !XRRQueryVersion(dpy, &major, &minor) ||
+        major < 1 || (major == 1 && minor < 5)) {
+        std::cerr << "[X11Virtual] RandR 1.5 missing: no virtual screens on this X server\n";
+        XCloseDisplay(dpy);
+        return std::make_unique<IVirtualDisplayManager>();
+    }
+    return std::make_unique<X11VirtualDisplayManager>(dpy);
+}
 
 std::unique_ptr<IScreenCapture> create_x11_capture() {
     init_xlib_once();

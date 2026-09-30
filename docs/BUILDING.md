@@ -229,11 +229,14 @@ Open:
    ```powershell
    .\host\build\Release\immersive2_host.exe
    ```
-3. Launch the VR client on your headset
-4. Press **B/Y** (VR) or **O** (desktop) to open the overlay
-5. Enter the host PC's local IP address
-6. Click **Connect**
-7. Select a monitor from the list
+   It prints the PC's name, its address and a six-digit **PIN**.
+3. Launch the VR client on your headset. The menu opens on **Connect** and
+   lists the PCs it finds on the network (press **B/Y** in VR or **O** on
+   desktop to reopen it).
+4. Press **Connect** next to your PC (or type its address on the keypad).
+5. The first time, type the PIN from the host window. The headset remembers it
+   and reconnects to that PC by itself on the next launch.
+6. Pick the monitors to show on the **Screens** tab.
 
 ### Local Testing (Host + Client on Same Machine)
 
@@ -245,21 +248,25 @@ Open:
 godot --path client\project\
 ```
 
-Enter `127.0.0.1` as the host IP in the overlay.
+The host shows up in the menu's list (as loopback, no PIN needed); or type
+`127.0.0.1`.
 
 ### Firewall
 
 The host needs the following ports open for inbound connections:
 
-| Port  | Protocol | Purpose            |
-|-------|----------|--------------------|
-| 19800 | TCP      | Control channel    |
-| 19801 | UDP      | Video stream       |
+| Port  | Protocol | Purpose                         |
+|-------|----------|---------------------------------|
+| 19800 | TCP      | Control channel                 |
+| 19800 | UDP      | LAN discovery (headset finds the PC) |
+
+Video (UDP 19801) and audio (UDP 19802) flow from the PC to the headset, so
+only the headset receives on those ports.
 
 On Windows:
 ```powershell
 netsh advfirewall firewall add rule name="Immersive2 TCP" protocol=TCP dir=in localport=19800 action=allow
-netsh advfirewall firewall add rule name="Immersive2 UDP" protocol=UDP dir=in localport=19801 action=allow
+netsh advfirewall firewall add rule name="Immersive2 discovery" protocol=UDP dir=in localport=19800 action=allow
 ```
 
 ---

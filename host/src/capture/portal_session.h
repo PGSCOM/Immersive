@@ -44,7 +44,7 @@ void set_frame_size(uint32_t node_id, uint32_t w, uint32_t h);
 // with input or the connection is busy (e.g. while the dialog is open).
 // `fx`/`fy` are the position within stream `index` as a 0..1 fraction.
 void pointer_motion(uint8_t index, double fx, double fy);
-void pointer_button(int32_t evdev_button, bool pressed);
+bool pointer_button(int32_t evdev_button, bool pressed);  ///< false: not sent
 void pointer_axis_discrete(uint32_t axis, int32_t steps);
 void keyboard_keysym(int32_t keysym, bool pressed);
 

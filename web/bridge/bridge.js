@@ -2,21 +2,46 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const net = require('net');
 const dgram = require('dgram');
+const crypto = require('crypto');
 
 const PROTOCOL_VERSION = 1;
 
 const MSG_HELLO = 0x01;
+const MSG_HELLO_ACK = 0x02;
 const MSG_MONITOR_LIST = 0x03;
 const MSG_MONITOR_SELECT = 0x04;
 const MSG_STREAM_START = 0x05;
+const MSG_HELLO_REJECT = 0x09;
+const MSG_INPUT_MOUSE = 0x10;
+const MSG_INPUT_KEYBOARD = 0x11;
 const MSG_STREAM_CONFIG = 0x21;
 const MSG_REQUEST_KEYFRAME = 0x31;
 
 const VIDEO_HEADER_SIZE = 9;
+
+// HelloAck.flags / MonitorList flags (protocol/protocol.h).
+const HOST_FLAG_VIEW_ONLY = 0x01;
+const HOST_FLAG_VIRTUAL_DISPLAYS = 0x02;
+const MONITOR_FLAG_VIRTUAL = 0x01;
+const MONITOR_FLAG_PRIMARY = 0x02;
+
+// HelloReject.reason (protocol/protocol.h). 1, 2 and 4 need the user; only a
+// full host is worth retrying on our own.
+const REJECT_REASONS = {
+  1: 'The host wants its pairing PIN (printed in the host console).',
+  2: 'Wrong PIN. Check the PIN printed in the host console.',
+  3: 'The host is full (--max-clients). Retrying in a few seconds.',
+  4: 'Too many wrong PINs from this address. Wait a minute, then try again.',
+};
+const RECONNECT_DELAY_MS = 3000;
+// A slow reader (phone on bad Wi-Fi) must not buffer frames in our memory
+// without bound; past this much unsent data we skip frames for it.
+const MAX_CLIENT_BACKLOG = 4 * 1024 * 1024;
 
 // VideoCodec enum (protocol/protocol.h)
 const CODEC_H264 = 0;
@@ -46,6 +71,17 @@ const state = {
   latestFrame: null,
   latestFrameSeq: 0,
   lastError: null,
+  // Pairing: the host's PIN (0 = none sent). Loopback connections are exempt
+  // on the host side, so a bridge on the PC itself needs none.
+  pin: 0,
+  pinRequired: false,
+  rejectReason: null,
+  hostName: '',
+  // HELLO_ACK flags: the host takes no input / can make virtual monitors.
+  viewOnly: false,
+  virtualDisplays: false,
+  // The user (or --connect) asked for a link: reconnect when it drops.
+  wantConnected: false,
   // Last codec we asked the host to use via STREAM_CONFIG. The host streams a
   // single codec at a time, so we switch it depending on which kind of client
   // is connected (H.264 for VR/WebCodecs readers, MJPEG for the 2D preview).
@@ -70,6 +106,8 @@ function parseArgs(argv) {
     udpPort: DEFAULT_UDP_PORT,
     monitorId: 0,
     autoConnect: false,
+    pin: 0,
+    open: false,
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -90,12 +128,28 @@ function parseArgs(argv) {
     } else if (arg === '--monitor' && next) {
       options.monitorId = Number(next);
       i += 1;
+    } else if (arg === '--pin' && next) {
+      options.pin = parsePin(next);
+      if (options.pin === null) {
+        process.stderr.write('[WebBridge] --pin takes the 6-digit PIN printed by the host\n');
+        process.exit(1);
+      }
+      i += 1;
+    } else if (arg === '--open') {
+      options.open = true;
     } else if (arg === '--connect') {
       options.autoConnect = true;
     }
   }
 
   return options;
+}
+
+// 6 digits (the host's PINs are 100000-999999); '' / 0 clears it.
+function parsePin(value) {
+  const text = String(value ?? '').trim();
+  if (text === '' || text === '0') return 0;
+  return /^\d{6}$/.test(text) ? Number(text) : null;
 }
 
 function log(message) {
@@ -129,12 +183,22 @@ function bindUdpSocket() {
 
 function connectHost() {
   disconnectHost(false);
+  state.wantConnected = true;
+  state.monitors = [];
+  state.hostName = '';
+  state.viewOnly = false;
+  state.virtualDisplays = false;
+  state.rejectReason = null;
   bindUdpSocket();
 
-  tcpSocket = new net.Socket();
-  tcpSocket.setNoDelay(true);
+  // Every handler checks it still owns the link: a destroyed socket's
+  // 'close' fires a tick later and used to mark the NEW connection down.
+  const sock = new net.Socket();
+  tcpSocket = sock;
+  sock.setNoDelay(true);
 
-  tcpSocket.on('connect', () => {
+  sock.on('connect', () => {
+    if (tcpSocket !== sock) return;
     state.connected = true;
     state.lastError = null;
     state.lastRequestedCodec = null;
@@ -143,22 +207,44 @@ function connectHost() {
     sendHello();
   });
 
-  tcpSocket.on('data', (chunk) => {
+  sock.on('data', (chunk) => {
+    if (tcpSocket !== sock) return;
     tcpRxBuffer = Buffer.concat([tcpRxBuffer, chunk]);
     processTcpMessages();
   });
 
-  tcpSocket.on('error', (err) => {
+  sock.on('error', (err) => {
+    if (tcpSocket !== sock) return;
     state.connected = false;
     setLastError(`TCP error: ${err.message}`);
   });
 
-  tcpSocket.on('close', () => {
+  sock.on('close', () => {
+    if (tcpSocket !== sock) return;
     state.connected = false;
     log('TCP connection closed');
+    scheduleReconnect();
   });
 
-  tcpSocket.connect(state.tcpPort, state.host);
+  try {
+    sock.connect(state.tcpPort, state.host);
+  } catch (err) {
+    // A bad port throws synchronously; don't leave a dead socket around.
+    tcpSocket = null;
+    state.wantConnected = false;
+    throw err;
+  }
+}
+
+// Retry after the host went away (restart, Wi-Fi drop), unless the user
+// hung up or the host refused us for a reason only the user can fix.
+function scheduleReconnect() {
+  const blocked = [1, 2, 4].includes(state.rejectReason);
+  if (!state.wantConnected || blocked || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (state.wantConnected) connectHost();
+  }, RECONNECT_DELAY_MS);
 }
 
 function disconnectHost(logMessage = true) {
@@ -189,6 +275,8 @@ function disconnectHost(logMessage = true) {
 
   frameBuffer.clear();
   state.stream = { monitorId: null, width: 0, height: 0, codec: null };
+  // A frame from the last link is not a live picture.
+  state.latestFrame = null;
   state.lastRequestedCodec = null;
 
   if (logMessage) {
@@ -212,10 +300,13 @@ function sendControlMessage(type, payloadBuffer) {
   }
 }
 
+// protocol::Hello: version u8, client_name[32], flags u8, pin u32 LE.
 function sendHello() {
-  const payload = Buffer.alloc(33);
+  const payload = Buffer.alloc(38);
   payload.writeUInt8(PROTOCOL_VERSION, 0);
   Buffer.from('Immersive-2 Web Bridge', 'utf8').copy(payload, 1, 0, 32);
+  payload.writeUInt8(0, 33); // flags: video over UDP
+  payload.writeUInt32LE(state.pin >>> 0, 34);
   sendControlMessage(MSG_HELLO, payload);
 }
 
@@ -275,8 +366,10 @@ function processTcpMessages() {
     const msgLen = tcpRxBuffer.readUInt32LE(1);
 
     if (msgLen > 1024 * 1024) {
+      // The stream is out of sync; carrying on would parse garbage.
       setLastError(`Refusing oversized control payload (${msgLen} bytes)`);
       tcpRxBuffer = Buffer.alloc(0);
+      if (tcpSocket) tcpSocket.destroy();
       return;
     }
 
@@ -292,7 +385,27 @@ function processTcpMessages() {
 }
 
 function handleControlMessage(type, payload) {
-  if (type === MSG_MONITOR_LIST) {
+  if (type === MSG_HELLO_ACK) {
+    // Older hosts stop after monitor_count; newer ones add host_name[64].
+    if (payload.length >= 68) {
+      state.hostName = payload.subarray(4, 68).toString('utf8').replace(/\0.*$/su, '').trim();
+    }
+    // ...and newer still a flags byte.
+    const flags = payload.length >= 69 ? payload.readUInt8(68) : 0;
+    state.viewOnly = (flags & HOST_FLAG_VIEW_ONLY) !== 0;
+    state.virtualDisplays = (flags & HOST_FLAG_VIRTUAL_DISPLAYS) !== 0;
+    if (state.viewOnly) log('The host is view-only: input is not forwarded');
+    state.pinRequired = false;
+  } else if (type === MSG_HELLO_REJECT) {
+    const reason = payload.length >= 1 ? payload.readUInt8(0) : 0;
+    state.rejectReason = reason;
+    state.pinRequired = reason === 1 || reason === 2 || (reason === 4 && state.pinRequired);
+    setLastError(REJECT_REASONS[reason] || `The host refused the connection (reason ${reason}).`);
+    // Only the user can fix a PIN problem: this attempt is over. (The host
+    // closes right after; 'close' retries only a full host.)
+    if (reason !== 3) state.wantConnected = false;
+  } else if (type === MSG_MONITOR_LIST) {
+    state.pinRequired = false;
     parseMonitorList(payload);
   } else if (type === MSG_STREAM_START) {
     if (payload.length >= 6) {
@@ -332,8 +445,16 @@ function parseMonitorList(payload) {
       .replace(/\0.*$/u, '')
       .trim();
 
-    monitors.push({ id, width, height, refreshRate, name });
+    monitors.push({ id, width, height, refreshRate, name, virtual: false, primary: false });
     offset += 70;
+  }
+  // Newer hosts append one MONITOR_FLAG_* byte per monitor.
+  if (payload.length >= offset + monitors.length) {
+    monitors.forEach((m, i) => {
+      const f = payload.readUInt8(offset + i);
+      m.virtual = (f & MONITOR_FLAG_VIRTUAL) !== 0;
+      m.primary = (f & MONITOR_FLAG_PRIMARY) !== 0;
+    });
   }
 
   state.monitors = monitors;
@@ -460,6 +581,8 @@ function pushFrameToMjpegClients(frameBufferData) {
   );
 
   for (const res of mjpegClients) {
+    // Every JPEG stands alone, so a lagging reader just skips frames.
+    if (res.writableLength > MAX_CLIENT_BACKLOG) continue;
     try {
       res.write(header);
       res.write(frameBufferData);
@@ -482,6 +605,13 @@ function pushFrameToVideoClients(frame, flags) {
   header.writeUInt8(flags, 4);
 
   for (const res of videoClients) {
+    // H.264 frames depend on each other: once a reader falls behind, skip
+    // until the next keyframe so it resyncs cleanly instead of smearing.
+    if (res.writableLength > MAX_CLIENT_BACKLOG) res.im2WaitKey = true;
+    if (res.im2WaitKey) {
+      if (!(flags & 1) || res.writableLength > MAX_CLIENT_BACKLOG) continue;
+      res.im2WaitKey = false;
+    }
     try {
       res.write(header);
       res.write(frame);
@@ -490,6 +620,133 @@ function pushFrameToVideoClients(frame, flags) {
     }
   }
 }
+
+// --- Input from the browser --------------------------------------------------
+// The browser sends where its pointer is on the screen as u,v (0..1), so a
+// resolution change on the host between the two cannot misplace a click; the
+// bridge turns that into stream pixels of the current stream. Each input
+// source (one WebSocket, or the POST fallback) remembers what it holds down so
+// a closed tab never leaves a button or key pressed on the PC.
+
+function newInputSource() {
+  return { buttons: 0, monitorId: 0, x: 0, y: 0, keys: new Set() };
+}
+
+function inputLive() {
+  return state.connected && !state.viewOnly &&
+    state.stream.monitorId !== null && state.stream.width > 0;
+}
+
+function sendMouse(src, x, y, buttons, scroll, scrollH) {
+  const payload = Buffer.alloc(10);
+  payload.writeUInt8(src.monitorId & 0xff, 0);
+  payload.writeUInt16LE(x, 1);
+  payload.writeUInt16LE(y, 3);
+  payload.writeUInt8(buttons & 0xff, 5);
+  payload.writeInt16LE(scroll, 6);
+  payload.writeInt16LE(scrollH, 8);
+  sendControlMessage(MSG_INPUT_MOUSE, payload);
+}
+
+function sendKey(src, vk, pressed) {
+  const payload = Buffer.alloc(5);
+  payload.writeUInt8(src.monitorId & 0xff, 0);
+  payload.writeUInt16LE(vk, 1);
+  payload.writeUInt8(pressed ? 1 : 0, 3);
+  payload.writeUInt8(0, 4); // modifiers travel as their own key events
+  sendControlMessage(MSG_INPUT_KEYBOARD, payload);
+}
+
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(v) || 0)));
+
+// ev: { t: 'm', u, v, b, sy, sx } pointer (b = button mask: 1 left, 2 right,
+// 4 middle; sy/sx = wheel units, 120 a notch) or { t: 'k', vk, p } key.
+function handleInputEvent(src, ev) {
+  if (!ev || typeof ev !== 'object' || !inputLive()) return;
+  if (ev.t === 'm') {
+    const { width, height } = state.stream;
+    src.monitorId = state.stream.monitorId;
+    src.x = clampInt(Number(ev.u) * (width - 1), 0, width - 1);
+    src.y = clampInt(Number(ev.v) * (height - 1), 0, height - 1);
+    src.buttons = clampInt(ev.b, 0, 7);
+    sendMouse(src, src.x, src.y, src.buttons, clampInt(ev.sy, -32768, 32767), clampInt(ev.sx, -32768, 32767));
+  } else if (ev.t === 'k') {
+    const vk = clampInt(ev.vk, 0, 255);
+    if (vk === 0) return;
+    src.monitorId = state.stream.monitorId;
+    if (ev.p) src.keys.add(vk); else src.keys.delete(vk);
+    sendKey(src, vk, Boolean(ev.p));
+  }
+}
+
+function releaseInput(src) {
+  if (!state.connected) return;
+  if (src.buttons) sendMouse(src, src.x, src.y, 0, 0, 0);
+  for (const vk of src.keys) sendKey(src, vk, false);
+  src.buttons = 0;
+  src.keys.clear();
+}
+
+// Minimal RFC 6455 server side: the browser only ever sends small text frames
+// (JSON input events); we answer pings and closes and never send data.
+function acceptWebSocket(req, socket) {
+  const key = req.headers['sec-websocket-key'];
+  if (!key || String(req.headers.upgrade).toLowerCase() !== 'websocket') {
+    socket.destroy();
+    return;
+  }
+  const accept = crypto.createHash('sha1')
+    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n' +
+               `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  socket.setNoDelay(true);
+
+  const src = newInputSource();
+  let buf = Buffer.alloc(0);
+  const done = () => releaseInput(src);
+  socket.on('close', done);
+  socket.on('error', () => socket.destroy());
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    while (buf.length >= 2) {
+      const op = buf[0] & 0x0f;
+      const masked = (buf[1] & 0x80) !== 0;
+      let len = buf[1] & 0x7f;
+      let off = 2;
+      if (len === 126) {
+        if (buf.length < 4) return;
+        len = buf.readUInt16BE(2);
+        off = 4;
+      } else if (len === 127) {
+        socket.destroy(); // no input event is anywhere near 64 KB
+        return;
+      }
+      if (buf.length < off + (masked ? 4 : 0) + len) return;
+      const data = Buffer.from(buf.subarray(off + (masked ? 4 : 0), off + (masked ? 4 : 0) + len));
+      if (masked) {
+        for (let i = 0; i < data.length; i += 1) data[i] ^= buf[off + (i & 3)];
+      }
+      buf = buf.subarray(off + (masked ? 4 : 0) + len);
+      if (op === 0x8) {        // close
+        socket.end(Buffer.from([0x88, 0x00]));
+        return;
+      }
+      if (op === 0x9) {        // ping -> pong
+        socket.write(Buffer.concat([Buffer.from([0x8a, data.length]), data]));
+      } else if (op === 0x1) { // text
+        try {
+          handleInputEvent(src, JSON.parse(data.toString('utf8')));
+        } catch (_) {
+          // a malformed event is dropped, not fatal
+        }
+      }
+    }
+  });
+}
+
+// POST /api/input: the fallback when a WebSocket can't be opened. One shared
+// source: there is no socket to notice a closed tab by.
+const httpInput = newInputSource();
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -532,6 +789,14 @@ function getPublicStatus() {
     latestFrameSeq: state.latestFrameSeq,
     hasFrame: Boolean(state.latestFrame),
     lastError: state.lastError,
+    hostName: state.hostName,
+    viewOnly: state.viewOnly,
+    virtualDisplays: state.virtualDisplays,
+    pinRequired: state.pinRequired,
+    rejectReason: state.rejectReason,
+    hasPin: state.pin > 0,
+    wantConnected: state.wantConnected,
+    headsetUrls: headsetUrls(),
     requestedCodec: state.lastRequestedCodec,
     videoClients: videoClients.size,
     mjpegClients: mjpegClients.size,
@@ -547,6 +812,8 @@ function contentTypeFor(filePath) {
   if (ext === '.svg') return 'image/svg+xml';
   if (ext === '.png') return 'image/png';
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.woff2') return 'font/woff2';
+  if (ext === '.txt') return 'text/plain; charset=utf-8';
   return 'application/octet-stream';
 }
 
@@ -555,7 +822,7 @@ function handleStaticRequest(req, res, requestPath) {
   const normalized = path.normalize(relative).replace(/^([\\/])+/, '');
   const filePath = path.join(clientDir, normalized);
 
-  if (!filePath.startsWith(clientDir)) {
+  if (!filePath.startsWith(clientDir + path.sep)) {
     sendJson(res, 400, { error: 'Invalid path' });
     return;
   }
@@ -574,8 +841,80 @@ function handleStaticRequest(req, res, requestPath) {
   });
 }
 
+// --- Access gate ------------------------------------------------------------
+// The bridge reaches the host from 127.0.0.1, which the host lets in without
+// a PIN, and re-serves the desktop over HTTP. Open to the whole LAN, that
+// would hand anyone on the network a live view of the screen (and the host's
+// PIN would be pointless). So, like Jupyter: the PC itself is always allowed,
+// anything else needs the random key printed at startup (then a cookie).
+const accessKey = crypto.randomBytes(12).toString('base64url');
+let openAccess = false;
+
+function isLoopback(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+function sameKey(candidate) {
+  const a = Buffer.from(String(candidate || ''));
+  const b = Buffer.from(accessKey);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// Whether a request may go through: the PC itself, the key, or its cookie.
+function allowed(req, parsed) {
+  if (openAccess || isLoopback(req.socket.remoteAddress)) return true;
+  if (sameKey(parsed.searchParams.get('key'))) return true;
+  const cookie = /(?:^|;\s*)im2key=([^;]+)/u.exec(req.headers.cookie || '');
+  return Boolean(cookie && sameKey(cookie[1]));
+}
+
+// A page from another site must not drive the bridge: its requests would
+// ride on the PC's own loopback (or the headset's cookie) and could click and
+// type on the PC. Browsers always send Origin on WebSocket handshakes and on
+// cross-site POSTs; it must name this bridge. (Tools like curl send none.)
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === String(req.headers.host || '');
+  } catch (_) {
+    return false;
+  }
+}
+
+function authorize(req, res, parsed) {
+  if (allowed(req, parsed)) {
+    if (sameKey(parsed.searchParams.get('key'))) {
+      res.setHeader('Set-Cookie', `im2key=${accessKey}; Path=/; HttpOnly; SameSite=Strict`);
+    }
+    return true;
+  }
+  res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end('Immersive-2 web bridge: open the address the bridge printed at startup ' +
+          '(it ends in ?key=...), or the page on the PC itself.\n');
+  return false;
+}
+
+// Addresses to type on the headset, one per LAN interface.
+function headsetUrls() {
+  const urls = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) {
+        urls.push(`http://${a.address}:${state.bridgePort}/vr.html` + (openAccess ? '' : `?key=${accessKey}`));
+      }
+    }
+  }
+  return urls;
+}
+
 const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) {
+    sendJson(res, 403, { error: 'cross-site request refused' });
+    return;
+  }
+  if (!authorize(req, res, parsed)) return;
 
   if (req.method === 'GET' && parsed.pathname === '/api/status') {
     sendJson(res, 200, getPublicStatus());
@@ -589,6 +928,14 @@ const server = http.createServer(async (req, res) => {
       state.tcpPort = Number(body.tcpPort || state.tcpPort);
       state.udpPort = Number(body.udpPort || state.udpPort);
       state.monitorId = Number(body.monitorId ?? state.monitorId);
+      if (body.pin !== undefined) {
+        const pin = parsePin(body.pin);
+        if (pin === null) {
+          sendJson(res, 400, { ok: false, error: 'The PIN is the 6 digits printed by the host.' });
+          return;
+        }
+        state.pin = pin;
+      }
 
       connectHost();
       sendJson(res, 200, { ok: true, status: getPublicStatus() });
@@ -599,6 +946,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && parsed.pathname === '/api/disconnect') {
+    state.wantConnected = false;
     disconnectHost();
     sendJson(res, 200, { ok: true, status: getPublicStatus() });
     return;
@@ -615,6 +963,17 @@ const server = http.createServer(async (req, res) => {
 
       sendMonitorSelect(monitorId);
       sendJson(res, 200, { ok: true, status: getPublicStatus() });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && parsed.pathname === '/api/input') {
+    try {
+      const body = await parseJsonBody(req);
+      for (const ev of Array.isArray(body) ? body : [body]) handleInputEvent(httpInput, ev);
+      sendJson(res, 200, { ok: true, applied: inputLive() });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err.message });
     }
@@ -686,6 +1045,16 @@ const server = http.createServer(async (req, res) => {
   handleStaticRequest(req, res, parsed.pathname);
 });
 
+// Input WebSocket at /input, behind the same access rules as every page.
+server.on('upgrade', (req, socket) => {
+  const parsed = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (parsed.pathname !== '/input' || !sameOrigin(req) || !allowed(req, parsed)) {
+    socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    return;
+  }
+  acceptWebSocket(req, socket);
+});
+
 function main() {
   const options = parseArgs(process.argv);
   state.bridgePort = options.bridgePort;
@@ -693,10 +1062,16 @@ function main() {
   state.tcpPort = options.tcpPort;
   state.udpPort = options.udpPort;
   state.monitorId = options.monitorId;
+  state.pin = options.pin;
+  openAccess = options.open;
 
   server.listen(state.bridgePort, () => {
     log(`Web bridge listening on http://0.0.0.0:${state.bridgePort}`);
     log(`Serving static client from ${clientDir}`);
+    log(`On this PC: http://localhost:${state.bridgePort}/`);
+    for (const url of headsetUrls()) {
+      log(`On the headset: ${url}`);
+    }
 
     if (options.autoConnect) {
       connectHost();

@@ -58,12 +58,7 @@
         this.ctx.fillStyle = '#0a141f';
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-        this.texture = new THREE.CanvasTexture(this.canvas);
-        this.texture.colorSpace = THREE.SRGBColorSpace;
-        this.texture.minFilter = THREE.LinearFilter;
-        this.texture.magFilter = THREE.LinearFilter;
-        this.texture.generateMipmaps = false;
-        this._applyTexture();
+        this._makeTexture();
 
         this.lastFrameAt = 0;
         this.configured = false;
@@ -73,6 +68,7 @@
         this.usingMjpeg = false;
 
         if (window.VideoDecoder && window.EncodedVideoChunk) {
+          this.running = true;
           this._startH264();
           // Watchdog: if H.264 never produces a frame (host can't encode it,
           // decode error, etc.), drop back to MJPEG.
@@ -87,6 +83,20 @@
           console.warn('[desktop-stream] WebCodecs unavailable; using MJPEG fallback');
           this._startMjpeg();
         }
+      },
+
+      // WebGL2 textures have immutable storage: once uploaded at the 16x9
+      // placeholder size, a bigger canvas cannot be copied into them and the
+      // panel stayed blank. Each new canvas size gets a new texture.
+      _makeTexture: function () {
+        const THREE = this.THREE;
+        if (this.texture) this.texture.dispose();
+        this.texture = new THREE.CanvasTexture(this.canvas);
+        this.texture.colorSpace = THREE.SRGBColorSpace;
+        this.texture.minFilter = THREE.LinearFilter;
+        this.texture.magFilter = THREE.LinearFilter;
+        this.texture.generateMipmaps = false;
+        this._applyTexture();
       },
 
       _applyTexture: function () {
@@ -104,12 +114,16 @@
         if (!w || !h) return;
         const height = (this.baseWidth * h / w);
         this.el.setAttribute('height', height.toFixed(3));
+        // Keep the view-only line just under the screen's bottom edge.
+        const label = document.getElementById('viewOnlyLabel');
+        if (label) label.object3D.position.y = this.el.object3D.position.y - height / 2 - 0.09;
       },
 
       _drawSource: function (source, w, h) {
         if (this.canvas.width !== w || this.canvas.height !== h) {
           this.canvas.width = w;
           this.canvas.height = h;
+          this._makeTexture();
           this._resizePanel(w, h);
         }
         this.ctx.drawImage(source, 0, 0, w, h);
@@ -120,7 +134,19 @@
       // --- H.264 / WebCodecs path -------------------------------------------
 
       _startH264: function () {
+        this._makeDecoder();
+        this._readH264Stream();
+      },
+
+      // A decoder that hits an error is closed for good, and a new host stream
+      // (bridge reconnect, resolution change) needs a fresh configure. Either
+      // way: start over and wait for the next keyframe.
+      _makeDecoder: function () {
         const self = this;
+        try {
+          if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
+        } catch (_) { /* ignore */ }
+        this.configured = false;
         this.decoder = new VideoDecoder({
           output: function (frame) {
             try {
@@ -134,13 +160,14 @@
             }
           },
           error: function (e) {
-            console.error('[desktop-stream] VideoDecoder error', e);
+            console.error('[desktop-stream] VideoDecoder error, resetting', e);
+            setTimeout(function () { if (self.running) self._makeDecoder(); }, 0);
           },
         });
-        this._readH264Stream();
       },
 
       _stopH264: function () {
+        this.running = false;
         try { if (this.reader) this.reader.cancel(); } catch (_) { /* ignore */ }
         try {
           if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
@@ -150,17 +177,27 @@
       },
 
       _readH264Stream: async function () {
+        const self = this;
+        // The bridge restarting ends the response; come back to it.
+        const retry = function () {
+          if (self.running) setTimeout(function () { self._readH264Stream(); }, 1500);
+        };
         let res;
         try {
           res = await fetch(this.data.h264, { cache: 'no-store' });
         } catch (e) {
           console.error('[desktop-stream] /stream.h264 fetch failed', e);
+          retry();
           return;
         }
         if (!res.ok || !res.body) {
           console.error('[desktop-stream] /stream.h264 unavailable', res.status);
+          retry();
           return;
         }
+        // A new response may carry a different stream: reconfigure at its
+        // first keyframe.
+        this.configured = false;
 
         this.reader = res.body.getReader();
         let buf = new Uint8Array(0);
@@ -192,6 +229,7 @@
           }
           buf = buf.slice(off);
         }
+        retry();
       },
 
       _feedDecoder: function (data, isKey) {
@@ -238,7 +276,12 @@
         this.usingMjpeg = true;
         const img = document.createElement('img');
         img.crossOrigin = 'anonymous';
-        img.src = this.data.mjpeg + '?ts=' + Date.now();
+        const mjpegUrl = this.data.mjpeg;
+        img.src = mjpegUrl + '?ts=' + Date.now();
+        // The multipart response dies with the bridge; reattach.
+        img.addEventListener('error', function () {
+          setTimeout(function () { img.src = mjpegUrl + '?ts=' + Date.now(); }, 1500);
+        });
         this.mjpegImg = img;
 
         const self = this;
@@ -262,55 +305,455 @@
         this._stopH264();
       },
     });
+
+    // -------------------------------------------------------------------------
+    // Input: controllers, mouse and keyboard to the PC.
+    //
+    // Pointer positions go to the bridge as u,v on the screen (0..1, top-left
+    // origin); the bridge turns them into stream pixels. A WebSocket carries the
+    // events (POST /api/input when it can't open). Moves are coalesced to one
+    // per rendered frame; button and key changes go out at once.
+    // -------------------------------------------------------------------------
+
+    const im2Input = {
+      ws: null,
+      viewOnly: false,
+      pointer: { u: 0.5, v: 0.5, b: 0 },
+      moved: false,
+      keys: new Map(), // event.code -> VK held down
+
+      connect: function () {
+        const self = this;
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        let ws;
+        try {
+          ws = new WebSocket(scheme + '://' + location.host + '/input');
+        } catch (_) {
+          return;
+        }
+        this.ws = ws;
+        ws.addEventListener('close', function () {
+          if (self.ws === ws) self.ws = null;
+          setTimeout(function () { self.connect(); }, 2000);
+        });
+      },
+
+      // `essential`: presses, scrolls and keys. Without the socket those still
+      // go out by POST; plain moves wait for it.
+      send: function (ev, essential) {
+        if (this.viewOnly) return;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(ev));
+        } else if (essential) {
+          fetch('/api/input', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(ev),
+          }).catch(function () {});
+        }
+      },
+
+      // Pointer at u,v with button mask b (1 left, 2 right, 4 middle).
+      move: function (u, v) {
+        const p = this.pointer;
+        if (Math.abs(p.u - u) < 1e-4 && Math.abs(p.v - v) < 1e-4) return;
+        p.u = u;
+        p.v = v;
+        this.moved = true;
+      },
+
+      buttons: function (b) {
+        if (b === this.pointer.b) return;
+        this.pointer.b = b;
+        this.moved = false;
+        this.send({ t: 'm', u: this.pointer.u, v: this.pointer.v, b: b }, true);
+      },
+
+      scroll: function (sy, sx) {
+        this.send({ t: 'm', u: this.pointer.u, v: this.pointer.v, b: this.pointer.b, sy: sy, sx: sx }, true);
+      },
+
+      // Once per rendered frame.
+      flush: function () {
+        if (!this.moved) return;
+        this.moved = false;
+        this.send({ t: 'm', u: this.pointer.u, v: this.pointer.v, b: this.pointer.b });
+      },
+
+      key: function (vk, pressed) {
+        this.send({ t: 'k', vk: vk, p: pressed ? 1 : 0 }, true);
+      },
+    };
+
+    // event.code -> Windows virtual-key code (US key positions; the PC applies
+    // its own layout).
+    const VK_BY_CODE = (function () {
+      const m = {
+        Backspace: 0x08, Tab: 0x09, Enter: 0x0d, NumpadEnter: 0x0d,
+        ShiftLeft: 0x10, ShiftRight: 0x10, ControlLeft: 0x11, ControlRight: 0x11,
+        AltLeft: 0x12, AltRight: 0x12, Pause: 0x13, CapsLock: 0x14, Escape: 0x1b,
+        Space: 0x20, PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24,
+        ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
+        PrintScreen: 0x2c, Insert: 0x2d, Delete: 0x2e, MetaLeft: 0x5b, MetaRight: 0x5c,
+        ContextMenu: 0x5d, NumpadMultiply: 0x6a, NumpadAdd: 0x6b, NumpadSubtract: 0x6d,
+        NumpadDecimal: 0x6e, NumpadDivide: 0x6f, NumLock: 0x90, ScrollLock: 0x91,
+        Semicolon: 0xba, Equal: 0xbb, Comma: 0xbc, Minus: 0xbd, Period: 0xbe,
+        Slash: 0xbf, Backquote: 0xc0, BracketLeft: 0xdb, Backslash: 0xdc,
+        BracketRight: 0xdd, Quote: 0xde,
+      };
+      for (let i = 0; i < 26; i += 1) m['Key' + String.fromCharCode(65 + i)] = 0x41 + i;
+      for (let i = 0; i < 10; i += 1) {
+        m['Digit' + i] = 0x30 + i;
+        m['Numpad' + i] = 0x60 + i;
+      }
+      for (let i = 1; i <= 12; i += 1) m['F' + i] = 0x6f + i;
+      return m;
+    })();
+
+    function typingInField(target) {
+      return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/u.test(target.tagName));
+    }
+
+    window.addEventListener('keydown', function (e) {
+      const vk = VK_BY_CODE[e.code];
+      if (!vk || typingInField(e.target) || im2Input.viewOnly) return;
+      // Keep Tab, Space, arrows... for the PC; leave the browser its own F-keys.
+      if (vk < 0x70 || vk > 0x7b) e.preventDefault();
+      im2Input.keys.set(e.code, vk);
+      im2Input.key(vk, true); // an auto-repeat is one more key-down, as on Windows
+    });
+    window.addEventListener('keyup', function (e) {
+      const vk = im2Input.keys.get(e.code);
+      if (vk === undefined) return;
+      im2Input.keys.delete(e.code);
+      im2Input.key(vk, false);
+    });
+    // Focus lost with a key held: the PC would never see it come up.
+    window.addEventListener('blur', function () {
+      im2Input.keys.forEach(function (vk) { im2Input.key(vk, false); });
+      im2Input.keys.clear();
+      if (im2Input.pointer.b) im2Input.buttons(0);
+    });
+
+    // The last controller whose trigger (or pinch) was pressed drives the
+    // pointer; the other one hides its ray.
+    let activeHand = null;
+    const SCROLL_SPEED = 1500; // wheel units a second at full deflection (120 = a notch)
+    const TAP_MS = 300;        // a shorter grip squeeze is a right click
+
+    AFRAME.registerComponent('screen-pointer', {
+      schema: { screen: { type: 'selector' } },
+
+      init: function () {
+        const self = this;
+        this.stick = { x: 0, y: 0 };
+        this.scrollAcc = { x: 0, y: 0 };
+        this.gripAt = 0;
+        this.hit = null;
+
+        const dot = document.createElement('a-circle');
+        dot.setAttribute('radius', 0.009);
+        dot.setAttribute('segments', 20);
+        dot.setAttribute('material', 'shader: flat; color: #ece6dc');
+        dot.setAttribute('visible', false);
+        this.el.sceneEl.appendChild(dot);
+        this.dot = dot;
+
+        const press = function () {
+          self.takeOver();
+          if (self.hit) im2Input.buttons(im2Input.pointer.b | 1);
+        };
+        const release = function () {
+          if (im2Input.pointer.b & 1) im2Input.buttons(im2Input.pointer.b & ~1);
+        };
+        this.el.addEventListener('triggerdown', press);
+        this.el.addEventListener('triggerup', release);
+        this.el.addEventListener('pinchstarted', press);
+        this.el.addEventListener('pinchended', release);
+        this.el.addEventListener('gripdown', function () {
+          self.takeOver();
+          self.gripAt = performance.now();
+        });
+        this.el.addEventListener('gripup', function () {
+          if (self.hit && performance.now() - self.gripAt < TAP_MS) {
+            im2Input.buttons(im2Input.pointer.b | 2);
+            im2Input.buttons(im2Input.pointer.b & ~2);
+          }
+        });
+        this.el.addEventListener('thumbstickmoved', function (e) {
+          self.stick.x = e.detail.x;
+          self.stick.y = e.detail.y;
+        });
+        if (!activeHand && this.el.id === 'rightHand') activeHand = this;
+      },
+
+      takeOver: function () {
+        if (activeHand === this) return;
+        if (activeHand && (im2Input.pointer.b & 1)) im2Input.buttons(im2Input.pointer.b & ~1);
+        activeHand = this;
+      },
+
+      tick: function (time, delta) {
+        const active = activeHand === this && !im2Input.viewOnly;
+        const ray = this.el.components.raycaster;
+        // Only while a controller is connected (laser-controls turns it on).
+        if (ray && ray.data.showLine && !active) this.el.setAttribute('raycaster', 'showLine', false);
+        if (ray && !ray.data.showLine && active && this.el.components['tracked-controls']) {
+          this.el.setAttribute('raycaster', 'showLine', true);
+        }
+        const hit = active && ray && this.data.screen ? ray.getIntersection(this.data.screen) : null;
+        this.hit = hit && hit.uv ? hit : null;
+        this.dot.object3D.visible = Boolean(this.hit);
+        if (!this.hit) return;
+
+        // Plane UVs start bottom-left; the PC counts from the top-left.
+        im2Input.move(this.hit.uv.x, 1 - this.hit.uv.y);
+        this.dot.object3D.position.copy(this.hit.point);
+        this.dot.object3D.position.z += 0.003;
+
+        // Stick scroll: quadratic, so a light push scrolls slowly.
+        const dz = function (a) { return Math.abs(a) > 0.15 ? a : 0; };
+        const sx = dz(this.stick.x);
+        const sy = dz(this.stick.y);
+        const dt = Math.min(delta, 100) / 1000;
+        // Stick forward (y < 0) scrolls up (a positive wheel delta).
+        this.scrollAcc.y += -sy * Math.abs(sy) * SCROLL_SPEED * dt;
+        this.scrollAcc.x += -sx * Math.abs(sx) * SCROLL_SPEED * dt;
+        const stepY = Math.trunc(this.scrollAcc.y);
+        const stepX = Math.trunc(this.scrollAcc.x);
+        if (stepY || stepX) {
+          this.scrollAcc.y -= stepY;
+          this.scrollAcc.x -= stepX;
+          im2Input.scroll(stepY, stepX);
+        }
+      },
+
+      remove: function () {
+        this.dot.remove();
+      },
+    });
+
+    // Flat view (desktop browser, no headset): the mouse works on the screen.
+    // Presses that land on it are kept from look-controls, which would
+    // otherwise turn the view while a window is dragged.
+    AFRAME.registerComponent('mouse-to-screen', {
+      schema: { screen: { type: 'selector' } },
+
+      init: function () {
+        const self = this;
+        const THREE = AFRAME.THREE;
+        const scene = this.el;
+        const raycaster = new THREE.Raycaster();
+        const ndc = new THREE.Vector2();
+        let dragging = false;
+
+        const uvAt = function (e) {
+          const canvas = scene.canvas;
+          const mesh = self.data.screen && self.data.screen.getObject3D('mesh');
+          if (!canvas || !mesh || !scene.camera) return null;
+          const r = canvas.getBoundingClientRect();
+          ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+          raycaster.setFromCamera(ndc, scene.camera);
+          const hit = raycaster.intersectObject(mesh)[0];
+          return hit && hit.uv ? { u: hit.uv.x, v: 1 - hit.uv.y } : null;
+        };
+        const flat = function (e) {
+          return !scene.is('vr-mode') && e.target === scene.canvas && !im2Input.viewOnly;
+        };
+        const MASK = { 0: 1, 1: 4, 2: 2 };
+
+        window.addEventListener('mousedown', function (e) {
+          if (!flat(e)) return;
+          const at = uvAt(e);
+          if (!at) return;
+          e.stopImmediatePropagation(); // not a camera drag
+          e.preventDefault();
+          dragging = true;
+          im2Input.move(at.u, at.v);
+          im2Input.buttons(im2Input.pointer.b | (MASK[e.button] || 0));
+        }, true);
+        window.addEventListener('mousemove', function (e) {
+          if (!flat(e) && !dragging) return;
+          const at = uvAt(e);
+          if (at) im2Input.move(at.u, at.v);
+        }, true);
+        window.addEventListener('mouseup', function (e) {
+          if (!dragging) return;
+          const b = im2Input.pointer.b & ~(MASK[e.button] || 0);
+          im2Input.buttons(b);
+          dragging = b !== 0;
+        }, true);
+        window.addEventListener('wheel', function (e) {
+          const at = flat(e) && uvAt(e);
+          if (!at) return;
+          e.preventDefault();
+          im2Input.move(at.u, at.v); // scroll where the wheel turned
+          // Pixels (Chrome: ~100 a notch) or lines (3 a notch) -> 120 a notch.
+          const per = e.deltaMode === 1 ? 40 : 1.2;
+          im2Input.scroll(Math.round(-e.deltaY * per), Math.round(-e.deltaX * per));
+        }, { capture: true, passive: false });
+        window.addEventListener('contextmenu', function (e) {
+          if (flat(e) && uvAt(e)) e.preventDefault();
+        }, true);
+      },
+
+      tick: function () {
+        im2Input.flush();
+      },
+    });
+
+    // "View only" under the screen, drawn into a canvas (no web font in VR).
+    AFRAME.registerComponent('view-only-label', {
+      init: function () {
+        const c = document.createElement('canvas');
+        c.width = 1024;
+        c.height = 96;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#b4ac9f';
+        ctx.font = '500 44px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('View only: this PC takes no clicks or keys', 512, 48);
+        const tex = new AFRAME.THREE.CanvasTexture(c);
+        tex.colorSpace = AFRAME.THREE.SRGBColorSpace;
+        const apply = () => {
+          const mesh = this.el.getObject3D('mesh');
+          mesh.material.map = tex;
+          mesh.material.transparent = true;
+          mesh.material.depthWrite = false; // the floor behind must still draw
+          mesh.material.needsUpdate = true;
+        };
+        if (this.el.getObject3D('mesh')) apply();
+        else this.el.addEventListener('object3dset', apply, { once: true });
+      },
+    });
+
+    // The host's view-only flag (and whether the bridge is up), from the
+    // bridge's status every two seconds.
+    function pollStatus() {
+      fetch('/api/status', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (s) {
+          const viewOnly = Boolean(s.viewOnly);
+          if (viewOnly !== im2Input.viewOnly) {
+            im2Input.viewOnly = viewOnly;
+            document.body.dataset.viewOnly = String(viewOnly);
+            const label = document.getElementById('viewOnlyLabel');
+            if (label) label.setAttribute('visible', viewOnly);
+          }
+        })
+        .catch(function () {})
+        .finally(function () { setTimeout(pollStatus, 2000); });
+    }
+
+    im2Input.connect();
+    pollStatus();
+
+    // Radial alpha ramp for the floor disc, drawn once into a canvas.
+    AFRAME.registerComponent('floor-fade', {
+      init: function () {
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        // alphaMap reads the green channel, so the ramp is grey, not alpha.
+        g.addColorStop(0, 'rgb(230,230,230)');
+        g.addColorStop(0.35, 'rgb(115,115,115)');
+        g.addColorStop(1, 'rgb(0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new AFRAME.THREE.CanvasTexture(canvas);
+        const apply = () => {
+          const mesh = this.el.getObject3D('mesh');
+          mesh.material.alphaMap = tex;
+          mesh.material.needsUpdate = true;
+        };
+        if (this.el.getObject3D('mesh')) apply();
+        else this.el.addEventListener('object3dset', apply, { once: true });
+      },
+    });
   </script>
   <style>
+    @font-face {
+      font-family: "Grotesk";
+      src: url("/fonts/Grotesk-04Gras.woff2") format("woff2");
+      font-weight: 700;
+    }
+
     html, body {
       margin: 0;
       height: 100%;
       overflow: hidden;
-      background: #02050a;
-      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      background: #13110f;
+      font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     }
 
     .hud {
       position: fixed;
-      top: 12px;
-      left: 12px;
-      right: 12px;
+      top: 16px;
+      left: 16px;
       z-index: 12;
-      color: #e1f2ff;
-      background: rgba(5, 20, 35, 0.68);
-      border: 1px solid rgba(111, 226, 255, 0.35);
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 14px;
+      max-width: min(440px, calc(100vw - 32px));
+      padding: 14px 16px;
+      border-radius: 6px;
+      color: #b4ac9f;
+      background: rgba(28, 26, 23, 0.92);
+      box-shadow: inset 0 1px 0 rgba(236, 230, 220, 0.14);
     }
 
     .hud strong {
-      color: #8bffcf;
+      display: block;
+      margin-bottom: 4px;
+      color: #ece6dc;
+      font: 700 18px/1.2 "Grotesk", system-ui, sans-serif;
+    }
+
+    .hud p {
+      margin: 0;
+    }
+
+    .hud .view-only,
+    body[data-view-only="true"] .hud .controls {
+      display: none;
+    }
+
+    body[data-view-only="true"] .hud .view-only {
+      display: block;
     }
   </style>
 </head>
 <body>
   <div class="hud">
-    <strong>Immersive-2 WebXR</strong> - Use the browser Enter VR button.
-    Stream: H.264 via WebCodecs (/stream.h264), MJPEG fallback. Bridge must be connected.
+    <strong>Immersive-2</strong>
+    <p class="controls">Press the VR button at the bottom right. Trigger clicks, a short grip squeeze right-clicks, the stick scrolls. Mouse and keyboard work here too.</p>
+    <p class="view-only">This PC is view-only: it shows its screen but takes no clicks or keys.</p>
   </div>
 
   <a-scene
-    renderer="colorManagement: true; physicallyCorrectLights: false"
+    renderer="colorManagement: true"
     embedded="false"
     vr-mode-ui="enabled: true"
     webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor,hand-tracking"
+    mouse-to-screen="screen: #screen"
   >
-    <a-entity position="0 1.6 0">
-      <a-camera wasd-controls-enabled="true"></a-camera>
-    </a-entity>
+    <!-- Camera straight under the scene: with local-floor the headset pose is
+         already measured from the floor, so a rig lifted to 1.6 m put the
+         viewer ~3 m up. A-Frame drops this 1.6 m offset on entering VR. -->
+    <!-- No WASD walking: the keyboard types into the PC. -->
+    <a-camera position="0 1.6 0" wasd-controls-enabled="false"></a-camera>
 
-    <a-entity light="type: ambient; color: #6aa9d2; intensity: 0.7"></a-entity>
-    <a-entity light="type: directional; color: #ffffff; intensity: 0.45" position="-1 2 1"></a-entity>
+    <!-- Controller rays onto the screen. -->
+    <a-entity id="leftHand" laser-controls="hand: left"
+              raycaster="objects: #screen; far: 20; lineColor: #ece6dc; lineOpacity: 0.45"
+              screen-pointer="screen: #screen"></a-entity>
+    <a-entity id="rightHand" laser-controls="hand: right"
+              raycaster="objects: #screen; far: 20; lineColor: #ece6dc; lineOpacity: 0.45"
+              screen-pointer="screen: #screen"></a-entity>
+
 
     <a-plane
+      id="screen"
       desktop-stream
       width="2.4"
       height="1.35"
@@ -318,7 +761,15 @@
       material="shader: flat; side: double"
     ></a-plane>
 
-    <a-sky color="#050e18"></a-sky>
+    <a-plane id="viewOnlyLabel" view-only-label visible="false"
+             width="1.2" height="0.1125" position="0 0.84 -2.39"
+             material="shader: flat; transparent: true"></a-plane>
+
+    <!-- A floor to stand on, fading out so the room has no edge. -->
+    <a-circle floor-fade radius="7" rotation="-90 0 0" position="0 0 0"
+              material="shader: flat; transparent: true; color: #2a2621"></a-circle>
+
+    <a-sky color="#13110f"></a-sky>
   </a-scene>
 </body>
 </html>

@@ -38,11 +38,22 @@ using InputKeyboardCallback = std::function<void(uint32_t client_id, const proto
 /// Callback for when a client requests a keyframe (loss recovery)
 using RequestKeyframeCallback = std::function<void(uint32_t client_id, uint8_t monitor_id)>;
 
+/// Callbacks for VIRTUAL_DISPLAY_CREATE / VIRTUAL_DISPLAY_REMOVE
+using VirtualDisplayCreateCallback =
+    std::function<void(uint32_t client_id, const protocol::VirtualDisplayCreate& request)>;
+using VirtualDisplayRemoveCallback = std::function<void(uint32_t client_id, uint8_t monitor_id)>;
+
 /// Network server configuration
 struct ServerConfig {
     uint16_t tcp_port = protocol::DEFAULT_TCP_PORT;
     uint16_t udp_port = protocol::DEFAULT_UDP_PORT;
     uint32_t max_clients = 4;
+    /// Pairing PIN every non-loopback client must send in HELLO; 0 = none.
+    uint32_t pin = 0;
+    /// Reported in HELLO_ACK and LAN discovery replies (see set_monitor_count).
+    uint8_t  monitor_count = 0;
+    /// protocol::HOST_FLAG_* sent in HELLO_ACK (and view-only in discovery).
+    uint8_t  host_flags = 0;
 };
 
 /// Network server interface
@@ -56,9 +67,15 @@ public:
     /// Stop the server
     virtual void stop() = 0;
 
-    /// Send monitor list to a specific client
+    /// Send the monitor list, followed by one protocol::MONITOR_FLAG_* byte
+    /// per monitor, to a client — or to every paired client when client_id
+    /// is 0 (ids start at 1).
     virtual void send_monitor_list(uint32_t client_id,
-                                   const std::vector<protocol::MonitorInfo>& monitors) = 0;
+                                   const std::vector<protocol::MonitorInfo>& monitors,
+                                   const std::vector<uint8_t>& flags) = 0;
+
+    /// Monitor count reported from now on (virtual displays come and go).
+    virtual void set_monitor_count(uint8_t count) = 0;
 
     /// Send stream-start notification
     virtual void send_stream_start(uint32_t client_id,
@@ -91,6 +108,8 @@ public:
     virtual void set_on_input_mouse(InputMouseCallback cb) = 0;
     virtual void set_on_input_keyboard(InputKeyboardCallback cb) = 0;
     virtual void set_on_request_keyframe(RequestKeyframeCallback cb) = 0;
+    virtual void set_on_virtual_display_create(VirtualDisplayCreateCallback cb) = 0;
+    virtual void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) = 0;
 
     /// Check if server is running
     virtual bool is_running() const = 0;
@@ -101,5 +120,13 @@ public:
 
 /// Create a network server instance
 std::unique_ptr<INetworkServer> create_network_server();
+
+/// This machine's name (gethostname), for discovery replies and the banner.
+std::string local_host_name();
+
+/// The IPv4 address this machine uses to reach the LAN (the source address
+/// of its default route), or "" when it has none. Call after start() on
+/// Windows (needs WSAStartup).
+std::string primary_ipv4();
 
 }  // namespace immersive

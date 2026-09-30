@@ -495,21 +495,23 @@ Result try_session(bool rd, const std::string& token, uint32_t rd_version,
 
 /// Sends a RemoteDesktop Notify* call built by `append` (which returns false
 /// to drop the event). Never waits for a reply; bounded by short waits.
-void notify(const char* method, const std::function<bool(DBusMessageIter*)>& append) {
+/// Returns false when the event was dropped (session busy or gone).
+bool notify(const char* method, const std::function<bool(DBusMessageIter*)>& append) {
     std::unique_lock<std::timed_mutex> lock(g_mutex, 50ms);
-    if (!lock || !g_conn || !g_live || !g_state.remote_desktop) return;
+    if (!lock || !g_conn || !g_live || !g_state.remote_desktop) return false;
     DBusMessage* m = new_call(kRemoteDesktop, method);
     append_args(m, true, nullptr);  // session, empty options
     DBusMessageIter args;
     dbus_message_iter_init_append(m, &args);
     if (!append(&args)) {
         dbus_message_unref(m);
-        return;
+        return false;
     }
     send_no_reply(m);
     pump(0);  // writes what the socket takes, handles e.g. a Closed signal
     for (int i = 0; i < 4 && g_conn && dbus_connection_has_messages_to_send(g_conn); ++i)
         dbus_connection_read_write(g_conn, 5);
+    return true;
 }
 
 }  // namespace
@@ -610,8 +612,8 @@ void pointer_motion(uint8_t index, double fx, double fy) {
     });
 }
 
-void pointer_button(int32_t evdev_button, bool pressed) {
-    notify("NotifyPointerButton", [&](DBusMessageIter* args) {
+bool pointer_button(int32_t evdev_button, bool pressed) {
+    return notify("NotifyPointerButton", [&](DBusMessageIter* args) {
         const dbus_int32_t b = evdev_button;
         const dbus_uint32_t state = pressed ? 1 : 0;
         dbus_message_iter_append_basic(args, DBUS_TYPE_INT32, &b);

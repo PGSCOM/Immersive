@@ -1,200 +1,543 @@
+@font-face {
+  font-family: "Grotesk";
+  src: url("/fonts/Grotesk-03Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Grotesk";
+  src: url("/fonts/Grotesk-04Gras.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* A warm charcoal desk under a single on-air tally. Everything else is tonal
+   steps of the same ink, so the only colour that means anything is "live". */
 :root {
-  --bg-0: #05121d;
-  --bg-1: #0d2536;
-  --panel: rgba(7, 24, 37, 0.82);
-  --line: rgba(127, 207, 255, 0.28);
-  --text: #dceefb;
-  --muted: #9cc2dd;
-  --accent: #6fe2ff;
-  --accent-2: #8bffcf;
-  --danger: #ff9f89;
+  --ground: #13110f;
+  --surface: #1c1a17;
+  --surface-hi: #25221e;
+  --well: #0b0a09;
+  --edge: rgba(236, 230, 220, 0.06);
+  --edge-hi: rgba(236, 230, 220, 0.14);
+  --ink: #ece6dc;
+  --ink-2: #b4ac9f;
+  --ink-3: #847c71;
+  --tally: #d9533b;
+  --clay: #e39a7f;
+
+  --display: "Grotesk", system-ui, sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --data: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  --gutter: 16px;
+  --radius: 6px;
+  /* Room around the screen for the crop marks; the wordmark and the rack
+     line up with the screen itself, not with the marks. */
+  --frame-pad: 14px;
+  color-scheme: dark;
 }
 
 * {
   box-sizing: border-box;
 }
 
-html,
+/* Components set display: grid/flex, which would beat the UA rule. */
+[hidden] {
+  display: none !important;
+}
+
+html {
+  /* Fine grain on the substrate only, never over the content. */
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .95 0 0 0 0 .9 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E"),
+    var(--ground);
+}
+
 body {
   margin: 0;
-  padding: 0;
-  min-height: 100%;
-  color: var(--text);
-  font-family: "Space Grotesk", "Segoe UI", sans-serif;
-  background:
-    radial-gradient(1100px 500px at 90% -10%, rgba(111, 226, 255, 0.16), transparent 60%),
-    radial-gradient(900px 600px at 10% -20%, rgba(139, 255, 207, 0.12), transparent 65%),
-    linear-gradient(160deg, var(--bg-0), var(--bg-1));
+  min-height: 100vh;
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  -webkit-font-smoothing: antialiased;
 }
 
-.page {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 28px 20px 36px;
+h2 {
+  margin: 0 0 14px;
+  font: 700 19px/1.2 var(--display);
+  letter-spacing: 0.01em;
 }
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: 16px;
-}
-
-.title {
-  margin: 0;
-  font-size: clamp(1.6rem, 2.5vw, 2.6rem);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.subtitle {
-  margin: 6px 0 0;
-  color: var(--muted);
-}
-
-.badge {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 8px 14px;
-  color: var(--accent);
-  background: rgba(16, 46, 68, 0.45);
-}
-
-.grid {
-  margin-top: 18px;
-  display: grid;
-  grid-template-columns: 360px 1fr;
-  gap: 16px;
-}
-
-.panel {
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  background: var(--panel);
-  backdrop-filter: blur(8px);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.33);
-}
-
-.controls {
-  padding: 18px;
-}
-
-.controls h2,
-.viewer h2 {
-  margin: 0 0 12px;
-  font-size: 1rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-}
-
-.field {
-  margin-bottom: 12px;
-}
-
-.field label {
-  display: block;
-  margin-bottom: 6px;
-  font-size: 0.86rem;
-  color: var(--muted);
-}
-
-.field input,
-.field select,
-button {
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid rgba(111, 226, 255, 0.26);
-  background: rgba(5, 21, 33, 0.85);
-  color: var(--text);
-  font: inherit;
-  padding: 10px 12px;
-}
-
-button {
-  cursor: pointer;
-  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
-}
-
-button:hover {
-  transform: translateY(-1px);
-  border-color: var(--accent);
-}
-
-button.primary {
-  background: linear-gradient(135deg, rgba(111, 226, 255, 0.28), rgba(139, 255, 207, 0.2));
-}
-
-button.ghost {
-  background: transparent;
-}
-
-button.warn {
-  border-color: rgba(255, 159, 137, 0.45);
-  color: var(--danger);
-}
-
-.actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.status-box {
-  border: 1px solid rgba(111, 226, 255, 0.2);
-  border-radius: 12px;
-  padding: 10px;
-  font-size: 0.9rem;
-  color: var(--muted);
-  min-height: 68px;
-}
-
-.status-box strong {
-  color: var(--accent-2);
-}
-
-.viewer {
-  padding: 14px;
-}
-
-.viewer-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.viewer-frame {
-  margin-top: 10px;
-  position: relative;
-  border-radius: 14px;
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  border: 1px solid rgba(111, 226, 255, 0.26);
-  min-height: 300px;
-  background: #01070d;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
-.viewer-frame img {
-  width: 100%;
-  height: auto;
+/* --- Bar ----------------------------------------------------------------- */
+
+.bar {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 22px var(--gutter) 0 calc(var(--gutter) + var(--frame-pad));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mark {
+  width: 34px;
+  height: 24px;
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wordmark {
+  font: 700 22px/1 var(--display);
+  letter-spacing: 0.015em;
+}
+
+.role {
+  font: 400 17px/1 var(--display);
+  color: var(--ink-3);
+}
+
+/* --- Desk ---------------------------------------------------------------- */
+
+.desk {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 26px var(--gutter) 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 40px;
+  align-items: start;
+}
+
+/* --- Feed: the signal is the page's one object ---------------------------- */
+
+.frame {
+  position: relative;
+  padding: var(--frame-pad);
+}
+
+/* Broadcast crop marks. They sit wide while there is no picture and close in
+   on the screen when a signal locks. */
+.frame::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  pointer-events: none;
+  opacity: 0.55;
+  transition: inset 480ms cubic-bezier(0.2, 0.7, 0.1, 1), opacity 480ms ease;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M2 20V9a7 7 0 0 1 7-7h11' fill='none' stroke='%23847c71' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") top left no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M20 20V9a7 7 0 0 0-7-7H2' fill='none' stroke='%23847c71' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") top right no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M2 2v11a7 7 0 0 0 7 7h11' fill='none' stroke='%23847c71' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") bottom left no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M20 2v11a7 7 0 0 1-7 7H2' fill='none' stroke='%23847c71' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") bottom right no-repeat;
+}
+
+.frame.is-live::before {
+  /* The marks' arms stay a few px clear of the screen edge at any padding. */
+  inset: calc(var(--frame-pad) - 8px);
+  opacity: 1;
+}
+
+.screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--well);
+  border-radius: 3px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+
+.screen img {
   display: block;
-  aspect-ratio: 16/9;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 
-.tip {
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 0.86rem;
+.nosignal {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
 }
 
+.nosignal-title {
+  margin: 0;
+  font: 700 clamp(28px, 4.2vw, 52px)/1.05 var(--display);
+  color: var(--ink-2);
+  letter-spacing: 0.01em;
+}
+
+.nosignal-text {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--ink-3);
+}
+
+/* The slate reads like the strip under a broadcast monitor: state first,
+   then the numbers. Labels in the display face, values as data. */
+.slate {
+  margin: 4px var(--frame-pad) 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  align-items: baseline;
+}
+
+.slate > div {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.slate dt {
+  font: 400 14px/1.4 var(--display);
+  color: var(--ink-3);
+}
+
+.slate dd {
+  margin: 0;
+  font: 14px/1.4 var(--data);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.slate-state {
+  flex-basis: 100%;
+}
+
+.slate-state dd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 700 17px/1.3 var(--display);
+}
+
+.tally {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
+  transition: background-color 200ms ease;
+}
+
+.tally[data-on="true"] {
+  background: var(--tally);
+  box-shadow: none;
+}
+
+/* --- Rack ---------------------------------------------------------------- */
+
+.rack {
+  display: grid;
+  gap: 18px;
+  margin-top: var(--frame-pad);
+}
+
+.block {
+  margin: 0;
+  min-width: 0;
+  padding: 20px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+}
+
+legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+}
+
+legend + * {
+  clear: both;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.field-label {
+  font: 400 15px/1.2 var(--display);
+  color: var(--ink-2);
+}
+
+.field-help {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--well);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
+  color: var(--ink);
+  font: 15px/1.3 var(--data);
+  transition: box-shadow 140ms ease;
+}
+
+input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--ink-2);
+}
+
+input:disabled {
+  color: var(--ink-3);
+}
+
+input[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 2px var(--clay);
+}
+
+.ports {
+  margin: -2px 0 14px;
+}
+
+.ports summary {
+  cursor: pointer;
+  width: fit-content;
+  font: 400 15px/1.2 var(--display);
+  color: var(--ink-2);
+}
+
+.ports summary:hover {
+  color: var(--ink);
+}
+
+.ports-row {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.ports-row .field {
+  margin-bottom: 0;
+}
+
+/* One action that changes with the link, never a filled + ghost pair. */
+.action {
+  width: 100%;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--ground);
+  font: 700 16px/1.2 var(--display);
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.action:hover {
+  background: #fffaf2;
+}
+
+.action[data-mode="stop"] {
+  background: var(--surface-hi);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
+}
+
+.action[data-mode="stop"]:hover {
+  background: #2f2b26;
+}
+
+.action:focus-visible,
+.monitor-row:has(input:focus-visible),
+.quiet-link:focus-visible,
+.copy:focus-visible,
+.ports summary:focus-visible {
+  outline: 2px solid var(--ink-2);
+  outline-offset: 3px;
+}
+
+.notice {
+  margin: 12px 0 0;
+  color: var(--clay);
+  font-size: 14px;
+}
+
+/* --- Monitors ------------------------------------------------------------ */
+
+.monitors:disabled .monitor-row {
+  cursor: default;
+  color: var(--ink-3);
+}
+
+.monitor-list {
+  position: relative;
+  display: grid;
+  gap: 2px;
+}
+
+/* The selection is one block that slides between rows. */
+.selection {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  border-radius: 4px;
+  background: var(--surface-hi);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  transition: transform 260ms cubic-bezier(0.2, 0.7, 0.1, 1), height 260ms ease;
+}
+
+.monitor-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--ink-2);
+  transition: color 140ms ease;
+}
+
+.monitor-row:hover,
+.monitor-row.is-selected {
+  color: var(--ink);
+}
+
+.monitor-row input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.monitor-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.monitor-id {
+  font: 13px/1.5 var(--data);
+  color: var(--ink-3);
+}
+
+.monitor-spec {
+  grid-column: 1 / -1;
+  font: 13px/1.4 var(--data);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  margin: 0;
+  color: var(--ink-3);
+}
+
+/* --- Headset ------------------------------------------------------------- */
+
+.lede {
+  margin: 0 0 12px;
+  color: var(--ink-2);
+}
+
+.urls {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.urls li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: var(--well);
+}
+
+.urls code {
+  flex: 1;
+  min-width: 0;
+  font: 13px/1.45 var(--data);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.copy {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: 400 14px/1.45 var(--display);
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.copy:hover {
+  color: var(--ink);
+}
+
+.quiet-link {
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-decoration-color: var(--ink-3);
+  text-underline-offset: 3px;
+  transition: color 140ms ease;
+}
+
+.quiet-link:hover {
+  color: var(--ink);
+}
+
+/* --- Small screens ------------------------------------------------------- */
+
 @media (max-width: 980px) {
-  .grid {
-    grid-template-columns: 1fr;
+  .desk {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+    padding-top: 18px;
   }
 
-  .actions {
-    grid-template-columns: 1fr;
+  :root {
+    --frame-pad: 10px;
+  }
+
+  .rack {
+    margin-top: 0;
+    padding-inline: var(--frame-pad);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before {
+    transition: none !important;
   }
 }

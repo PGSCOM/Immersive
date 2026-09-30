@@ -1,7 +1,6 @@
 #pragma once
 
-/// IDD (Indirect Display Driver) Manager.
-/// Creates and manages virtual displays on Windows using the IDD framework.
+/// Virtual displays (and, on Windows, IDD driver detection).
 
 #include <cstdint>
 #include <memory>
@@ -18,30 +17,43 @@ struct VirtualDisplayConfig {
     std::string name         = "Immersive-2 Virtual Display";
 };
 
-/// Interface for managing IDD virtual displays
+/// Virtual displays: extra monitors that exist only to be shown in VR.
+/// The base class is the "not supported here" manager; each OS overrides it
+/// (X11 RandR, GNOME/Mutter, macOS CGVirtualDisplay, the --stub fakes).
+/// Created displays get ids protocol::VIRTUAL_MONITOR_ID_BASE + n, and the
+/// capture backend of that OS reports and captures them under that id.
+/// Called with main.cpp's ops_mutex held: implementations need no locking
+/// of their own against each other.
 class IVirtualDisplayManager {
 public:
     virtual ~IVirtualDisplayManager() = default;
 
-    /// Check if the IDD driver is installed
-    virtual bool is_driver_installed() const = 0;
+    /// Check if the IDD driver is installed (Windows only)
+    virtual bool is_driver_installed() const { return false; }
 
-    /// Create a virtual display with the given configuration
-    /// Returns the display ID, or 0 on failure
-    virtual uint8_t create_display(const VirtualDisplayConfig& config) = 0;
+    /// True when create_display() can work on this machine.
+    virtual bool can_create_displays() const { return false; }
+
+    /// Create a virtual display with the given configuration.
+    /// Returns its monitor id, or 0 on failure.
+    virtual uint8_t create_display(const VirtualDisplayConfig& /*config*/) { return 0; }
 
     /// Remove a virtual display
-    virtual bool remove_display(uint8_t display_id) = 0;
+    virtual bool remove_display(uint8_t /*display_id*/) { return false; }
 
     /// Remove all virtual displays
-    virtual void remove_all_displays() = 0;
+    virtual void remove_all_displays() {}
 
     /// Get the list of active virtual display IDs
-    virtual std::vector<uint8_t> get_active_displays() const = 0;
+    virtual std::vector<uint8_t> get_active_displays() const { return {}; }
 };
 
-/// Create an IDD virtual display manager
+/// The virtual-display manager for this OS and session (never nullptr; the
+/// base class when this desktop cannot make virtual displays).
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager();
+
+/// Fake virtual displays for --stub (solid grey, see stub_capture.cpp).
+std::unique_ptr<IVirtualDisplayManager> create_stub_virtual_display_manager();
 
 /// Generate (if absent) a self-signed code-signing certificate and add it to
 /// the machine's Root and TrustedPublisher stores, so an unsigned community IDD

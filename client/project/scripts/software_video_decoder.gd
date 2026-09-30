@@ -73,6 +73,11 @@ func submit(data: PackedByteArray) -> void:
 		_worker_running = true
 	_mutex.unlock()
 	if need_task:
+		# The previous task has finished (_worker_running was false), but the
+		# pool only frees a task once it is waited on: skipping this leaked one
+		# task per frame, ~95 MB an hour at 3 x 30 fps.
+		if _task_id != -1:
+			WorkerThreadPool.wait_for_task_completion(_task_id)
 		_task_id = WorkerThreadPool.add_task(_decode_worker, false, "im2_mjpeg_decode")
 
 

@@ -2,9 +2,15 @@
 /// (portal_session.cpp), consumed with a PipeWire stream on its own
 /// pw_thread_loop. Only shared-memory buffers are negotiated (no DMA-BUF),
 /// so every frame is a plain mmap'd copy into the BGRA mailbox.
+///
+/// Virtual screens (ids 100+, GNOME only, mutter_virtual.cpp) are not portal
+/// streams: their PipeWire consumer lives as long as the screen does, and a
+/// capture of one just reads frames from it.
 
 #include "capture/linux_backends.h"
+#include "capture/mutter_virtual.h"
 #include "capture/portal_session.h"
+#include "protocol.h"
 
 #include <pipewire/pipewire.h>
 #include <spa/buffer/meta.h>
@@ -36,8 +42,17 @@ public:
     }
     ~PortalCapture() override { stop_capture(); }
 
+    /// A consumer of `node` on the default PipeWire daemon, asking for
+    /// exactly `width` x `height` (a Mutter virtual monitor takes that size).
+    bool connect_direct(uint32_t node, uint32_t width, uint32_t height) {
+        fixed_w_ = width;
+        fixed_h_ = height;
+        return connect(0, node);
+    }
+
     std::vector<DisplayInfo> enumerate_displays() override {
         const portal::Snapshot s = portal::ensure_session();
+        const std::vector<DisplayInfo> virt = mutter::displays();
         std::vector<DisplayInfo> out;
         for (size_t i = 0; i < s.streams.size() && i < 255; ++i) {
             const portal::Stream& st = s.streams[i];
@@ -55,11 +70,17 @@ public:
             d.native_id = st.node_id;
             out.push_back(d);
         }
+        out.insert(out.end(), virt.begin(), virt.end());
         return out;
     }
 
     bool start_capture(uint8_t display_id) override {
         stop_capture();
+        if (display_id >= protocol::VIRTUAL_MONITOR_ID_BASE) {
+            if (!mutter::exists(display_id)) return false;
+            virtual_id_ = display_id;
+            return true;
+        }
         const portal::Snapshot s = portal::ensure_session();
         if (s.generation == 0) return false;
         if (display_id >= s.streams.size()) {
@@ -84,6 +105,7 @@ public:
     }
 
     void stop_capture() override {
+        virtual_id_ = 0;
         capturing_ = false;
         if (loop_) {
             pw_thread_loop_lock(loop_);
@@ -110,6 +132,7 @@ public:
     }
 
     std::unique_ptr<CapturedFrame> acquire_frame(uint32_t timeout_ms) override {
+        if (virtual_id_) return mutter::acquire(virtual_id_, timeout_ms);
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                      [&] { return latest_ || failed_; });
@@ -117,25 +140,29 @@ public:
     }
 
     bool is_capturing() const override {
-        return capturing_ && !failed_ && portal::live_generation() == gen_;
+        if (virtual_id_) return mutter::exists(virtual_id_);
+        return capturing_ && !failed_ && (gen_ == 0 || portal::live_generation() == gen_);
     }
 
 private:
+    /// gen 0: the default PipeWire daemon (a virtual screen), else the
+    /// portal session's remote.
     bool connect(uint64_t gen, uint32_t node) {
-        const int fd = portal::open_pipewire_remote(gen);
-        if (fd < 0) return false;
+        const int fd = gen ? portal::open_pipewire_remote(gen) : -1;
+        if (gen && fd < 0) return false;
 
         node_ = node;
         loop_ = pw_thread_loop_new("im2-capture", nullptr);
         context_ = loop_ ? pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0) : nullptr;
         if (!context_ || pw_thread_loop_start(loop_) < 0) {
-            close(fd);
+            if (fd >= 0) close(fd);
             std::cerr << "[Capture] Cannot start a PipeWire loop\n";
             return false;
         }
 
         pw_thread_loop_lock(loop_);
-        core_ = pw_context_connect_fd(context_, fd, nullptr, 0);  // owns fd now
+        core_ = fd >= 0 ? pw_context_connect_fd(context_, fd, nullptr, 0)  // owns fd now
+                        : pw_context_connect(context_, nullptr, 0);
         bool ok = core_ != nullptr;
         if (ok) {
             pw_core_add_listener(core_, &core_listener_, &kCoreEvents, this);
@@ -155,7 +182,11 @@ private:
             // compositor offers shared memory and never DMA-BUF.
             uint8_t buf[1024];
             spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-            spa_rectangle size_def{1920, 1080}, size_min{1, 1}, size_max{16384, 16384};
+            // A fixed size (min = max) for a virtual screen: the compositor
+            // makes the monitor the size the consumer asks for.
+            spa_rectangle size_def{fixed_w_ ? fixed_w_ : 1920, fixed_h_ ? fixed_h_ : 1080};
+            spa_rectangle size_min{fixed_w_ ? fixed_w_ : 1, fixed_h_ ? fixed_h_ : 1};
+            spa_rectangle size_max{fixed_w_ ? fixed_w_ : 16384, fixed_h_ ? fixed_h_ : 16384};
             spa_fraction rate_def{60, 1}, rate_min{0, 1}, rate_max{1000, 1};
             const spa_pod* params[1] = {static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
                 SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -369,12 +400,22 @@ private:
 
     uint64_t fail_gen_ = 0;  // start_capture failure count for this session
     int failures_ = 0;
+
+    uint8_t virtual_id_ = 0;              // capturing a virtual screen (reads its consumer)
+    uint32_t fixed_w_ = 0, fixed_h_ = 0;  // connect_direct(): the size to ask for
 };
 
 }  // namespace
 
 std::unique_ptr<IScreenCapture> create_portal_capture() {
     return std::make_unique<PortalCapture>();
+}
+
+std::unique_ptr<IScreenCapture> create_pipewire_node_capture(uint32_t node, uint32_t width,
+                                                             uint32_t height) {
+    auto cap = std::make_unique<PortalCapture>();
+    if (!cap->connect_direct(node, width, height)) return nullptr;
+    return cap;
 }
 
 }  // namespace immersive

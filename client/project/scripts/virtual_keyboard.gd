@@ -1,329 +1,318 @@
-## Virtual QWERTY keyboard for VR.
+## Virtual keyboard for VR: a full US layout (Esc, Tab, symbols, arrows,
+## Ctrl / Alt / Win) drawn as a 2D UI in a SubViewport on a floating quad, and
+## driven by the controller or hand pointer through pointer_ray().
 ##
-## Rendered as a Node3D floating panel with MeshInstance3D keys.
-## Activated by pressing the A/X button on the left controller.
-## Sends Windows virtual-key scancodes to the host via
-## main_scene.send_keyboard_input().
-##
-## Layout rows:
-##   Row 0: 1 2 3 4 5 6 7 8 9 0
-##   Row 1: Q W E R T Y U I O P
-##   Row 2: A S D F G H J K L
-##   Row 3: Z X C V B N M
-##   Row 4: [Shift] [Space] [Backspace] [Enter] [Ctrl]
+## Sends Windows virtual-key codes through main_scene.send_keyboard_input();
+## the host translates them on Linux/macOS. Shift, Ctrl, Alt and Win latch for
+## the next key only; Caps toggles. Holding a key repeats it.
 
 extends Node3D
 class_name VirtualKeyboard
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+const VIEW_SIZE := Vector2i(1500, 504)
+const WIDTH_M := 0.75
+const HEIGHT_M := WIDTH_M * VIEW_SIZE.y / VIEW_SIZE.x
+const UNIT_PX := 90.0
+const KEY_GAP := 8
+const REPEAT_DELAY_S := 0.45
+const REPEAT_RATE_HZ := 22.0
 
-const KEY_WIDTH  : float = 0.06
-const KEY_HEIGHT : float = 0.055
-const KEY_DEPTH  : float = 0.012
-const KEY_GAP    : float = 0.008
-const KEY_Z_PRESS: float = 0.008   # Z offset when key is pressed
+const MOD_SHIFT := 0x01
+const MOD_CTRL := 0x02
+const MOD_ALT := 0x04
+const MOD_WIN := 0x08
 
-# Windows virtual-key codes for each keycap
-# Reference: https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
-const VK_SHIFT     = 0x10
-const VK_CONTROL   = 0x11
-const VK_RETURN    = 0x0D
-const VK_BACK      = 0x08
-const VK_SPACE     = 0x20
-
-# Key layout: each entry is [label, vk_code, width_multiplier]
-const KEY_ROWS = [
-	[["1",0x31],["2",0x32],["3",0x33],["4",0x34],["5",0x35],
-	 ["6",0x36],["7",0x37],["8",0x38],["9",0x39],["0",0x30]],
-
-	[["Q",0x51],["W",0x57],["E",0x45],["R",0x52],["T",0x54],
-	 ["Y",0x59],["U",0x55],["I",0x49],["O",0x4F],["P",0x50]],
-
-	[["A",0x41],["S",0x53],["D",0x44],["F",0x46],["G",0x47],
-	 ["H",0x48],["J",0x4A],["K",0x4B],["L",0x4C]],
-
-	[["Z",0x5A],["X",0x58],["C",0x43],["V",0x56],["B",0x42],
-	 ["N",0x4E],["M",0x4D]],
-
-	[["Shift",VK_SHIFT, 1.5],["Space",VK_SPACE, 3.0],
-	 ["Bksp", VK_BACK,  1.5],["Enter",VK_RETURN,1.5],
-	 ["Ctrl", VK_CONTROL,1.5]]
+## [label, shifted label, VK, width in key units, kind]. kind: "" = normal
+## key, "mod" = one-shot modifier (value = its bit), "caps" = Caps Lock.
+const ROWS := [
+	[["Esc", "", 0x1B, 1.0, ""], ["1", "!", 0x31], ["2", "@", 0x32], ["3", "#", 0x33],
+	 ["4", "$", 0x34], ["5", "%", 0x35], ["6", "^", 0x36], ["7", "&", 0x37],
+	 ["8", "*", 0x38], ["9", "(", 0x39], ["0", ")", 0x30], ["-", "_", 0xBD],
+	 ["=", "+", 0xBB], ["Backspace", "", 0x08, 2.0, ""]],
+	[["Tab", "", 0x09, 1.5, ""], ["q", "Q", 0x51], ["w", "W", 0x57], ["e", "E", 0x45],
+	 ["r", "R", 0x52], ["t", "T", 0x54], ["y", "Y", 0x59], ["u", "U", 0x55],
+	 ["i", "I", 0x49], ["o", "O", 0x4F], ["p", "P", 0x50], ["[", "{", 0xDB],
+	 ["]", "}", 0xDD], ["\\", "|", 0xDC, 1.5, ""]],
+	[["Caps", "", 0x14, 1.75, "caps"], ["a", "A", 0x41], ["s", "S", 0x53], ["d", "D", 0x44],
+	 ["f", "F", 0x46], ["g", "G", 0x47], ["h", "H", 0x48], ["j", "J", 0x4A],
+	 ["k", "K", 0x4B], ["l", "L", 0x4C], [";", ":", 0xBA], ["'", "\"", 0xDE],
+	 ["Return", "", 0x0D, 2.25, ""]],
+	[["Shift", "", 0x10, 2.25, "mod"], ["z", "Z", 0x5A], ["x", "X", 0x58], ["c", "C", 0x43],
+	 ["v", "V", 0x56], ["b", "B", 0x42], ["n", "N", 0x4E], ["m", "M", 0x4D],
+	 [",", "<", 0xBC], [".", ">", 0xBE], ["/", "?", 0xBF],
+	 ["Shift", "", 0x10, 1.75, "mod"], ["↑", "", 0x26, 1.0, ""]],
+	[["Ctrl", "", 0x11, 1.5, "mod"], ["Win", "", 0x5B, 1.25, "mod"], ["Alt", "", 0x12, 1.25, "mod"],
+	 ["", "", 0x20, 5.5, ""], ["`", "~", 0xC0], ["Delete", "", 0x2E, 1.5, ""],
+	 ["←", "", 0x25, 1.0, ""], ["↓", "", 0x28, 1.0, ""], ["→", "", 0x27, 1.0, ""]],
 ]
+const MOD_BITS := {0x10: MOD_SHIFT, 0x11: MOD_CTRL, 0x12: MOD_ALT, 0x5B: MOD_WIN}
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-
-## Reference to the main scene controller for send_keyboard_input.
-@onready var main_scene: Node3D = get_node("/root/Main")
-
-## Whether Shift is currently latched.
-var shift_active: bool = false
-## Whether Ctrl is currently latched.
-var ctrl_active: bool = false
-
-## Active monitor to send input to.
+## Monitor that receives the keys (main.gd keeps it on the pointed-at screen).
 var active_monitor_id: int = 0
+## One-shot modifiers waiting for the next key (MOD_* bits).
+var latched_mods: int = 0
+var caps_on: bool = false
 
-## Map from MeshInstance3D → [label, vk_code]
-var _key_nodes: Dictionary = {}
+@onready var main_scene: Node = get_node_or_null("/root/Main")
 
-## Currently hovered key.
-var _hovered_key: MeshInstance3D = null
+var _viewport: SubViewport
+var _quad: MeshInstance3D
+var _keys: Array = []          ## [{button, def}]
+var _pointer_pressed := false
+var _pointer_px := Vector2(-100, -100)
+var _held_vk := -1
+var _repeat_s := 0.0
+var _drag: LaserDrag = null
 
-## Latches a press so holding the trigger types one character, not one per
-## rendered frame.
-var _press_latched: bool = false
-
-## Half extents of the key field, used by pointer_ray() to reject rays that
-## cross the keyboard's plane outside the keys.
-var _board_half_w: float = 0.0
-var _board_half_h: float = 0.0
-
-# Materials
-var _mat_normal:  StandardMaterial3D
-var _mat_hover:   StandardMaterial3D
-var _mat_pressed: StandardMaterial3D
-var _mat_active:  StandardMaterial3D  # Shift/Ctrl when latched
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
+var _style_key: StyleBoxFlat
+var _style_key_hover: StyleBoxFlat
+var _style_key_down: StyleBoxFlat
+var _style_mod: StyleBoxFlat
+var _style_latched: StyleBoxFlat
 
 func _ready() -> void:
-	_build_materials()
-	_build_keyboard()
+	_build()
 	visible = false
+	set_process(false)
+
+func _process(delta: float) -> void:
+	if _drag:
+		_drag.update()
+	if _held_vk >= 0:
+		_repeat_s += delta
+		var interval := 1.0 / REPEAT_RATE_HZ
+		while _repeat_s >= REPEAT_DELAY_S + interval:
+			_repeat_s -= interval
+			_tap(_held_vk)
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-## Show or hide the keyboard.
 func toggle_visibility() -> void:
-	visible = not visible
-	if visible:
+	set_shown(not visible)
+
+func set_shown(show_it: bool) -> void:
+	visible = show_it
+	set_process(show_it)
+	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if show_it \
+		else SubViewport.UPDATE_DISABLED
+	if show_it:
 		_reposition_in_front_of_camera()
 	else:
-		_clear_hover()
+		_leave()
+		_drag = null
 
-## Point at the keyboard with a ray (controller laser or hand ray). Intersects
-## the keyboard's own plane and reuses the proximity hit test below.
-## Returns true when the ray is on the board, so the caller stops routing that
-## ray to the desktop panels.
-func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, is_pressing: bool) -> bool:
+## Point at the keyboard with a ray. Returns the hit distance, or -1 when the
+## ray misses (the caller then routes it to the screens instead). `pressing`
+## is the trigger / pinch state; its changes press and release keys.
+func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
 	if not visible:
-		return false
-	var inv := global_transform.affine_inverse()
-	var local_origin: Vector3 = inv * ray_origin
-	var local_dir: Vector3 = global_transform.basis.inverse() * ray_direction
-	if absf(local_dir.z) < 0.0001:
-		return false
-	var t: float = -local_origin.z / local_dir.z
-	if t < 0.0:
-		return false
-	var local_hit: Vector3 = local_origin + local_dir * t
-	if absf(local_hit.x) > _board_half_w or absf(local_hit.y) > _board_half_h:
-		_clear_hover()
-		return false
-	pointer_update(global_transform * Vector3(local_hit.x, local_hit.y, 0.0), is_pressing)
-	return true
+		return -1.0
+	var inv := _quad.global_transform.affine_inverse()
+	var o: Vector3 = inv * ray_origin
+	var d: Vector3 = _quad.global_basis.inverse() * ray_direction
+	if absf(d.z) < 0.0001:
+		_leave()
+		return -1.0
+	var t := -o.z / d.z
+	var p := o + d * t
+	var uv := Vector2(p.x / WIDTH_M + 0.5, 0.5 - p.y / HEIGHT_M)
+	if t < 0.0 or uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+		_leave()
+		return -1.0
+	_pointer_px = uv * Vector2(VIEW_SIZE)
+	var motion := InputEventMouseMotion.new()
+	motion.position = _pointer_px
+	motion.global_position = _pointer_px
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT if _pointer_pressed else 0
+	_viewport.push_input(motion)
+	if pressing != _pointer_pressed:
+		_push_button(pressing)
+	return t
 
-func _clear_hover() -> void:
-	if _hovered_key != null:
-		_set_key_material(_hovered_key, _mat_normal)
-		_hovered_key = null
-	_press_latched = false
+## Legacy name kept for main.gd callers.
+func pointer_update(world_pos: Vector3, is_pressing: bool) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam:
+		pointer_ray(cam.global_position, (world_pos - cam.global_position).normalized(), is_pressing)
 
-## Called with the world-space position of a fingertip or of a ray/plane hit.
-## Returns the vk_code of any key that was triggered, or -1.
-func pointer_update(world_pos: Vector3, is_pressing: bool) -> int:
-	var best_key: MeshInstance3D = null
-	var best_dist: float = 0.04  # max hit radius in metres
+func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:
+	_leave()
+	_drag = LaserDrag.new(self, pointer, hit_distance)
 
-	for key_node in _key_nodes.keys():
-		if not is_instance_valid(key_node): continue
-		var d: float = key_node.global_position.distance_to(world_pos)
-		if d < best_dist:
-			best_dist = d
-			best_key  = key_node
+func stop_drag() -> void:
+	_drag = null
 
-	# Update hover highlight
-	if _hovered_key != null and _hovered_key != best_key:
-		_set_key_material(_hovered_key, _mat_normal)
-		_hovered_key = null
+func push_pull(delta_m: float) -> void:
+	if _drag:
+		_drag.push_pull(delta_m)
 
-	if not is_pressing:
-		_press_latched = false
-
-	if best_key != null:
-		_hovered_key = best_key
-		if is_pressing:
-			_set_key_material(best_key, _mat_pressed)
-			# Edge-triggered: a held trigger types one character, not one per
-			# rendered frame.
-			if _press_latched:
-				return -1
-			_press_latched = true
-			return _activate_key(best_key)
-		else:
-			_set_key_material(best_key, _mat_hover)
-
-	return -1
+func get_drag_distance() -> float:
+	return _drag.distance if _drag else 0.0
 
 # ---------------------------------------------------------------------------
-# Building the keyboard
+# Pointer plumbing
 # ---------------------------------------------------------------------------
 
-func _build_materials() -> void:
-	_mat_normal = StandardMaterial3D.new()
-	_mat_normal.albedo_color = Color(0.18, 0.18, 0.22)
-	_mat_normal.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+func _push_button(pressed: bool) -> void:
+	_pointer_pressed = pressed
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = _pointer_px
+	ev.global_position = _pointer_px
+	_viewport.push_input(ev)
 
-	_mat_hover = StandardMaterial3D.new()
-	_mat_hover.albedo_color = Color(0.30, 0.45, 0.70)
-	_mat_hover.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-
-	_mat_pressed = StandardMaterial3D.new()
-	_mat_pressed.albedo_color = Color(0.80, 0.80, 1.00)
-	_mat_pressed.emission_enabled = true
-	_mat_pressed.emission = Color(0.6, 0.6, 1.0)
-	_mat_pressed.emission_energy_multiplier = 1.5
-
-	_mat_active = StandardMaterial3D.new()
-	_mat_active.albedo_color = Color(0.20, 0.65, 0.35)
-	_mat_active.emission_enabled = true
-	_mat_active.emission = Color(0.1, 0.5, 0.2)
-
-func _build_keyboard() -> void:
-	var total_rows: int = KEY_ROWS.size()
-	var start_y: float  = (total_rows - 1) * (KEY_HEIGHT + KEY_GAP) / 2.0
-	var widest: float   = 0.0
-
-	for row_idx in range(total_rows):
-		var row: Array = KEY_ROWS[row_idx]
-
-		# Calculate total row width
-		var total_width: float = 0.0
-		for key_def in row:
-			var mult: float = float(key_def[2]) if key_def.size() >= 3 else 1.0
-			total_width += KEY_WIDTH * mult + KEY_GAP
-		total_width -= KEY_GAP
-
-		widest = maxf(widest, total_width)
-
-		var x: float = -total_width / 2.0
-		var y: float = start_y - row_idx * (KEY_HEIGHT + KEY_GAP)
-
-		for key_def in row:
-			var label: String = key_def[0]
-			var vk:    int    = key_def[1]
-			var mult:  float  = float(key_def[2]) if key_def.size() >= 3 else 1.0
-			var kw:    float  = KEY_WIDTH * mult
-			var cx:    float  = x + kw / 2.0
-
-			var key_node := _make_key(label, vk, kw, cx, y)
-			add_child(key_node)
-
-			x += kw + KEY_GAP
-
-	# Half extents (plus a small margin) for pointer_ray()'s plane test.
-	_board_half_w = widest / 2.0 + KEY_GAP
-	_board_half_h = start_y + KEY_HEIGHT / 2.0 + KEY_GAP
-
-## Create a single key MeshInstance3D.
-func _make_key(label: String, vk_code: int, width: float, cx: float, cy: float) -> MeshInstance3D:
-	var node := MeshInstance3D.new()
-	node.name = "Key_%s" % label
-
-	var box := BoxMesh.new()
-	box.size = Vector3(width - 0.002, KEY_HEIGHT - 0.002, KEY_DEPTH)
-	node.mesh = box
-	node.material_override = _mat_normal.duplicate()
-
-	node.position = Vector3(cx, cy, 0.0)
-
-	# Label
-	var lbl := Label3D.new()
-	lbl.text = label
-	lbl.font_size = 18
-	lbl.modulate = Color.WHITE
-	lbl.no_depth_test = true
-	lbl.position = Vector3(0.0, 0.0, KEY_DEPTH / 2.0 + 0.002)
-	lbl.billboard = BaseMaterial3D.BILLBOARD_DISABLED
-	node.add_child(lbl)
-
-	_key_nodes[node] = [label, vk_code]
-	return node
+## Pointer went away: release a held key and clear the hover highlight.
+func _leave() -> void:
+	if _pointer_pressed:
+		_push_button(false)
+	if _pointer_px.x >= 0.0:
+		_pointer_px = Vector2(-100, -100)
+		var motion := InputEventMouseMotion.new()
+		motion.position = _pointer_px
+		motion.global_position = _pointer_px
+		_viewport.push_input(motion)
+	_held_vk = -1
 
 # ---------------------------------------------------------------------------
-# Key activation
+# Keys
 # ---------------------------------------------------------------------------
 
-func _activate_key(key_node: MeshInstance3D) -> int:
-	var info: Array = _key_nodes.get(key_node, [])
-	if info.size() < 2:
-		return -1
+func _on_key_down(def: Array) -> void:
+	var vk: int = def[2]
+	var kind: String = def[4] if def.size() > 4 else ""
+	if kind == "mod":
+		latched_mods ^= MOD_BITS[vk]
+		_refresh_labels()
+		return
+	if kind == "caps":
+		caps_on = not caps_on
+		_send(vk, 0)
+		_refresh_labels()
+		return
+	_tap(vk)
+	_held_vk = vk
+	_repeat_s = 0.0
+	if latched_mods != 0:
+		latched_mods = 0
+		_refresh_labels()
 
-	var label:   String = info[0]
-	var vk_code: int    = info[1]
+func _on_key_up() -> void:
+	_held_vk = -1
 
-	# Handle modifier latching
-	if vk_code == VK_SHIFT:
-		shift_active = not shift_active
-		_set_key_material(key_node, _mat_active if shift_active else _mat_normal)
-		return -1
+## One key press + release with the latched modifiers held around it.
+func _tap(vk: int) -> void:
+	_send(vk, latched_mods)
 
-	if vk_code == VK_CONTROL:
-		ctrl_active = not ctrl_active
-		_set_key_material(key_node, _mat_active if ctrl_active else _mat_normal)
-		return -1
-
-	# Build modifier bitmask: bit0=shift, bit1=ctrl, bit2=alt
-	var mods: int = 0
-	if shift_active: mods |= 0x01
-	if ctrl_active:  mods |= 0x02
-
-	# Send key-down + key-up pair
+func _send(vk: int, mods: int) -> void:
 	if main_scene and main_scene.has_method("send_keyboard_input"):
-		main_scene.send_keyboard_input(active_monitor_id, vk_code, true,  mods)
-		main_scene.send_keyboard_input(active_monitor_id, vk_code, false, mods)
+		main_scene.send_keyboard_input(active_monitor_id, vk, true, mods)
+		main_scene.send_keyboard_input(active_monitor_id, vk, false, mods)
 
-	# Auto-release Shift after one keypress
-	if shift_active and vk_code != VK_SHIFT:
-		shift_active = false
-		for kn in _key_nodes:
-			var kinfo: Array = _key_nodes[kn]
-			if kinfo.size() >= 2 and kinfo[1] == VK_SHIFT:
-				_set_key_material(kn, _mat_normal)
-
-	# Animate key press
-	_animate_key_press(key_node)
-
-	print("[VirtualKeyboard] Key: %s (vk=0x%02X) mods=0x%02X" % [label, vk_code, mods])
-	return vk_code
-
-func _animate_key_press(key_node: MeshInstance3D) -> void:
-	# Move key down slightly, then restore after 80 ms
-	key_node.position.z -= KEY_Z_PRESS
-	var tween := create_tween()
-	tween.tween_property(key_node, "position:z",
-		key_node.position.z + KEY_Z_PRESS, 0.08)
+func _refresh_labels() -> void:
+	var shift := (latched_mods & MOD_SHIFT) != 0
+	for k in _keys:
+		var def: Array = k.def
+		var b: Button = k.button
+		var kind: String = def[4] if def.size() > 4 else ""
+		if kind == "mod":
+			var on: bool = (latched_mods & MOD_BITS[def[2]]) != 0
+			_style_button(b, _style_latched if on else _style_mod, on)
+		elif kind == "caps":
+			_style_button(b, _style_latched if caps_on else _style_mod, caps_on)
+		elif def[1] != "":
+			var letter: bool = String(def[0]).length() == 1 and String(def[0]) >= "a" and String(def[0]) <= "z"
+			var upper := (shift != caps_on) if letter else shift
+			b.text = def[1] if upper else def[0]
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Building
 # ---------------------------------------------------------------------------
 
-func _set_key_material(key_node: MeshInstance3D, mat: StandardMaterial3D) -> void:
-	if is_instance_valid(key_node):
-		key_node.material_override = mat
+func _build() -> void:
+	_style_key = UiTheme.box(UiTheme.SURFACE_HI, 12, 4, 2)
+	_style_key_hover = UiTheme.box(UiTheme.SURFACE_HOVER, 12, 4, 2)
+	_style_key_down = UiTheme.box(UiTheme.INK, 12, 4, 2)
+	_style_mod = UiTheme.box(UiTheme.SURFACE, 12, 4, 2, UiTheme.EDGE)
+	_style_latched = UiTheme.box(UiTheme.INK_2, 12, 4, 2)
+
+	_viewport = SubViewport.new()
+	_viewport.size = VIEW_SIZE
+	_viewport.transparent_bg = true
+	_viewport.gui_embed_subwindows = true
+	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(_viewport)
+
+	var board := PanelContainer.new()
+	board.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	board.add_theme_stylebox_override("panel", UiTheme.box(Color(UiTheme.GROUND, 0.96), 26, 16, 16, UiTheme.EDGE))
+	_viewport.add_child(board)
+
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", KEY_GAP)
+	board.add_child(rows)
+	for row in ROWS:
+		var hbox := HBoxContainer.new()
+		hbox.add_theme_constant_override("separation", KEY_GAP)
+		hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		rows.add_child(hbox)
+		for def in row:
+			hbox.add_child(_make_key(def))
+	_refresh_labels()
+
+	_quad = MeshInstance3D.new()
+	var quad := QuadMesh.new()
+	quad.size = Vector2(WIDTH_M, HEIGHT_M)
+	_quad.mesh = quad
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_texture = _viewport.get_texture()
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
+	_quad.material_override = mat
+	_quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_quad)
+
+func _make_key(def: Array) -> Button:
+	var units: float = def[3] if def.size() > 3 else 1.0
+	var kind: String = def[4] if def.size() > 4 else ""
+	var b := Button.new()
+	b.text = def[0]
+	b.focus_mode = Control.FOCUS_NONE
+	b.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.size_flags_stretch_ratio = units
+	b.custom_minimum_size = Vector2(UNIT_PX * units * 0.5, 0)
+	b.clip_text = true
+	var long_label := String(def[0]).length() > 1
+	# Caps use the neutral font: every symbol must read at a glance.
+	b.add_theme_font_size_override("font_size", 25 if long_label else 34)
+	b.custom_minimum_size.y = 80
+	_style_button(b, _style_mod if (kind != "" or long_label) else _style_key, false)
+	b.button_down.connect(_on_key_down.bind(def))
+	b.button_up.connect(_on_key_up)
+	_keys.append({"button": b, "def": def})
+	return b
+
+func _style_button(b: Button, normal: StyleBoxFlat, lit: bool) -> void:
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("hover", normal if lit else _style_key_hover)
+	b.add_theme_stylebox_override("pressed", _style_key_down)
+	b.add_theme_stylebox_override("hover_pressed", _style_key_down)
+	var ink := UiTheme.GROUND if lit else UiTheme.INK
+	b.add_theme_color_override("font_color", ink if lit or normal == _style_key else UiTheme.INK_2)
+	b.add_theme_color_override("font_hover_color", ink if lit else UiTheme.INK)
+	b.add_theme_color_override("font_pressed_color", UiTheme.GROUND)
+	b.add_theme_color_override("font_hover_pressed_color", UiTheme.GROUND)
 
 func _reposition_in_front_of_camera() -> void:
 	var camera := get_viewport().get_camera_3d()
 	if camera == null:
 		return
-	var forward: Vector3 = -camera.global_transform.basis.z
-	global_position = camera.global_position + forward * 0.6 + Vector3(0.0, -0.15, 0.0)
-	global_rotation = camera.global_rotation
+	var fwd := -camera.global_basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized() if fwd.length_squared() > 0.0001 else Vector3.FORWARD
+	var pos := camera.global_position + fwd * 0.5 + Vector3(0.0, -0.32, 0.0)
+	global_transform = Transform3D(LaserDrag.facing_basis(pos, camera.global_position), pos)

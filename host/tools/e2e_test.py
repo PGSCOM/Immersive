@@ -13,17 +13,22 @@ Checks, in order:
                          reconnects once the host is back.
   4. The host turns on TCP keepalive, so a headset that vanishes without
      closing the socket (Wi-Fi drop, battery) does not leave a ghost client.
-  5. Ctrl+C on the host exits promptly.
-  6. The in-VR menu works with pointer clicks (IP keypad, layout), via
-     client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
-  7. Hand tracking: a pinch clicks where the hand points, no drift or drag,
-     via client/tests/hand_input_test.gd (fake tracked hand, headless); and a
-     controller left still hides, via client/tests/controller_idle_test.gd.
+  5. USB mode: video and audio in-band on the TCP control socket.
+  6. LAN discovery finds the host (client/tests/discovery_test.gd), and PIN
+     pairing: over the PC's LAN address the client is refused without the
+     PIN (and stops retrying), and streams with it.
+  7. Ctrl+C on the host exits promptly.
+  8. The in-VR menu works with pointer clicks (keypads, PIN, tabs, layout),
+     via client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
+  9. Headless unit checks: hand tracking (a pinch clicks where the hand
+     points), controllers (clicks, grip right-click vs grab, idle hiding),
+     curved-screen ray hits, grabbing and the VR keyboard.
 """
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -33,6 +38,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HOST_BIN = os.path.join(ROOT, "host", "build", "immersive2_host")
 CLIENT_DIR = os.path.join(ROOT, "client", "project")
 MONITORS = [0, 1, 2]
+PIN = "246810"
 
 
 class Proc:
@@ -97,23 +103,42 @@ def step(msg):
 
 def start_host():
     # stdbuf: the host's stdout is block-buffered into a pipe otherwise.
-    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub"])
+    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub", "--pin", PIN])
     procs.append(host)
     host.wait_for(r"\[Host\] Ready", 10)
     return host
 
 
 def expect_streaming(client, since):
-    """All monitors streaming and each panel showing that monitor's shade."""
+    """All monitors streaming and, soon after, each panel showing that
+    monitor's shade (a capture taken between STREAM_START and the first
+    decoded frame still shows the empty screen)."""
     for mid in MONITORS:
         client.wait_for(rf"Streaming monitor {mid} ", 20, since)
+    start = client.mark()
     for mid in MONITORS:
-        m = client.wait_for(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})", 20, since)
+        client.wait_for(rf"Streaming monitor {mid} ", 20, since)
         # The --stub capture fills monitor i with grey 64 + 48*i.
         want = 64 + 48 * mid
-        got = [int(m.group(1)[k:k + 2], 16) for k in (0, 2, 4)]
-        if any(abs(c - want) > 8 for c in got):
-            fail(f"monitor {mid} panel shows #{m.group(1)}, expected grey {want}")
+        rx = re.compile(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})")
+        end = time.time() + 20
+        seen = None
+        i = start
+        while time.time() < end:
+            while i < len(client.lines):
+                m = rx.search(client.lines[i])
+                i += 1
+                if m:
+                    seen = m.group(1)
+                    got = [int(seen[k:k + 2], 16) for k in (0, 2, 4)]
+                    if all(abs(c - want) <= 8 for c in got):
+                        break
+            else:
+                time.sleep(0.05)
+                continue
+            break
+        else:
+            fail(f"monitor {mid} panel shows #{seen}, expected grey {want}")
 
 
 def main():
@@ -128,11 +153,10 @@ def main():
     subprocess.run(["cmake", "--build", "build", "-j"],
                        cwd=os.path.join(ROOT, "host"), check=True, stdout=subprocess.DEVNULL)
 
-    # Class names (SoftwareVideoDecoder, ...) need the import cache.
-    if not os.path.isdir(os.path.join(CLIENT_DIR, ".godot")):
-        step("importing Godot project")
-        subprocess.run(["godot", "--headless", "--path", CLIENT_DIR, "--import"],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Class names (SoftwareVideoDecoder, ...) need an up-to-date import cache.
+    step("importing Godot project")
+    subprocess.run(["godot", "--headless", "--path", CLIENT_DIR, "--import"],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     host = start_host()
     client = Proc("client", [
@@ -141,24 +165,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/8 connect, stream and decode 3 monitors")
+    step("1/9 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/8 host killed -> client reconnects to a new host")
+    step("2/9 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/8 host frozen -> client times out, then recovers")
+    step("3/9 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/8 host sockets use TCP keepalive")
+    step("4/9 host sockets use TCP keepalive")
     if shutil.which("ss"):
         out = subprocess.run(["ss", "-tno", "state", "established", "( sport = :19800 )"],
                              capture_output=True, text=True).stdout
@@ -167,7 +191,7 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/8 USB mode: video over the TCP control socket")
+    step("5/9 USB mode: video over the TCP control socket")
     # Same thing a headset on a cable does through `adb reverse`.
     client.stop()
     procs.remove(client)
@@ -181,7 +205,35 @@ def main():
     expect_streaming(usb, 0)
     client_lines = client.lines + usb.lines
 
-    step("6/8 Ctrl+C -> host exits")
+    step("6/9 LAN discovery and PIN pairing")
+    run_godot_test("discovery_test.gd")
+    lan = lan_ip()
+    if lan:
+        usb.stop()
+        procs.remove(usb)
+        mark = host.mark()
+        nopin = Proc("client-nopin", [
+            "godot", "--headless", "--xr-mode", "off", "--path", CLIENT_DIR, "--",
+            "--im2-host=" + lan, "--im2-monitors=0"])
+        procs.append(nopin)
+        nopin.wait_for(r"host refused the connection \(reason 1\)", 20)
+        host.wait_for(r"refused: no PIN", 5, mark)
+        time.sleep(7)  # longer than the reconnect delay
+        if any("Attempting auto-reconnect" in l for l in nopin.lines):
+            fail("client kept retrying after the host asked for a PIN")
+        nopin.stop()
+        procs.remove(nopin)
+        paired = Proc("client-pin", [
+            "godot", "--headless", "--xr-mode", "off", "--path", CLIENT_DIR, "--",
+            "--im2-host=" + lan, "--im2-pin=" + PIN, "--im2-capture",
+            "--im2-monitors=" + ",".join(map(str, MONITORS))])
+        procs.append(paired)
+        expect_streaming(paired, 0)
+        client_lines += nopin.lines + paired.lines
+    else:
+        print("      (PIN over the network skipped: this machine has no LAN address)")
+
+    step("7/9 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
@@ -195,7 +247,7 @@ def main():
         p.stop()
     procs.clear()
 
-    step("7/8 in-VR menu: IP keypad and layout")
+    step("8/9 in-VR menu: keypads, PIN, tabs and layout")
     if shutil.which("xvfb-run"):
         menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
                              "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
@@ -206,14 +258,33 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("8/8 hand tracking and idle controllers")
-    for test in ("hand_input_test.gd", "controller_idle_test.gd"):
-        t = Proc(test, ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
-                        "--path", CLIENT_DIR, "-s", os.path.join(ROOT, "client", "tests", test)])
-        procs.append(t)
-        t.wait_for(r"RESULT fails=0", 60)
-        t.stop()
+    step("9/9 hand tracking, controllers, screens and keyboard")
+    for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd"):
+        run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")
+
+
+def run_godot_test(test):
+    """A headless GDScript check from client/tests that prints RESULT fails=N."""
+    t = Proc(test, ["godot", "--headless", "--xr-mode", "off", "--fixed-fps", "72",
+                    "--path", CLIENT_DIR, "-s", os.path.join(ROOT, "client", "tests", test)])
+    procs.append(t)
+    t.wait_for(r"RESULT fails=0", 60)
+    t.stop()
+    procs.remove(t)
+
+
+def lan_ip():
+    """This machine's LAN address (source of its default route), or None."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 53))  # nothing is sent
+        ip = s.getsockname()[0]
+        return None if ip.startswith("127.") else ip
+    except OSError:
+        return None
+    finally:
+        s.close()
 
 
 if __name__ == "__main__":

@@ -32,28 +32,41 @@ The host application runs on your Windows PC and:
 
 ### VR Client (Godot / OpenXR)
 
-The client runs on VR headsets and:
+The client runs on VR headsets (and on a PC for testing) and:
 
-1. **Initializes XR** — sets up OpenXR stereo rendering
-2. **Connects to host** — TCP handshake + UDP video reception
-3. **Decodes video** — MediaCodec H.264/H.265 decoding
-4. **Renders screens** — floating 3D panels in VR space
-5. **Sends input** — controller pointer and virtual keyboard events
+1. **Finds the PC** — `host_discovery.gd` broadcasts on UDP 19800 and lists
+   the hosts that answer; `main.gd` reconnects to the last PC on launch and
+   follows it if its address changes.
+2. **Pairs and connects** — TCP handshake with the host's PIN (asked once,
+   remembered per PC), UDP video/audio (or everything over TCP on USB).
+3. **Decodes video** — MediaCodec H.264/HEVC/AV1 straight into an
+   ExternalTexture on Android; MJPEG on a worker thread elsewhere.
+4. **Places the screens** — `screen_panel.gd` builds each screen as a flat
+   quad or a real cylinder section (curvature), arranged on an arc around the
+   head; positions persist per monitor and survive stream restarts.
+5. **Takes input** — both controllers (`vr_input.gd`), bare hands
+   (`hand_input.gd`), the VR keyboard (`virtual_keyboard.gd`) and, on the
+   headset, a Bluetooth keyboard (`key_map.gd`).
 
 #### Component Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   main.gd                        │
-│           (scene controller)                     │
-├──────────┬──────────┬────────────┬──────────────┤
-│ Network  │ Video    │ Screen     │ VR Input     │
-│ Client   │ Decoder  │ Panel      │              │
-│          │          │            │              │
-│ TCP/UDP  │ MediaCdc │ PlaneMesh  │ XRController │
-│ protocol │ H264/265 │ Shader     │ Raycast      │
-└──────────┴──────────┴────────────┴──────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                           main.gd                                │
+│  connection · pairing · selection · arrangement · persistence    │
+├───────────┬──────────┬─────────────┬─────────────┬──────────────┤
+│ Network   │ Video    │ Screen      │ Input       │ UI + space   │
+│ Client    │ Decoders │ Panel       │             │              │
+│ + LAN     │ MediaCdc │ flat/curved │ vr_input    │ ui_overlay   │
+│ discovery │ MJPEG    │ LaserDrag   │ hand_input  │ keyboard     │
+│           │          │ shader      │ key_map     │ world (sky)  │
+└───────────┴──────────┴─────────────┴─────────────┴──────────────┘
 ```
+
+`ui_theme.gd` holds the colours and type shared by the menu and keyboard (the
+same tokens as the web page). `laser_drag.gd` is how screens, menu and
+keyboard are moved: the grabbed point stays on the pointer ray and the object
+keeps facing the head.
 
 ## Data Flow
 

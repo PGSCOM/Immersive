@@ -168,10 +168,11 @@ func _process_right_hand_pointer(delta: float) -> void:
 
 	# 2) In-VR QWERTY keyboard, when it is open: it floats in front of the
 	#    panels, so it takes the ray before they do.
-	if main_scene and main_scene.has_method("send_keyboard_pointer") and \
-			main_scene.send_keyboard_pointer(origin, direction, should_press):
+	var kbd_distance: float = main_scene.send_keyboard_pointer(origin, direction, should_press) \
+		if main_scene and main_scene.has_method("send_keyboard_pointer") else -1.0
+	if kbd_distance >= 0.0:
 		_pinch_active = should_press
-		_update_pointer_visual(origin, direction, 0.6, true)
+		_update_pointer_visual(origin, direction, kbd_distance, true)
 		return
 
 	# 3) Streamed monitor panels.
@@ -192,6 +193,8 @@ func _process_right_hand_pointer(delta: float) -> void:
 
 	var uv: Vector2 = hit.get("uv", Vector2(0.5, 0.5))
 	var pixel: Vector2i = panel.uv_to_pixel(uv)
+	if panel.has_method("mark_hovered"):
+		panel.mark_hovered()
 	var monitor_id: int = hit.get("monitor_id", 0)
 
 	if main_scene.has_method("send_mouse_input"):
@@ -351,18 +354,18 @@ func _ensure_pointer_visual() -> void:
 
 	_laser = MeshInstance3D.new()
 	var beam := BoxMesh.new()
-	beam.size = Vector3(0.004, 0.004, 1.0)  # 1 m on Z, scaled per-frame to ray length
+	beam.size = Vector3(0.0024, 0.0024, 1.0)  # 1 m on Z, scaled per-frame to ray length
 	_laser.mesh = beam
-	_laser.material_override = _make_emissive_material(Color(0.25, 0.8, 1.0, 0.75), true)
+	_laser.material_override = _make_emissive_material(Color(0.93, 0.92, 0.88, 0.4), true)
 	_laser.visible = false
 	main_scene.add_child(_laser)
 
 	_cursor = MeshInstance3D.new()
 	var dot := SphereMesh.new()
-	dot.radius = 0.012
-	dot.height = 0.024
+	dot.radius = 0.0065
+	dot.height = 0.013
 	_cursor.mesh = dot
-	_cursor.material_override = _make_emissive_material(Color(0.45, 0.9, 1.0, 1.0), false)
+	_cursor.material_override = _make_emissive_material(Color(0.93, 0.92, 0.88, 1.0), false)
 	_cursor.visible = false
 	main_scene.add_child(_cursor)
 
