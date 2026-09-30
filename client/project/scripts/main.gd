@@ -115,6 +115,19 @@ var _last_pointed_monitor: int = -1
 ## implied by _use_tcp_media(); this lets desktop tests exercise USB mode.
 var _force_tcp_media: bool = false
 
+## Automatic USB: whenever the PC answers through the cable (UsbProbe) the
+## connection moves there, and back to Wi-Fi when the cable goes.
+var _usb_probe: UsbProbe = null
+## The PC's network address, to fall back to when the cable is pulled.
+var _lan_ip: String = ""
+## --im2-usb-port=N: the "cable" is 127.0.0.1:N (tests: a stand-in for adb
+## reverse, and automatic USB on desktop). 0 = host_tcp_port.
+var _usb_port: int = 0
+## The user pressed Disconnect: don't jump back in over the cable.
+var _usb_paused: bool = false
+## Launch: hear from the cable before auto-connecting over Wi-Fi.
+var _connect_after_probe: bool = false
+
 ## Pairing PINs by host ("ip:<addr>" and "name:<pc name>").
 var _pins: Dictionary = {}
 ## Name of the PC we are talking to (from HELLO_ACK or discovery).
@@ -193,9 +206,13 @@ func _ready() -> void:
 			[host_ip, host_tcp_port, str(_debug_capture)])
 		connect_to_host()
 	elif _auto_connect and host_ip.is_valid_ip_address():
-		# Straight back to the PC used last time; the menu opens only if that
-		# does not work out within a few seconds.
-		connect_to_host()
+		# Straight back to the PC used last time (over the cable if one is
+		# plugged in: _on_usb_checked); the menu opens only if that does not
+		# work out within a few seconds.
+		if _usb_auto():
+			_connect_after_probe = true
+		else:
+			connect_to_host()
 		get_tree().create_timer(6.0).timeout.connect(func():
 			if current_state == State.CONNECTING or current_state == State.DISCONNECTED:
 				_show_overlay())
@@ -207,6 +224,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_handle_reconnect(delta)
+	_update_usb_probe()
 	_handle_latency_probe(delta)
 	_handle_stats(delta)
 	_update_foveation_focus()
@@ -283,6 +301,11 @@ func _init_network() -> void:
 	add_child(discovery)
 	discovery.hosts_changed.connect(_on_hosts_changed)
 
+	_usb_probe = UsbProbe.new()
+	_usb_probe.name = "UsbProbe"
+	add_child(_usb_probe)
+	_usb_probe.checked.connect(_on_usb_checked)
+
 ## Look for PCs only while not connected: it is what the menu shows then, and
 ## it lets a reconnect follow a PC whose address changed.
 func _update_discovery() -> void:
@@ -296,6 +319,9 @@ func _update_discovery() -> void:
 func _on_hosts_changed(hosts: Array) -> void:
 	if ui_overlay:
 		ui_overlay.set_discovered_hosts(hosts)
+	for h in hosts:
+		if h.name == _last_host_name and not h.ip.begins_with("127."):
+			_lan_ip = h.ip
 	# The PC we reconnect to got a new address (DHCP): follow it.
 	if _should_reconnect and not _last_host_name.is_empty() and current_state == State.DISCONNECTED:
 		for h in hosts:
@@ -310,21 +336,61 @@ func _on_hosts_changed(hosts: Array) -> void:
 ## that tunnel carries TCP only — so ask for video/audio in-band on TCP.
 ## On desktop, loopback is a host on the same machine and UDP works.
 func _use_tcp_media() -> bool:
-	return _force_tcp_media or (OS.has_feature("android") and host_ip.begins_with("127."))
+	return _force_tcp_media or _on_usb()
+
+## The headset looks for a PC on a USB cable by itself (always on Android).
+func _usb_auto() -> bool:
+	return OS.has_feature("android") or _usb_port > 0
+
+## Talking to (or trying) the PC through the cable.
+func _on_usb() -> bool:
+	return _usb_auto() and host_ip.begins_with("127.")
 
 func connect_to_host() -> void:
 	if current_state != State.DISCONNECTED or host_ip.is_empty():
 		return
 	current_state = State.CONNECTING
+	_usb_paused = false
 	_host_name = _name_for_ip(host_ip)
 	_update_overlay_state()
-	print("[Immersive-2] Connecting to %s:%d..." % [host_ip, host_tcp_port])
-	network_client.connect_to_server(host_ip, host_tcp_port, host_udp_port, _use_tcp_media(),
+	var port := _usb_port if _on_usb() and _usb_port > 0 else host_tcp_port
+	print("[Immersive-2] Connecting to %s:%d..." % [host_ip, port])
+	network_client.connect_to_server(host_ip, port, host_udp_port, _use_tcp_media(),
 		_pin_for_host())
 	_should_reconnect = true
 
+## Probe the cable unless we are on it already or the user disconnected.
+func _update_usb_probe() -> void:
+	if not _usb_probe:
+		return
+	_usb_probe.port = _usb_port if _usb_port > 0 else host_tcp_port
+	_usb_probe.set_enabled(_usb_auto() and not _usb_paused
+		and not (_on_usb() and current_state != State.DISCONNECTED))
+
+func _on_usb_checked(found: bool) -> void:
+	if found and not _usb_paused and not (_on_usb() and current_state != State.DISCONNECTED):
+		print("[Immersive-2] USB: the PC answers through the cable, switching to it")
+		if host_ip.is_valid_ip_address() and not host_ip.begins_with("127."):
+			_lan_ip = host_ip
+		_connect_after_probe = false
+		_switch_to("127.0.0.1")
+	elif _connect_after_probe:
+		_connect_after_probe = false
+		connect_to_host()
+
+## Move the connection to `ip` now. Handled like a dropped connection, so
+## the screens stay where they are and come back with the same monitors.
+func _switch_to(ip: String) -> void:
+	if current_state != State.DISCONNECTED:
+		network_client.disconnect_from_server()
+		_on_disconnected()
+	host_ip = ip
+	_reconnect_timer = 0.0
+	connect_to_host()
+
 func disconnect_from_host() -> void:
 	_should_reconnect = false
+	_usb_paused = true
 	_auto_connect = false
 	_save_config()
 	if network_client:
@@ -640,6 +706,8 @@ func _update_overlay_state() -> void:
 	if ui_overlay:
 		ui_overlay.set_state(current_state as int)
 		ui_overlay.set_host_label(_host_name if not _host_name.is_empty() else host_ip)
+		ui_overlay.set_link("USB" if _use_tcp_media() else
+			("Wi-Fi" if OS.has_feature("android") else ""))
 
 func _update_overlay_monitors() -> void:
 	if ui_overlay:
@@ -791,7 +859,8 @@ func _handle_stats(delta: float) -> void:
 
 func _connection_details(stats: Dictionary) -> Array:
 	var rows := [["Address", "%s:%d" % [host_ip, host_tcp_port]],
-		["Link", "USB cable" if _use_tcp_media() else "Network (video over UDP)"]]
+		["Link", "USB cable" if _use_tcp_media() else
+			("Wi-Fi" if OS.has_feature("android") else "Network") + " (video over UDP)"]]
 	if _latency_ms > 0.0:
 		rows.append(["Delay", "%d ms round trip" % int(round(_latency_ms))])
 	var pics: Array = []
@@ -832,6 +901,8 @@ func _on_handshake_accepted(host_name: String, host_flags: int = 0) -> void:
 	if not host_name.is_empty():
 		_host_name = host_name
 		_last_host_name = host_name
+	if not host_ip.begins_with("127."):
+		_lan_ip = host_ip
 	var pin := int(_pins.get("pending", 0))
 	_pins.erase("pending")
 	if pin > 0:
@@ -884,6 +955,13 @@ func _on_disconnected() -> void:
 	if was_streaming:
 		_remember_layouts()
 	print("[Immersive-2] Disconnected from host")
+	# Cable pulled (or its host gone): straight back to Wi-Fi, and give the
+	# cable a moment before trying it again.
+	if _should_reconnect and _on_usb() and not _lan_ip.is_empty():
+		print("[Immersive-2] USB link lost, back to Wi-Fi at %s" % _lan_ip)
+		host_ip = _lan_ip
+		_reconnect_timer = RECONNECT_DELAY
+		_usb_probe.hold(3000)
 
 func _on_monitor_list(monitors: Array) -> void:
 	available_monitors = monitors
@@ -1528,7 +1606,9 @@ func _save_config() -> void:
 	# Load first: the [test] section is written externally over adb.
 	var cfg := ConfigFile.new()
 	cfg.load(CONFIG_PATH)
-	cfg.set_value("network", "host_ip", host_ip)
+	# The network address, not the cable's loopback: the next launch finds
+	# the cable by itself, and needs the address when there is none.
+	cfg.set_value("network", "host_ip", _lan_ip if _on_usb() and not _lan_ip.is_empty() else host_ip)
 	cfg.set_value("network", "tcp_port", host_tcp_port)
 	cfg.set_value("network", "udp_port", host_udp_port)
 	cfg.set_value("network", "last_host_name", _last_host_name)
@@ -1580,6 +1660,8 @@ func _load_config() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(CONFIG_PATH) == OK:
 		host_ip       = cfg.get_value("network", "host_ip", "")
+		if not host_ip.begins_with("127."):
+			_lan_ip = host_ip
 		host_tcp_port = cfg.get_value("network", "tcp_port", 19800)
 		host_udp_port = cfg.get_value("network", "udp_port", 19801)
 		_last_host_name = cfg.get_value("network", "last_host_name", "")
@@ -1609,8 +1691,9 @@ func _load_config() -> void:
 ## Allow driving the client from adb without a headset:
 ##   am start -n com.immersive2.vrclient/com.godot.game.GodotAppLauncher \
 ##       --esa command_line "--im2-host=192.168.1.34,--im2-capture"
-## Recognised: --im2-host=IP, --im2-port=N, --im2-codec=N, --im2-capture,
+## Recognised: --im2-host=IP, --im2-port=N, --im2-udp-port=N, --im2-codec=N, --im2-capture,
 ## --im2-usb (video/audio over TCP, as over a USB cable),
+## --im2-usb-port=N (the USB tunnel is 127.0.0.1:N: automatic USB on desktop),
 ## --im2-monitors=0,1,2 (monitors to stream once connected),
 ## --im2-pin=NNNNNN (pairing PIN for that host),
 ## --im2-virtual=WxH (ask the host for a virtual screen once connected).
@@ -1621,14 +1704,19 @@ func _apply_cmdline_overrides() -> void:
 	for arg in args:
 		if arg.begins_with("--im2-host="):
 			host_ip = arg.get_slice("=", 1)
+			_lan_ip = "" if host_ip.begins_with("127.") else host_ip
 			_autoconnect_on_start = true
 			_ephemeral = true
 		elif arg.begins_with("--im2-port="):
 			host_tcp_port = int(arg.get_slice("=", 1))
+		elif arg.begins_with("--im2-udp-port="):
+			host_udp_port = int(arg.get_slice("=", 1))
 		elif arg.begins_with("--im2-codec="):
 			stream_codec = _resolve_codec(int(arg.get_slice("=", 1)))
 		elif arg == "--im2-usb":
 			_force_tcp_media = true
+		elif arg.begins_with("--im2-usb-port="):
+			_usb_port = int(arg.get_slice("=", 1))
 		elif arg == "--im2-capture":
 			_debug_capture = true
 		elif arg.begins_with("--im2-monitors="):

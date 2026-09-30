@@ -60,6 +60,7 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, STREAMING }
 var _state: ConnectionState = ConnectionState.DISCONNECTED
 var _visible_overlay := false
 var _host_label := ""
+var _link := ""
 var _host_ip := ""
 var _tcp_port := 19800
 var _udp_port := 19801
@@ -208,6 +209,13 @@ func set_state(state: ConnectionState) -> void:
 ## Name (or address) of the PC the headset talks to, for the status line.
 func set_host_label(label: String) -> void:
 	_host_label = label
+	_refresh_status()
+	_refresh_connect_tab()
+
+## How the headset reaches the PC ("USB", "Wi-Fi", "" = don't say), for the
+## status line.
+func set_link(link: String) -> void:
+	_link = link
 	_refresh_status()
 	_refresh_connect_tab()
 
@@ -940,6 +948,8 @@ func _refresh_connect_tab() -> void:
 	_connect_main.visible = disconnected and not _pin_box.visible
 	_connected_box.visible = not disconnected
 	var who := _host_label if not _host_label.is_empty() else "the PC"
+	if not _link.is_empty():
+		who += " over " + _link
 	match _state:
 		ConnectionState.CONNECTING:
 			_lbl_connected.text = "Connecting to %s…" % who
@@ -1280,6 +1290,8 @@ func _refresh_status() -> void:
 	if not _lbl_status:
 		return
 	var who := _host_label if not _host_label.is_empty() else "the PC"
+	if not _link.is_empty():
+		who += " over " + _link
 	var dot := UiTheme.INK_3
 	var text := ""
 	match _state:
@@ -1297,7 +1309,8 @@ func _refresh_status() -> void:
 				parts.append("%d ms" % int(round(_ping_ms)))
 			if _stats.fps > 0.5:
 				parts.append("%d fps" % int(round(_stats.fps)))
-				parts.append("%.1f Mbps" % _stats.mbps)
+				# Whole Mbps from 10 up: room for a long PC name and the link.
+				parts.append(("%d Mbps" if _stats.mbps >= 10.0 else "%.1f Mbps") % _stats.mbps)
 			text = "  ·  ".join(parts)
 			dot = UiTheme.TALLY
 	_lbl_status.text = text

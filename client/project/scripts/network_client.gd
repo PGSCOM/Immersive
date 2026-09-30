@@ -123,6 +123,9 @@ var _connect_deadline_ms: int = 0
 ## and auto-reconnect never fires. (Not PING: both ends echo PING, so a
 ## client-sent PING would bounce back and forth forever.)
 const HOST_TIMEOUT_MS: int = 10000
+## Over USB the host sends a frame at least every second while streaming (an
+## idle screen is re-sent), so a pulled cable is noticed sooner.
+const USB_TIMEOUT_MS: int = 5000
 var _last_rx_ms: int = 0
 
 ## Throttle for the stale-partial-frame sweep.
@@ -184,10 +187,14 @@ func _process(_delta: float) -> void:
 			if not _connected:
 				_connected = true
 				_last_rx_ms = Time.get_ticks_msec()
+				# Input and ACKs are tiny messages: send each at once rather
+				# than letting Nagle hold it for the previous one's ACK.
+				tcp_client.set_no_delay(true)
 				_on_tcp_connected()
 			_read_tcp_messages()
-			if _connected and Time.get_ticks_msec() - _last_rx_ms > HOST_TIMEOUT_MS:
-				_fail_connection("host not responding for %d s" % (HOST_TIMEOUT_MS / 1000))
+			var timeout_ms := USB_TIMEOUT_MS if _tcp_media else HOST_TIMEOUT_MS
+			if _connected and Time.get_ticks_msec() - _last_rx_ms > timeout_ms:
+				_fail_connection("host not responding for %d s" % (timeout_ms / 1000))
 				return
 
 		StreamPeerTCP.STATUS_CONNECTING:
@@ -236,20 +243,25 @@ func _on_tcp_connected() -> void:
 	if bind_err != OK:
 		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 
-	# HELLO: version, name[32] (shown in the host's log), flags, pairing PIN.
-	var hello := PackedByteArray()
-	hello.resize(38)
-	hello[0] = PROTOCOL_VERSION
-	var model := OS.get_model_name()
-	var name_bytes := (model if model != "GenericDevice" and not model.is_empty() \
-		else "Immersive-2 VR").to_utf8_buffer()
-	for i in range(min(name_bytes.size(), 31)):
-		hello[1 + i] = name_bytes[i]
-	hello[33] = HELLO_FLAG_TCP_MEDIA if _tcp_media else 0
-	hello.encode_u32(34, _pin)
-
-	_send_control_message(MSG_HELLO, hello)
+	tcp_client.put_data(hello_message(_tcp_media, _pin))
 	connected_to_host.emit()
+
+## A whole HELLO message: version, name[32] (shown in the host's log; `note`
+## is appended to it), flags, pairing PIN.
+static func hello_message(tcp_media: bool, pin: int, note: String = "") -> PackedByteArray:
+	var model := OS.get_model_name()
+	var name := model if model != "GenericDevice" and not model.is_empty() else "Immersive-2 VR"
+	var name_bytes := (name + note).to_utf8_buffer()
+	var msg := PackedByteArray()
+	msg.resize(5 + 38)
+	msg[0] = MSG_HELLO
+	msg.encode_u32(1, 38)
+	msg[5] = PROTOCOL_VERSION
+	for i in range(min(name_bytes.size(), 31)):
+		msg[6 + i] = name_bytes[i]
+	msg[5 + 33] = HELLO_FLAG_TCP_MEDIA if tcp_media else 0
+	msg.encode_u32(5 + 34, pin)
+	return msg
 
 ## Select a monitor to stream.
 func select_monitor(monitor_id: int) -> void:

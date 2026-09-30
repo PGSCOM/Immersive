@@ -27,6 +27,7 @@ set(ENCODER_SOURCES
 
 set(NETWORK_SOURCES
     src/network/server.cpp
+    src/usb/adb_reverse.cpp
 )
 
 set(DRIVER_SOURCES

@@ -318,6 +318,22 @@ Artifacts are uploaded as:
 - Verify you're on the same Wi-Fi network (5 GHz recommended)
 - Check the latency indicator — high latency (> 100 ms) may cause dropped frames
 
+### USB: the headset stays on Wi-Fi
+The host's console says what it sees on the cable, once per change:
+- `adb not found`: install Android platform-tools. The host looks on PATH, in
+  `$ANDROID_HOME`/`$ANDROID_SDK_ROOT`/platform-tools, the Android Studio SDK
+  (`~/Android/Sdk`, `~/Library/Android/sdk`, `%LOCALAPPDATA%\Android\Sdk`),
+  `~/.local/bin` and Homebrew's folders.
+- `has not allowed USB debugging`: put the headset on and accept the prompt
+  (tick "Always allow from this computer").
+- `adb may not use <serial>` (Linux): add a udev rule so your user may open the
+  device, e.g. `SUBSYSTEM=="usb", ATTR{idVendor}=="2d40", MODE="0660", GROUP="plugdev"`
+  for Pico (Meta Quest: `2833`) in `/etc/udev/rules.d/51-android.rules`, then replug.
+- `is on the cable and uses it by itself`: the tunnel is up; the app moves to it
+  within a couple of seconds (its menu says "over USB").
+
+`python3 host/tools/usb_test.py` checks the host side against a fake adb.
+
 ### Client: Export fails (missing templates)
 - Install export templates via **Editor → Manage Export Templates** in Godot
 - Or download from https://godotengine.org/download/archive/4.7-stable/

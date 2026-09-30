@@ -153,6 +153,20 @@ func _run() -> void:
 	await _frames(2)
 	check(ov._lbl_status.text.contains("12 ms") and ov._lbl_status.text.contains("60 fps"),
 		"status line shows delay and frame rate -> '%s'" % ov._lbl_status.text)
+	ov.set_link("USB")
+	check(ov._lbl_status.text.begins_with("Live from desk-pc over USB")
+		and ov._lbl_connected.text == "Connected to desk-pc over USB",
+		"status says the link in use -> '%s'" % ov._lbl_status.text)
+	# A Windows-style PC name over Wi-Fi still fits the header unclipped.
+	ov.set_host_label("DESKTOP-4F2K9QX")
+	ov.set_link("Wi-Fi")
+	await _frames(2)
+	var st: Label = ov._lbl_status
+	var text_w := st.get_theme_font("font").get_string_size(st.text, HORIZONTAL_ALIGNMENT_LEFT,
+		-1, st.get_theme_font_size("font_size")).x
+	check(text_w <= st.size.x, "status line fits (%d <= %d px) -> '%s'" % [text_w, st.size.x, st.text])
+	ov.set_host_label("desk-pc")
+	ov.set_link("USB")
 	var rows: Array = ov._monitor_list.find_children("*", "CheckButton", true, false)
 	check(rows.size() == 3 and rows[0].button_pressed and not rows[1].button_pressed,
 		"monitor switches show what streams")

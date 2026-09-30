@@ -135,7 +135,7 @@ Immersive-2/
 ### VR Client
 - Godot Engine 4.7+
 - Meta Quest 2/3/Pro or Pico 4 (developer mode enabled)
-- Wi-Fi connection to the host machine, **or** a USB cable (needs `adb` from Android platform-tools on the host's PATH)
+- Wi-Fi connection to the host machine, **or** a USB cable (needs `adb` from Android platform-tools on the host: PATH, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, or the Android Studio SDK folder)
 
 ### Web Client (Optional)
 - Node.js 20+
@@ -230,9 +230,14 @@ CI builds publish an `immersive2_client_android` artifact containing a debug-sig
   firewall; see [docs/BUILDING.md](docs/BUILDING.md#firewall).
 
 **Over USB instead of Wi-Fi:** enable USB debugging on the headset, plug it into
-the PC and accept the prompt, then press **USB** in the overlay. The host (with
-`adb` on its PATH) keeps an `adb reverse` tunnel armed, so no IP is needed and
-video/audio travel over the cable (in-band on TCP). `--no-usb` turns this off.
+the PC and accept the prompt (tick "Always allow"). That's all: the host keeps an
+`adb reverse` tunnel armed on every authorised headset, and the app finds the
+PC through the cable by itself, at launch or while it streams over Wi-Fi, and
+moves there (the menu's status line says "over USB" / "over Wi-Fi"). Pull the
+cable and it goes straight back to Wi-Fi; plug it in again and it returns.
+Video and audio travel in-band on TCP over the cable. The host finds `adb` on
+its PATH or in the usual Android SDK folders, and its console says when a
+headset is waiting for the USB debugging prompt. `--no-usb` turns this off.
 
 ### 4. Run the Web Client (WebXR)
 

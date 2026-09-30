@@ -10,6 +10,7 @@
 #include "input/input_injector.h"
 #include "driver/idd_manager.h"
 #include "audio/audio_capture.h"
+#include "usb/adb_reverse.h"
 #include "protocol.h"
 
 #include <algorithm>
@@ -85,7 +86,7 @@ namespace {
 
     /// Run a shell command and wait for it. popen, not std::system: POSIX
     /// system() ignores SIGINT while the child runs, so a Ctrl+C landing
-    /// during a periodic `adb reverse` was silently lost.
+    /// meanwhile was silently lost.
     int run_quiet(const std::string& cmd) {
 #ifdef _WIN32
         FILE* p = _popen(cmd.c_str(), "r");
@@ -1112,26 +1113,17 @@ int main(int argc, char* argv[]) {
 
     // --- USB ---
     // A headset on a USB cable reaches the host through `adb reverse`: its
-    // 127.0.0.1:<tcp_port> tunnels to ours. Only TCP can be tunnelled, so the
-    // client asks for video/audio in-band on TCP (HELLO_FLAG_TCP_MEDIA).
-    // The adb server daemon is started HERE, before any socket is opened: a
-    // daemon spawned later would inherit the listening socket and keep the
-    // port bound after the host exits.
-    // ponytail: `adb kill-server` mid-session restarts it with our sockets
-    // inherited; mark them non-inheritable if that ever bites.
-#ifdef _WIN32
-    const char* kNull = " >nul 2>&1";
-#else
-    const char* kNull = " >/dev/null 2>&1";
-#endif
-    const std::string adb_reverse = "adb reverse tcp:" + std::to_string(tcp_port) +
-                                    " tcp:" + std::to_string(tcp_port) + kNull;
-    if (usb_enable && run_quiet(std::string("adb start-server") + kNull) != 0) {
-        std::cout << "[Host] USB: adb not found on PATH; install Android platform-tools\n"
-                  << "       to connect a headset over USB (Wi-Fi still works).\n";
-        usb_enable = false;
+    // 127.0.0.1:<tcp_port> tunnels to ours, and the app finds and prefers
+    // that on its own. Only TCP can be tunnelled, so the client asks for
+    // video/audio in-band on TCP (HELLO_FLAG_TCP_MEDIA). The adb server is
+    // started HERE, before any socket is opened (see start_adb()).
+    const std::string adb = usb_enable ? immersive::start_adb() : "";
+    if (usb_enable && adb.empty()) {
+        std::cout << "[Host] USB: adb not found (PATH, Android SDK folders); install Android\n"
+                  << "       platform-tools to use a USB cable. Wi-Fi still works.\n";
     } else if (usb_enable) {
-        std::cout << "[Host] USB: plug in the headset (USB debugging on) and press USB in the app.\n";
+        std::cout << "[Host] USB: plug in the headset (USB debugging on) and it uses the cable"
+                  << " by itself (" << adb << ")\n";
     }
 
     // Start the network server with configured options
@@ -1222,12 +1214,12 @@ int main(int argc, char* argv[]) {
     std::cout << "\n[Host] Press Ctrl+C to quit.\n\n";
 
     // --- Main loop ---
-    // Streaming happens in per-monitor worker threads; the main thread just
-    // waits for the shutdown signal, and re-arms the USB tunnel every few
-    // seconds: it dies whenever the cable is unplugged or the headset reboots
-    // (re-running it is idempotent, and just fails with no device attached).
-    // ponytail: plain `adb reverse` fails with several Android devices plugged
-    // in; loop over `adb devices` with -s if that ever matters.
+    // Streaming happens in per-monitor worker threads and the USB tunnel is
+    // kept armed on its own thread (adb can be slow); the main thread just
+    // waits for the shutdown signal.
+    std::thread usb_thread;
+    if (!adb.empty())
+        usb_thread = std::thread(immersive::keep_adb_reverse, adb, tcp_port, std::cref(g_running));
     auto reap_graveyard = [&](bool wait) {
         std::lock_guard<std::mutex> lock(graveyard_mutex);
         for (auto it = graveyard.begin(); it != graveyard.end();) {
@@ -1236,12 +1228,7 @@ int main(int argc, char* argv[]) {
             it = graveyard.erase(it);
         }
     };
-    auto next_adb = std::chrono::steady_clock::now();
     while (g_running) {
-        if (usb_enable && std::chrono::steady_clock::now() >= next_adb) {
-            run_quiet(adb_reverse);
-            next_adb = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-        }
         reap_graveyard(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -1259,6 +1246,7 @@ int main(int argc, char* argv[]) {
     if (audio_thread.joinable()) audio_thread.join();
     if (audio_capture)            audio_capture->stop();
     vdm->remove_all_displays();
+    if (usb_thread.joinable()) usb_thread.join();
 
     std::cout << "[Host] Goodbye.\n";
     return 0;
