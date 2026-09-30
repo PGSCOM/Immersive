@@ -17,13 +17,15 @@ func check(cond: bool, what: String) -> void:
 
 func _initialize() -> void:
 	var d = load("res://scripts/host_discovery.gd").new()
+	var port := int(OS.get_environment("IM2_TCP_PORT")) if OS.has_environment("IM2_TCP_PORT") else 19800
+	d.port = port
 	root.add_child(d)
 	d.start()
 	var found: Array = []
 	var deadline := Time.get_ticks_msec() + 8000
 	while found.is_empty() and Time.get_ticks_msec() < deadline:
 		await process_frame
-		found = d.get_hosts().filter(func(h): return h.port == 19800)
+		found = d.get_hosts().filter(func(h): return h.port == port)
 	check(not found.is_empty(), "the host answers the broadcast -> %s" % [d.get_hosts()])
 	if not found.is_empty():
 		var h: Dictionary = found[0]

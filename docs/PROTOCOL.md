@@ -22,8 +22,17 @@ the same machine from receiving video at all.)
 **TCP media mode (USB).** A client that sets `HELLO_FLAG_TCP_MEDIA` in HELLO gets
 no UDP at all: video and audio arrive on the control socket as `VIDEO_FRAME`
 (0x50) and `AUDIO_DATA` (0x51) messages. This is how a headset on a USB cable
-works — the host runs `adb reverse tcp:19800 tcp:19800`, the headset connects to
-its own `127.0.0.1:19800`, and `adb reverse` can only tunnel TCP.
+works — the host runs `adb -s <serial> reverse tcp:19800 tcp:19800` on each
+authorised device, the headset connects to its own `127.0.0.1:19800`, and
+`adb reverse` can only tunnel TCP. The headset looks for the tunnel by itself
+with a plain HELLO to `127.0.0.1` (a HELLO_ACK means a host answers; the
+connection is then closed) and moves its session there.
+
+Over TCP a frame is never lost, only queued, so the host limits each
+monitor to 4 frames sent and not yet acknowledged by `FRAME_ACK` (the client
+ACKs each frame as it reads it) and drops whole frames beyond that; the client
+sees the gap in frame numbers and asks for a keyframe. A client that never
+sends `FRAME_ACK` is not limited.
 
 ---
 

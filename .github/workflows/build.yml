@@ -79,6 +79,9 @@ jobs:
       - name: Settings panel + tray test (private config, private D-Bus)
         run: python3 host/tools/panel_test.py
 
+      - name: USB tunnel test (fake adb)
+        run: python3 host/tools/usb_test.py
+
       - name: Codec test (H.264/HEVC/AV1 decoded by ffmpeg)
         run: python3 host/tools/codec_test.py
 
@@ -117,6 +120,9 @@ jobs:
           sleep 2
           python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
           kill -INT $! && wait $!
+
+      - name: USB tunnel test (fake adb)
+        run: python3 host/tools/usb_test.py
 
       - name: Codec test (VideoToolbox, decoded by ffmpeg)
         run: |

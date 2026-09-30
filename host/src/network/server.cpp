@@ -15,6 +15,7 @@
 #include <vector>
 #include <cstring>
 #include <chrono>
+#include <deque>
 #include <limits>
 #include <cstddef>
 #include <string>
@@ -43,6 +44,7 @@ constexpr int SEND_FLAGS = 0;  // Winsock has no SIGPIPE to suppress
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <fcntl.h>
 using SocketType = int;
 constexpr SocketType INVALID_SOCK = -1;
 constexpr int SHUTDOWN_BOTH = SHUT_RDWR;
@@ -68,6 +70,8 @@ struct ClientState {
     struct sockaddr_in  udp_addr;
     bool                udp_addr_set = false;
     bool                tcp_media = false;  ///< HELLO_FLAG_TCP_MEDIA: video/audio in-band on TCP
+    /// TCP media: frames sent and not yet acknowledged, per monitor.
+    std::unordered_map<uint8_t, std::deque<uint32_t>> tcp_unacked;
     bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
     std::string         name;
     struct FlowState {
@@ -121,6 +125,7 @@ public:
             std::cerr << "[Server] Failed to create TCP socket\n";
             return false;
         }
+        no_inherit(tcp_socket_);
 
         int reuse = 1;
         setsockopt(tcp_socket_, SOL_SOCKET, SO_REUSEADDR,
@@ -151,6 +156,7 @@ public:
             closesocket(tcp_socket_);
             return false;
         }
+        no_inherit(udp_socket_);
 
         // Aumentar el buffer de envío UDP a 2 MB
         int sndbuf = 2 * 1024 * 1024;
@@ -182,6 +188,7 @@ public:
         // Optional — without it clients can still type the IP.
         host_name_ = local_host_name();
         discovery_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (discovery_socket_ != INVALID_SOCK) no_inherit(discovery_socket_);
         struct sockaddr_in disc_addr = {};
         disc_addr.sin_family = AF_INET;
         disc_addr.sin_addr.s_addr = INADDR_ANY;
@@ -325,12 +332,35 @@ public:
             dest = it->second.udp_addr;
 
             if (it->second.tcp_media) {
+                // TCP never loses a frame, it queues it (in adb, the kernels,
+                // the headset), and a queue is latency. The client ACKs each
+                // frame as it reads it: with more than kMaxTcpInFlight of
+                // them unacknowledged, drop whole frames until it catches up.
+                // It sees the gap in frame numbers and asks for a keyframe.
+                // (A client that never ACKs, or has not yet on this stream,
+                // is not limited.)
+                constexpr size_t kMaxTcpInFlight = 4;
+                auto& flow = it->second.flow_state[monitor_id];
+                auto& unacked = it->second.tcp_unacked[monitor_id];
+                if (!flow.ack_seen) unacked.clear();
+                while (!unacked.empty() && unacked.front() <= flow.last_ack) unacked.pop_front();
+                if (unacked.size() >= kMaxTcpInFlight) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - flow.last_log > std::chrono::seconds(2)) {
+                        std::cout << "[Server] Client " << client_id << " monitor "
+                                  << static_cast<int>(monitor_id) << ": " << unacked.size()
+                                  << " frames unacknowledged on TCP, dropping frames\n";
+                        flow.last_log = now;
+                    }
+                    return;
+                }
                 // ponytail: the whole frame is written under clients_mutex_,
                 // serialising every monitor (they share this one socket anyway).
                 // SO_SNDTIMEO bounds the hold; a per-client send lock if it shows.
                 protocol::VideoFrameHeader vfh{monitor_id, frame_number};
                 send_media_locked(it->second, protocol::MessageType::VIDEO_FRAME,
                                   &vfh, sizeof(vfh), data, size);
+                unacked.push_back(frame_number);
                 return;
             }
 
@@ -615,6 +645,7 @@ private:
                 }
             }
 
+            no_inherit(client_sock);
             suppress_sigpipe(client_sock);
             enable_keepalive(client_sock);
             set_recv_timeout(client_sock, kHelloTimeoutS);  // cleared once HELLO passes
@@ -745,6 +776,13 @@ private:
                         // sender (and clients_mutex_) forever: a timed-out
                         // send drops the connection instead.
                         set_send_timeout(sock, 3);
+                        // Each frame goes out at once (no Nagle wait for its
+                        // tail), into a bounded kernel queue.
+                        int on = 1, sndbuf = 1 << 20;
+                        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                                   reinterpret_cast<const char*>(&on), sizeof(on));
+                        setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
+                                   reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
                         std::lock_guard<std::mutex> lock(clients_mutex_);
                         auto it = clients_.find(client_id);
                         if (it != clients_.end()) it->second.tcp_media = true;
@@ -1058,6 +1096,17 @@ private:
 #else
         struct timeval tv{seconds, 0};
         setsockopt(sock, SOL_SOCKET, option, &tv, sizeof(tv));
+#endif
+    }
+
+    /// Keep a socket out of child processes: an adb daemon that
+    /// `adb devices` starts (usb/adb_reverse.cpp) would otherwise hold the
+    /// port open after the host exits.
+    static void no_inherit(SocketType sock) {
+#ifdef _WIN32
+        SetHandleInformation(reinterpret_cast<HANDLE>(sock), HANDLE_FLAG_INHERIT, 0);
+#else
+        fcntl(sock, F_SETFD, FD_CLOEXEC);
 #endif
     }
 

@@ -16,7 +16,9 @@ selected monitors) and STREAM_STOP on deselection, then virtual displays
 (create -> RESULT + new list, stream it, remove -> STREAM_STOP + list, the
 limit of 4). Then a second connection from 127.0.0.1 (trusted, like a USB
 headset) asks for HELLO_FLAG_TCP_MEDIA (the USB / adb-reverse mode) and checks
-every monitor's frames arrive in-band as VIDEO_FRAME messages.
+every monitor's frames arrive in-band as VIDEO_FRAME messages, and that a
+client that stops acknowledging frames gets a few, not a growing queue, and
+live frames again once it acknowledges.
 """
 import os
 import socket
@@ -412,11 +414,48 @@ def check_tcp_media(selection):
                 print(f"[client] FAIL: VIDEO_FRAME mon={mon} is not a JPEG")
                 sys.exit(1)
             counts[mon] = counts.get(mon, 0) + 1
-    s.close()
+            if mon == 2:
+                newest = fnum
     if any(counts.get(m, 0) < 3 for m in selection):
         print(f"[client] FAIL: TCP media frames per monitor: {counts}")
         sys.exit(1)
     print(f"[client] OK: video over TCP (USB mode) for all monitors: {counts}")
+    if 2 in selection:
+        check_tcp_flow_control(s, newest)
+    s.close()
+
+def check_tcp_flow_control(s, newest):
+    """Monitor 2 (the animated stub) acked once, then not: the host keeps at
+    most a few frames in flight and drops whole frames; an ACK resumes it."""
+    def frames_for(seconds, ack=False):
+        got = []
+        end = time.time() + seconds
+        s.settimeout(0.2)
+        while time.time() < end:
+            try:
+                mtype, payload = recv_msg(s)
+            except socket.timeout:
+                continue
+            if mtype == 0x50 and payload[0] == 2:
+                got.append(struct.unpack_from("<I", payload, 1)[0])
+                if ack:  # as the app does, for every frame it reads
+                    s.sendall(struct.pack("<BIBI", 0x30, 5, 2, got[-1]))
+        s.settimeout(5)
+        return got
+    # Ack what has arrived so far, then nothing more.
+    newest = max(frames_for(0.5), default=newest)
+    s.sendall(struct.pack("<BIBI", 0x30, 5, 2, newest))
+    stalled = frames_for(2.0)
+    if len(stalled) > 6:
+        print(f"[client] FAIL: {len(stalled)} frames sent to a client acking nothing: {stalled}")
+        sys.exit(1)
+    s.sendall(struct.pack("<BIBI", 0x30, 5, 2, max(stalled, default=newest)))
+    resumed = frames_for(1.5, ack=True)
+    if len(resumed) < 10 or (stalled and resumed[0] <= max(stalled)):
+        print(f"[client] FAIL: frames after the ACK: {resumed} (before: {stalled})")
+        sys.exit(1)
+    print(f"[client] OK: TCP flow control: {len(stalled)} frames while unacknowledged, "
+          f"{len(resumed)} after the ACK (from #{resumed[0]}, dropped up to #{resumed[0] - 1})")
 
 if __name__ == "__main__":
     main()
