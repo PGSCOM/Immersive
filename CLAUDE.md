@@ -45,7 +45,7 @@ python host/tools/smoke_client.py
 
 Connects from `127.0.0.2` (not `127.0.0.1`) so it can bind the UDP video port locally even while the host holds the wildcard bind on the same port — this is the standard trick for exercising the host on a single machine. It drives the HELLO handshake, MONITOR_LIST, MULTI_MONITOR_SELECT, frame reassembly, per-monitor downscaling, the codec fallback chain, STREAM_STOP, and a second connection in TCP media (USB) mode that must receive every monitor as in-band `VIDEO_FRAME` messages.
 
-`--stub` (any OS; `stub_capture.cpp`) reports **three** fake displays of different resolutions (1920x1080, 1920x1200, 1280x720), so this smoke test genuinely covers the multi-monitor paths — three worker threads, per-monitor encoders and the per-monitor mouse-scaling map — rather than a single stream.
+`--stub` (any OS; `stub_capture.cpp`; monitors 0-1 static like an idle event-driven capture, monitor 2 animated with a bar in its left quarter) reports **three** fake displays of different resolutions (1920x1080, 1920x1200, 1280x720), so this smoke test genuinely covers the multi-monitor paths — three worker threads, per-monitor encoders and the per-monitor mouse-scaling map — rather than a single stream.
 
 ### End-to-end test: real host + real Godot client (no headset required)
 

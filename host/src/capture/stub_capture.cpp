@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -59,14 +60,17 @@ public:
 
     std::unique_ptr<CapturedFrame> acquire_frame(uint32_t timeout_ms) override {
         if (!capturing_) return nullptr;
-        // Like the real event-driven backends (WGC, ScreenCaptureKit,
-        // PipeWire) on a static desktop: one frame, then nothing until the
-        // content changes — which for a solid fill is never. This keeps the
-        // tests on main.cpp's idle path (resend on keyframe request, 1 s
-        // refresh). Sleep out the timeout: returning at once would spin.
+        // Displays 0 and 1 behave like the real event-driven backends (WGC,
+        // ScreenCaptureKit, PipeWire) on a static desktop: one frame, then
+        // nothing, which keeps main.cpp's idle path (resend on keyframe
+        // request, 1 s refresh) under test. Display 2 animates, so inter-frame
+        // codecs also get a continuous run of P-frames. Sleep out the timeout
+        // (or ~30 fps) either way: returning at once would spin.
+        const bool animated = (display_ == 2);
         if (delivered_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1u, timeout_ms)));
-            return nullptr;
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                std::max(1u, animated ? std::min(timeout_ms, 33u) : timeout_ms)));
+            if (!animated) return nullptr;
         }
         delivered_ = true;
 
@@ -79,6 +83,15 @@ public:
         // which monitor it came from (e2e_test.py checks 64 + 48*i).
         frame->pixels.resize(static_cast<size_t>(frame->pitch) * frame->height,
                              static_cast<uint8_t>(64 + display_ * 48));
+        if (animated) {
+            // A white bar sweeping the left quarter: the centre and the
+            // right half, where the tests sample, stay grey.
+            const uint32_t x0 = (tick_++ * 8) % (frame->width / 4 - 16);
+            for (uint32_t y = 0; y < frame->height; ++y) {
+                std::memset(&frame->pixels[static_cast<size_t>(y) * frame->pitch + x0 * 4],
+                            255, 16 * 4);
+            }
+        }
         frame->timestamp_us = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -90,6 +103,7 @@ public:
 private:
     bool    capturing_ = false;
     bool    delivered_ = false;
+    uint32_t tick_     = 0;
     uint8_t display_   = 0;
 };
 
