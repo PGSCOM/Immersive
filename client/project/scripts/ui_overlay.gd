@@ -1285,7 +1285,7 @@ func _build_input_tab(body: VBoxContainer) -> void:
 		_emit_pointer_settings())
 	_slider_ray = r[0]
 	_lbl_ray_value = r[1]
-	var note := _label("Bare hands: a long pinch with the other hand opens the menu. 40° suits the Pico 4.", 17, UiTheme.INK_3)
+	var note := _label("Bare hands: put the controllers down and point. Look at the palm of your other hand and pinch to open this menu. Controller ray: 40° suits the Pico 4.", 17, UiTheme.INK_3)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(note)
 

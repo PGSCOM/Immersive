@@ -66,7 +66,7 @@ var haptics_enabled: bool = true
 var snap_enabled: bool = true
 var lock_layout: bool = false
 ## The bare hand that points, "left" or "right" (read by hand_input.gd); the
-## other one's long pinch opens the menu / keyboard.
+## other one opens the menu (palm to the face, pinch).
 var pointer_hand: String = "right"
 ## Controller ray tilt below the aim pose, degrees (read live by vr_input.gd).
 var ray_angle_deg: float = 40.0
@@ -260,7 +260,7 @@ func _init_world() -> void:
 	world.set_look(look)
 
 ## Bare-hand (controller-free) pointer + pinch input. Inert until the OpenXR
-## runtime reports optical hand tracking, so it's harmless on controller setups.
+## runtime reports a bare hand, so it's harmless on controller setups.
 ## See scripts/hand_input.gd for the gesture mapping (Pico 4 / Quest / SteamVR).
 func _init_hand_input() -> void:
 	var hand_input := preload("res://scripts/hand_input.gd").new()

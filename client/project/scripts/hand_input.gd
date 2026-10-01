@@ -8,50 +8,76 @@
 ##     the keyboard moves it until the pinch opens; reaching out / pulling the
 ##     hand in pushes it away / brings it closer (LaserDrag). A pinch on a
 ##     screen itself always stays a mouse click or drag, however long.
-##   • Other hand — pinch-and-hold (~0.65 s) toggles the menu, longer the keyboard.
+##   • Other hand — turn its palm towards your face and a menu mark shows next
+##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
+##     left to the headset's own gestures.
 ##
-## Platform-agnostic: it consumes the OpenXR XR_EXT_hand_tracking joints exposed
-## by Godot as XRHandTracker, so the same code path serves Pico 4 / Quest (Android)
-## and SteamVR (Windows). It only acts when a hand is *optically* tracked, so it
-## never fights the controller input path (vr_input.gd) — see _is_optical...().
+## The ray is the runtime's own hand ray when it offers one: with
+## XR_EXT_hand_interaction (project setting hand_interaction_profile, profile
+## /interaction_profiles/ext/hand_interaction_ext in openxr_action_map.tres) a
+## bare hand's /user/hand/*/input/aim/pose is the same stabilised ray the
+## headset's system menus use, so it feels locked to the hand. Without it the
+## ray runs from an estimated shoulder through the index knuckle, the shoulder
+## anchored to the body rather than the head (see _shoulder_ray()).
+##
+## Clicks come from the finger joints (XR_EXT_hand_tracking, XRHandTracker), or
+## from the runtime's pinch value when the joints are missing.
+##
+## Which device drives the pointer is the runtime's call: a side is a bare
+## hand while its controller tracker reports the hand interaction profile, or
+## its hand tracker sees a camera-tracked hand (is_hand()). vr_input.gd yields
+## to hands the same way, so picking a controller up hands it the pointer and
+## putting it down (once the headset switches to hands) gives it back.
 ##
 ## Requirements:
-##   • project setting  xr/openxr/extensions/hand_tracking = true  (project.godot)
+##   • project settings  xr/openxr/extensions/hand_tracking and
+##     hand_interaction_profile = true  (project.godot)
 ##   • Pico:  <meta-data android:name="handtracking" android:value="1"/> in the
-##            Android manifest (added by addons/im2_decoder/im2_decoder.gd)
+##            Android manifest (added by addons/im2_decoder/im2_decoder.gd), and
+##            Settings > Interaction > auto switch between hands and controllers
 ##   • Quest: export preset xr_features/hand_tracking >= 1
 
 extends Node
 
+const HAND_PROFILE := "/interaction_profiles/ext/hand_interaction_ext"
 ## Thumb-tip to index-tip distance that starts a pinch, and the wider one that
 ## ends it (the gap keeps a half-closed pinch from flickering).
 const PINCH_PRESS_M := 0.02
 const PINCH_RELEASE_M := 0.035
+## The same for the runtime's 0..1 pinch value, used when the joints are missing.
+const PINCH_VALUE_PRESS := 0.8
+const PINCH_VALUE_RELEASE := 0.5
 ## The pinch must look open this long before it lets go. Pico drops or jolts
 ## the finger tips for a frame or two mid-pinch (the thumb hides behind the
 ## index), which used to release the click after ~30 ms and re-press it.
 const PINCH_RELEASE_HOLD_S := 0.12
-const OVERLAY_TOGGLE_HOLD_S := 0.65
-const KEYBOARD_TOGGLE_HOLD_S := 1.6
-## The ray runs from an estimated shoulder (head + these offsets) through the
-## index knuckle, like the Quest / Pico system pointer. It follows the arm, not
-## the finger, so curling the index into a pinch does not move it.
-const SHOULDER_DOWN_M := 0.18
-const SHOULDER_SIDE_M := 0.17
-## One Euro filter on the ray direction: steady when the hand is still, little
-## lag when it moves fast. Raise MIN_CUTOFF if it feels slow, lower it if jittery.
+## Fallback ray: neck pivot from the eyes (head space, +Z = back) and the
+## shoulder from the neck (torso space, X mirrored for the left hand). The
+## neck pivot does not move when the head turns or nods, and the torso keeps
+## its yaw until the head turns more than TORSO_FOLLOW_RAD (~35°) away, so
+## looking around never swings the ray.
+const NECK_OFFSET := Vector3(0.0, -0.08, 0.10)
+const SHOULDER_OFFSET := Vector3(0.16, -0.14, 0.0)
+const TORSO_FOLLOW_RAD := 0.61
+## One Euro filter on the fallback ray: steady when the hand is still, little
+## lag when it moves fast. Raise MIN_CUTOFF if it feels slow, lower it if
+## jittery. The runtime's aim pose is already filtered and is used as is.
 const FILTER_MIN_CUTOFF := 1.0
 const FILTER_BETA := 4.0
 ## A pinch holds the ray still until the hand moves this far (~1.5°), so a click
 ## never turns into a tiny drag (breaks double-clicks, selects text).
 const CLICK_SLOP_RAD := 0.026
 const MAX_RAY_LENGTH := 8.0
+## Palm menu: the palm faces the eyes within ~53° and the eyes look at it
+## within ~41°; the mark floats this far off the palm; a pinch held longer
+## than MENU_TAP_MAX_S is not a tap (the headset's own long-pinch gestures).
+const PALM_FACING_COS := 0.6
+const PALM_LOOK_COS := 0.75
+const PALM_MARK_OFFSET_M := 0.05
+const MENU_TAP_MAX_S := 0.7
 
 @onready var main_scene: Node = get_node_or_null("/root/Main")
 @onready var xr_origin: XROrigin3D = get_node_or_null("/root/Main/XROrigin3D")
-
-var _right_hand_tracker: XRHandTracker = null
-var _left_hand_tracker: XRHandTracker = null
 
 # Pointing-hand state.
 var _point_left: bool = false       # the left hand points (main.gd pointer_hand)
@@ -68,75 +94,90 @@ var _last_pixel: Vector2i = Vector2i.ZERO
 ## carries the ray for LaserDrag.
 var _grab: Node = null
 var _ray_node: Node3D = null
+## Where the last ray came from ("aim pose" / "shoulder"), for the log.
+var _ray_source: String = ""
 
-# One Euro filter state for the ray direction (ZERO = start over).
+# One Euro filter state for the fallback ray direction (ZERO = start over).
 var _dir_filtered: Vector3 = Vector3.ZERO
 var _dir_rate: Vector3 = Vector3.ZERO
+var _torso_yaw: float = NAN
 
-# Other hand: menu / keyboard toggle.
+# Other hand: palm menu.
 var _menu_pinching: bool = false
-var _open_s: Dictionary = {}  # tracker -> seconds its pinch has looked open
-var _menu_hold_time: float = 0.0
-var _menu_toggle_latched: bool = false
-var _menu_kbd_latched: bool = false
+var _menu_armed: bool = false       # the pinch began on the shown mark
+var _menu_pinch_s: float = 0.0
+var _open_s: Dictionary = {}  # left (bool) -> seconds its pinch has looked open
 
-# Visual pointer (laser beam + cursor dot), created lazily in the world.
+# Visuals, created lazily in the world: laser beam + cursor dot, palm mark.
 var _laser: MeshInstance3D = null
 var _cursor: MeshInstance3D = null
+var _palm_mark: Node3D = null
+var _palm_mark_mat: StandardMaterial3D = null
+
+var _logged: Dictionary = {}  # what was last printed, per key
 
 func _ready() -> void:
 	set_process(true)
 
 func _exit_tree() -> void:
-	for n in [_laser, _cursor, _ray_node]:
+	for n in [_laser, _cursor, _ray_node, _palm_mark]:
 		if is_instance_valid(n):
 			n.queue_free()
 
 func _process(delta: float) -> void:
-	_refresh_trackers()
-
+	_log_runtime()
 	var left_points: bool = main_scene != null and main_scene.get("pointer_hand") == "left"
 	if left_points != _point_left:
 		_let_go()
 		_point_left = left_points
 		_menu_pinching = false
-		_menu_hold_time = 0.0
-	var point_tracker := _left_hand_tracker if _point_left else _right_hand_tracker
-	var menu_tracker := _right_hand_tracker if _point_left else _left_hand_tracker
+		_menu_armed = false
 
-	var tracked := _is_optical_hand_tracking(point_tracker)
+	var tracked := is_hand(_point_left)
 	if tracked != _point_tracked:
 		_point_tracked = tracked
 		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
 	if tracked:
-		_process_pointing_hand(point_tracker, delta)
+		_process_pointing_hand(delta)
 	else:
 		_let_go()
 
-	_process_menu_hand(menu_tracker, delta)
+	_process_menu_hand(not _point_left, delta)
 
-func _refresh_trackers() -> void:
-	if not is_instance_valid(_right_hand_tracker):
-		_right_hand_tracker = XRServer.get_tracker(&"/user/hand_tracker/right") as XRHandTracker
-	if not is_instance_valid(_left_hand_tracker):
-		_left_hand_tracker = XRServer.get_tracker(&"/user/hand_tracker/left") as XRHandTracker
+# ---------------------------------------------------------------------------
+# Who is a hand (shared with vr_input.gd)
+# ---------------------------------------------------------------------------
 
-## True only when the tracker reports *real* (camera-based) hand data — not a
-## controller emulating a hand. This keeps hand input and controller input
-## mutually exclusive without any explicit mode switch.
-func _is_optical_hand_tracking(tracker: XRHandTracker) -> bool:
-	if not is_instance_valid(tracker):
+## The joint tracker of one hand. Looked up every time: Godot replaces it when
+## the OpenXR session restarts, and a kept reference would go silently stale.
+static func hand_tracker(left: bool) -> XRHandTracker:
+	return XRServer.get_tracker(&"/user/hand_tracker/left" if left else &"/user/hand_tracker/right") as XRHandTracker
+
+## The action-system tracker of one hand (controller or bare hand alike).
+static func controller_tracker(left: bool) -> XRPositionalTracker:
+	return XRServer.get_tracker(&"left_hand" if left else &"right_hand") as XRPositionalTracker
+
+## True while this side is a bare hand: the runtime switched it to the hand
+## interaction profile, or its hand tracker sees a camera-tracked hand (not a
+## controller emulating one).
+static func is_hand(left: bool) -> bool:
+	var c := controller_tracker(left)
+	if c and c.profile == HAND_PROFILE:
+		return true
+	var h := hand_tracker(left)
+	if h == null or not h.has_tracking_data:
 		return false
-	if not tracker.get_has_tracking_data():
-		return false
+	return h.hand_tracking_source in [XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED,
+		XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN]
 
-	var source := tracker.get_hand_tracking_source()
-	return source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
-		or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
+static func any_hand() -> bool:
+	return is_hand(false) or is_hand(true)
 
-## The pointing hand went away: drop what it holds, release any click.
+## The pointing hand went away: drop what it holds, release any click. The
+## torso is guessed afresh when it comes back (after a recenter or a turn).
 func _let_go() -> void:
 	_point_pinching = false
+	_torso_yaw = NAN
 	_drop_grab()
 	_end_pinch_if_active()
 	_hide_pointer_visual()
@@ -150,20 +191,18 @@ func _drop_grab() -> void:
 # Pointing hand
 # ---------------------------------------------------------------------------
 
-func _process_pointing_hand(tracker: XRHandTracker, delta: float) -> void:
-	var ray := _compute_hand_ray(tracker)
-	if not ray.get("valid", false):
+func _process_pointing_hand(delta: float) -> void:
+	var ray := _hand_ray(_point_left, delta)
+	if ray.is_empty():
 		_let_go()
 		return
+	var origin: Vector3 = ray.origin
+	var direction: Vector3 = ray.direction
 
-	var origin: Vector3 = ray["origin"]
-	var direction := _filter_direction(ray["direction"], delta)
-
-	var should_press := _is_pinching(tracker, _point_pinching, delta)
+	var should_press := _is_pinching(_point_left, _point_pinching, delta)
 	var pressed_now := should_press and not _point_pinching
 	if should_press != _point_pinching:
-		print("[HandInput] Pinch %s (%d mm)" % ["DOWN" if should_press else "UP",
-			_pinch_distance(tracker) * 1000.0])
+		print("[HandInput] Pinch %s (%s)" % ["DOWN" if should_press else "UP", _pinch_text(_point_left)])
 		if should_press:
 			_press_origin = origin
 			_press_dir = direction
@@ -279,63 +318,150 @@ func _end_pinch_if_active() -> void:
 	_on_overlay = false
 
 # ---------------------------------------------------------------------------
-# Other hand: menu / keyboard toggle
+# Other hand: palm menu
 # ---------------------------------------------------------------------------
 
-func _process_menu_hand(tracker: XRHandTracker, delta: float) -> void:
-	if not _is_optical_hand_tracking(tracker):
-		_menu_pinching = false
-		_menu_hold_time = 0.0
-		_menu_toggle_latched = false
-		_menu_kbd_latched = false
-		return
+## Palm towards the face shows the mark; a short pinch while it shows toggles
+## the menu (on release, so a long hold stays the headset's own gesture).
+func _process_menu_hand(left: bool, delta: float) -> void:
+	var palm := _palm_towards_eyes(hand_tracker(left), left)
+	var was := _menu_pinching
+	var tracked := is_hand(left)
+	_menu_pinching = tracked and _is_pinching(left, _menu_pinching, delta)
+	if _menu_pinching and not was:
+		_menu_armed = not palm.is_empty()
+		_menu_pinch_s = 0.0
+	elif _menu_pinching:
+		_menu_pinch_s += delta
+		if _menu_pinch_s > MENU_TAP_MAX_S:
+			_menu_armed = false
+	elif not tracked:
+		_menu_armed = false  # the hand vanished mid-pinch: not a tap
+	elif was and _menu_armed:
+		_menu_armed = false
+		print("[HandInput] Palm menu tapped")
+		if main_scene and main_scene.has_method("toggle_ui_overlay"):
+			main_scene.toggle_ui_overlay()
+	_show_palm_mark(palm, _menu_pinching and _menu_armed)
 
-	_menu_pinching = _is_pinching(tracker, _menu_pinching, delta)
-	if _menu_pinching:
-		_menu_hold_time += delta
-		if _menu_hold_time >= OVERLAY_TOGGLE_HOLD_S and not _menu_toggle_latched:
-			if main_scene and main_scene.has_method("toggle_ui_overlay"):
-				main_scene.toggle_ui_overlay()
-			_menu_toggle_latched = true
-		# Keep holding and it becomes the keyboard toggle instead — the only way
-		# to reach the in-VR keyboard with no controllers in hand. The overlay
-		# toggle that already fired at 0.65 s is undone first, so a short pinch
-		# means "overlay" and a long one means "keyboard", never both.
-		elif _menu_hold_time >= KEYBOARD_TOGGLE_HOLD_S and not _menu_kbd_latched:
-			if main_scene and main_scene.has_method("toggle_ui_overlay"):
-				main_scene.toggle_ui_overlay()
-			if main_scene and main_scene.has_method("toggle_virtual_keyboard"):
-				main_scene.toggle_virtual_keyboard()
-			_menu_kbd_latched = true
-	else:
-		_menu_hold_time = 0.0
-		_menu_toggle_latched = false
-		_menu_kbd_latched = false
+## {center, normal} of the palm when it faces the eyes and they look at it,
+## else {}. The normal comes from joint positions only (wrist, index and
+## little-finger knuckles), so no joint-axis convention can flip it.
+func _palm_towards_eyes(tracker: XRHandTracker, left: bool) -> Dictionary:
+	var head := get_viewport().get_camera_3d()
+	var wrist := XRHandTracker.HAND_JOINT_WRIST
+	var index := XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL
+	var little := XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_PROXIMAL
+	if head == null or tracker == null or not tracker.has_tracking_data:
+		return {}
+	for j in [wrist, index, little]:
+		if not _joint_has_valid_position(tracker, j):
+			return {}
+	var w := _joint_world_position(tracker, wrist)
+	var i := _joint_world_position(tracker, index)
+	var l := _joint_world_position(tracker, little)
+	var normal := (i - w).cross(l - w).normalized() * (-1.0 if left else 1.0)
+	var center := w.lerp((i + l) * 0.5, 0.5)
+	if _joint_has_valid_position(tracker, XRHandTracker.HAND_JOINT_PALM):
+		center = _joint_world_position(tracker, XRHandTracker.HAND_JOINT_PALM)
+	var to_eyes := (head.global_position - center).normalized()
+	if normal.dot(to_eyes) < PALM_FACING_COS or (-head.global_basis.z).dot(-to_eyes) < PALM_LOOK_COS:
+		return {}
+	return {"center": center, "normal": normal}
+
+## A small three-bar menu mark floating off the palm, facing the eyes; dimmer
+## while the pinch on it is held.
+func _show_palm_mark(palm: Dictionary, pressed: bool) -> void:
+	if palm.is_empty() and not pressed:
+		if is_instance_valid(_palm_mark):
+			_palm_mark.visible = false
+		return
+	if not is_instance_valid(_palm_mark):
+		if not (main_scene is Node3D):
+			return
+		_palm_mark_mat = StandardMaterial3D.new()
+		_palm_mark_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		var bar := CapsuleMesh.new()  # rounded ends, 22 x 2.8 mm
+		bar.radius = 0.0014
+		bar.height = 0.022
+		bar.radial_segments = 8
+		bar.rings = 2
+		_palm_mark = Node3D.new()
+		_palm_mark.name = "PalmMenuMark"
+		for k in 3:
+			var m := MeshInstance3D.new()
+			m.mesh = bar
+			m.material_override = _palm_mark_mat
+			m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			m.rotation.z = PI / 2.0
+			m.position.y = 0.0065 * (k - 1)
+			_palm_mark.add_child(m)
+		main_scene.add_child(_palm_mark)
+	_palm_mark_mat.albedo_color = UiTheme.INK_3 if pressed else UiTheme.INK
+	_palm_mark.visible = true
+	if palm.is_empty():
+		return  # pressed: stays where it was while the hand turns a little
+	var pos: Vector3 = palm.center + palm.normal * PALM_MARK_OFFSET_M
+	var eyes := get_viewport().get_camera_3d().global_position
+	_palm_mark.global_transform = Transform3D(Basis.looking_at(eyes - pos), pos)
 
 # ---------------------------------------------------------------------------
 # Ray / pinch math
 # ---------------------------------------------------------------------------
 
-func _compute_hand_ray(tracker: XRHandTracker) -> Dictionary:
+## {origin, direction} of the pointing ray, or {} when there is none.
+func _hand_ray(left: bool, delta: float) -> Dictionary:
+	var ray := {}
+	var c := controller_tracker(left)
+	var aim: XRPose = c.get_pose(&"aim") if c and c.profile == HAND_PROFILE else null
+	if aim and aim.has_tracking_data:
+		var t := _to_world(aim.transform)
+		ray = {"origin": t.origin, "direction": (-t.basis.z).normalized()}
+		_dir_filtered = Vector3.ZERO
+		_set_ray_source("aim pose")
+	else:
+		ray = _shoulder_ray(hand_tracker(left), left)
+		if not ray.is_empty():
+			ray.direction = _filter_direction(ray.direction, delta)
+			_set_ray_source("shoulder")
+	return ray
+
+func _set_ray_source(source: String) -> void:
+	if source != _ray_source:
+		_ray_source = source
+		print("[HandInput] Ray from the %s" % source)
+
+## Fallback ray from the estimated shoulder through the index knuckle. It
+## follows the arm, not the finger, so curling the index into a pinch does
+## not move it; and the shoulder hangs off a neck pivot and a lazy torso yaw,
+## so turning or tilting the head does not move it either.
+func _shoulder_ray(tracker: XRHandTracker, left: bool) -> Dictionary:
 	var knuckle_joint := XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL
 	var head := get_viewport().get_camera_3d()
 	if head == null or not _joint_has_valid_position(tracker, knuckle_joint):
-		return {"valid": false}
-
+		return {}
 	var knuckle := _joint_world_position(tracker, knuckle_joint)
-	var right := head.global_basis.x * (-1.0 if _point_left else 1.0)  # the pointing side
-	right.y = 0.0
-	var shoulder := head.global_position + Vector3.DOWN * SHOULDER_DOWN_M \
-		+ right.normalized() * SHOULDER_SIDE_M
+	var head_basis := head.global_basis.orthonormalized()
+	var neck := head.global_position + head_basis * NECK_OFFSET
+	var side := Vector3(-1.0 if left else 1.0, 1.0, 1.0)
+	var shoulder := neck + Basis(Vector3.UP, _update_torso_yaw(head_basis)) * (SHOULDER_OFFSET * side)
 	var direction := knuckle - shoulder
 	if direction.length() < 0.01:
-		return {"valid": false}
+		return {}
+	return {"origin": knuckle, "direction": direction.normalized()}
 
-	return {
-		"valid": true,
-		"origin": knuckle,
-		"direction": direction.normalized()
-	}
+## The body's yaw, dragged along only by head turns past TORSO_FOLLOW_RAD.
+func _update_torso_yaw(head_basis: Basis) -> float:
+	var forward := -head_basis.z
+	forward.y = 0.0
+	if forward.length() > 0.3:  # not looking straight up or down
+		var yaw := atan2(-forward.x, -forward.z)
+		if is_nan(_torso_yaw):
+			_torso_yaw = yaw
+		var d := angle_difference(_torso_yaw, yaw)
+		if absf(d) > TORSO_FOLLOW_RAD:
+			_torso_yaw = wrapf(_torso_yaw + d - signf(d) * TORSO_FOLLOW_RAD, -PI, PI)
+	return 0.0 if is_nan(_torso_yaw) else _torso_yaw
 
 ## One Euro filter (Casiez et al. 2012) on the ray direction: the cutoff rises
 ## with speed, so slow aiming is smoothed hard and fast sweeps barely lag.
@@ -352,17 +478,21 @@ func _filter_direction(direction: Vector3, delta: float) -> Vector3:
 static func _euro_alpha(cutoff: float, delta: float) -> float:
 	return 1.0 / (1.0 + 1.0 / (TAU * cutoff * delta))
 
-## Thumb and index tips together, with hysteresis on `was_pinching` and a
-## short hold before letting go (see PINCH_RELEASE_HOLD_S).
-func _is_pinching(tracker: XRHandTracker, was_pinching: bool, delta: float) -> bool:
-	var dist := _pinch_distance(tracker)
+## Thumb and index tips together (or the runtime's pinch value when the tips
+## are not tracked), with hysteresis on `was_pinching` and a short hold before
+## letting go (see PINCH_RELEASE_HOLD_S).
+func _is_pinching(left: bool, was_pinching: bool, delta: float) -> bool:
+	var dist := _pinch_distance(hand_tracker(left))
 	if dist < 0.0:
-		return was_pinching  # tips not tracked this frame: keep what we had
+		var value := _pinch_value(left)
+		if value < 0.0:
+			return was_pinching  # nothing tracked this frame: keep what we had
+		dist = 0.0 if value >= (PINCH_VALUE_RELEASE if was_pinching else PINCH_VALUE_PRESS) else 1.0
 	if dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M):
-		_open_s[tracker] = 0.0
+		_open_s[left] = 0.0
 		return true
-	_open_s[tracker] = _open_s.get(tracker, 0.0) + delta
-	return was_pinching and _open_s[tracker] < PINCH_RELEASE_HOLD_S
+	_open_s[left] = _open_s.get(left, 0.0) + delta
+	return was_pinching and _open_s[left] < PINCH_RELEASE_HOLD_S
 
 ## Thumb-tip to index-tip distance in metres, or -1 when either is not tracked.
 func _pinch_distance(tracker: XRHandTracker) -> float:
@@ -373,17 +503,55 @@ func _pinch_distance(tracker: XRHandTracker) -> float:
 	return tracker.get_hand_joint_transform(thumb).origin.distance_to(
 		tracker.get_hand_joint_transform(index).origin)
 
+## The runtime's pinch (0..1, the "pinch" action) on a bare hand, else -1.
+func _pinch_value(left: bool) -> float:
+	var c := controller_tracker(left)
+	if c == null or c.profile != HAND_PROFILE:
+		return -1.0
+	var v = c.get_input(&"pinch")
+	return float(v) if v != null else -1.0
+
+func _pinch_text(left: bool) -> String:
+	var dist := _pinch_distance(hand_tracker(left))
+	return "%d mm" % (dist * 1000.0) if dist >= 0.0 else "runtime %.2f" % _pinch_value(left)
+
 func _joint_has_valid_position(tracker: XRHandTracker, joint: int) -> bool:
-	if not is_instance_valid(tracker):
+	if tracker == null or not tracker.has_tracking_data:
 		return false
 	var flags: int = tracker.get_hand_joint_flags(joint)
 	return (flags & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) != 0
 
 func _joint_world_position(tracker: XRHandTracker, joint: int) -> Vector3:
-	var local_joint := tracker.get_hand_joint_transform(joint).origin
-	if xr_origin:
-		return xr_origin.global_transform * local_joint
-	return local_joint
+	return _to_world(tracker.get_hand_joint_transform(joint)).origin
+
+## Tracking space (relative to XROrigin3D) to world.
+func _to_world(t: Transform3D) -> Transform3D:
+	return xr_origin.global_transform * t if xr_origin else t
+
+# ---------------------------------------------------------------------------
+# Logging: what the runtime reports, printed when it changes (adb logcat -s godot)
+# ---------------------------------------------------------------------------
+
+func _log_runtime() -> void:
+	var xr := XRServer.find_interface("OpenXR")
+	if xr and xr.is_initialized():
+		_log_once("support", "[HandInput] OpenXR hand tracking %s, hand interaction profile %s" % [
+			xr.is_hand_tracking_supported(), xr.is_hand_interaction_supported()])
+	for left in [true, false]:
+		var c := controller_tracker(left)
+		var h := hand_tracker(left)
+		var aim: XRPose = c.get_pose(&"aim") if c else null
+		_log_once(left, "[HandInput] %s: profile %s, aim %s, joints %s (source %d)" % [
+			"left" if left else "right",
+			c.profile if c else "-",
+			"tracked" if aim and aim.has_tracking_data else "-",
+			"tracked" if h and h.has_tracking_data else ("none" if h == null else "-"),
+			h.hand_tracking_source if h else -1])
+
+func _log_once(key: Variant, line: String) -> void:
+	if _logged.get(key) != line:
+		_logged[key] = line
+		print(line)
 
 # ---------------------------------------------------------------------------
 # Visual pointer (laser beam + cursor dot)

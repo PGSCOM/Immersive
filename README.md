@@ -298,7 +298,7 @@ holds the pointer.
 | A / X | Show / hide the VR keyboard |
 | B / Y | Show / hide the menu |
 | Right hand pinch (no controller) | Pointer click/drag via hand tracking |
-| Left hand pinch, short / long hold | Toggle the menu / the keyboard |
+| Left palm to your face, then pinch | Toggle the menu (its Keyboard button opens the keyboard) |
 
 The VR keyboard is a full US layout (Esc, Tab, symbols, arrows, Ctrl, Alt,
 Win); Shift, Ctrl, Alt and Win latch for the next key, and held keys repeat.
