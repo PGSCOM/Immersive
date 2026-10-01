@@ -1020,7 +1020,8 @@ func _on_monitor_list(monitors: Array) -> void:
 		wanted = _workspace_monitor_ids.duplicate()
 	var ids: Array = monitors.map(func(m): return int(m.id))
 	wanted = wanted.filter(func(id): return ids.has(int(id))).map(func(id): return int(id))
-	if wanted.is_empty() and not ids.is_empty():
+	# (Not mid 1:1 resize: the virtual screen is about to come back.)
+	if wanted.is_empty() and not ids.is_empty() and _match.is_empty():
 		wanted = [ids[0]]
 	active_monitor_ids = wanted.slice(0, MAX_SCREENS)
 
