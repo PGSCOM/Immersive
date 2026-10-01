@@ -244,9 +244,15 @@ def main():
 
     step("4/11 host sockets use TCP keepalive")
     if shutil.which("ss"):
-        out = subprocess.run(["ss", "-tno", "state", "established", f"( sport = :{TCP_PORT} )"],
-                             capture_output=True, text=True).stdout
-        if "keepalive" not in out:
+        # ss shows one timer: while a control message waits for its ACK that
+        # is the retransmit timer ("on"), so look a few times.
+        for _ in range(20):
+            out = subprocess.run(["ss", "-tno", "state", "established", f"( sport = :{TCP_PORT} )"],
+                                 capture_output=True, text=True).stdout
+            if "keepalive" in out:
+                break
+            time.sleep(0.1)
+        else:
             fail(f"no keepalive timer on the host's client socket:\n{out}")
     else:
         print("      (skipped: `ss` not available)")

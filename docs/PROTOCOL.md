@@ -434,9 +434,9 @@ not throttled. Losing ACKs never stops the stream.
 ### `0x31` REQUEST_KEYFRAME — Client → Host
 
 Asks the host to encode an IDR for one monitor. Used by an inter-frame codec
-(H.264/HEVC/AV1) to recover the decode chain after packet loss instead of
-waiting for the host's periodic keyframe. No-op for MJPEG, where every frame is
-already independently decodable.
+(H.264/HEVC/AV1) to recover the decode chain after packet loss: the host sends
+no periodic keyframe, so a client that sees a gap in frame numbers asks for one.
+No-op for MJPEG, where every frame is already independently decodable.
 
 ```
  0         1
