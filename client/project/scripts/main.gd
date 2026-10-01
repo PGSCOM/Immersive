@@ -20,6 +20,8 @@ const WORKSPACE_PATH := "user://immersive2_workspace.json"
 const ARC_RADIUS := 1.25
 const ARC_GAP_M := 0.06
 const EYE_DROP_M := 0.08
+const SNAP_DIST_M := 0.10       ## Release this close to a neighbour's side edge to snap to it
+const SNAP_DEPTH_M := 0.30      ## ...if it is about as far from the head as that neighbour
 ## A restored layout further than this off the gaze is swung back in front.
 const RESTORE_MAX_YAW_DEG := 60.0
 const CODEC_NAMES := {0: "H.264", 1: "HEVC", 2: "MJPEG", 3: "AV1"}
@@ -55,6 +57,9 @@ var compositor_layers: bool = false
 var control_enabled: bool = true
 ## Controllers tick on clicks and grabs (read by vr_input.gd).
 var haptics_enabled: bool = true
+## Layout: release next to a screen to snap beside it; lock = screens cannot be moved.
+var snap_enabled: bool = true
+var lock_layout: bool = false
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
@@ -178,6 +183,8 @@ var _layouts: Dictionary = {}
 var _workspace_monitor_ids: Array = []
 ## Layouts loaded from disk have not been checked against the head yet.
 var _layouts_from_disk: bool = false
+## Monitor ids of the screens that move together (saved with the workspace).
+var _linked: Dictionary = {}
 var _save_timer: Timer
 
 # ---------------------------------------------------------------------------
@@ -531,7 +538,7 @@ func stop_ui_drag() -> void:
 
 ## Head position and level forward direction.
 func _head() -> Array:
-	var cam := get_viewport().get_camera_3d()
+	var cam := get_viewport().get_camera_3d() if is_inside_tree() else null
 	var pos := cam.global_position if cam else Vector3(0, 1.6, 0)
 	var fwd := -cam.global_basis.z if cam else Vector3.FORWARD
 	fwd.y = 0.0
@@ -625,6 +632,61 @@ func _place_new_panel(panel: MeshInstance3D) -> void:
 	at.y = rightmost.global_position.y
 	panel.place_facing(at, Vector3(pos.x, at.y + EYE_DROP_M, pos.z))
 
+func _is_linked(panel: Node3D) -> bool:
+	return _linked.get(int(panel.get_meta("monitor_id", -1)), false)
+
+## The OTHER screens that move rigidly with `panel` (empty: it moves alone).
+func drag_group_for(panel: Node3D) -> Array:
+	if not _is_linked(panel):
+		return []
+	return _live_panels().filter(func(p): return p != panel and _is_linked(p))
+
+## False while the layout is locked (the menu and keyboard still move).
+func can_move_panel(_panel: Node3D) -> bool:
+	return not lock_layout
+
+## A screen grab ended: snap the screen (and its linked block) beside the
+## neighbour whose side edge it was released next to. Called before
+## on_layout_changed().
+func on_panel_drag_ended(panel: Node3D) -> void:
+	if not snap_enabled or not is_instance_valid(panel):
+		return
+	var group := drag_group_for(panel)
+	var head_pos: Vector3 = _head()[0]
+	var d: Vector3 = panel.global_position - head_pos
+	d.y = 0.0
+	var best: Node3D = null
+	var best_err := SNAP_DIST_M
+	var best_side := 0.0
+	var best_want := 0.0
+	for n in _live_panels():
+		if n == panel or group.has(n):
+			continue
+		var dn: Vector3 = n.global_position - head_pos
+		dn.y = 0.0
+		if dn.length() < 0.3 or d.length() < 0.3 or absf(d.length() - dn.length()) > SNAP_DEPTH_M \
+				or absf(panel.global_position.y - n.global_position.y) > 0.35:
+			continue
+		var ang := dn.signed_angle_to(d, Vector3.DOWN)  # + = panel is to the right of n
+		var want: float = n.panel_width / 2.0 + ARC_GAP_M + panel.panel_width / 2.0
+		var err := absf(absf(ang) * dn.length() - want)
+		if err <= best_err:
+			best = n
+			best_err = err
+			best_side = signf(ang)
+			best_want = want
+	if not best:
+		return
+	var dir: Vector3 = best.global_position - head_pos
+	dir.y = 0.0
+	var dist := dir.length()
+	dir = Basis(Vector3.DOWN, best_side * best_want / dist) * dir.normalized()
+	var old := panel.global_transform
+	panel.place_facing(Vector3(head_pos.x, best.global_position.y, head_pos.z) + dir * dist, head_pos)
+	var moved := panel.global_transform * old.inverse()
+	for g in group:
+		g.global_transform = moved * g.global_transform
+
 ## Called by vr_input.gd when a grab ends: the layout is now the user's, so
 ## new screens no longer re-arrange the others.
 func on_layout_changed() -> void:
@@ -669,6 +731,15 @@ func _init_ui_overlay() -> void:
 	ui_overlay.haptics_toggled.connect(func(on: bool):
 		haptics_enabled = on
 		_save_config())
+	ui_overlay.screen_link_changed.connect(func(mid: int, linked: bool):
+		_linked[mid] = linked
+		_schedule_save())
+	ui_overlay.snap_toggled.connect(func(on: bool):
+		snap_enabled = on
+		_save_config())
+	ui_overlay.lock_toggled.connect(func(on: bool):
+		lock_layout = on
+		_save_config())
 	ui_overlay.compositor_layers_toggled.connect(func(on: bool):
 		compositor_layers = on
 		_apply_visual_settings_to_all_panels()
@@ -680,6 +751,8 @@ func _init_ui_overlay() -> void:
 	ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
 		stream_jpeg_quality, stream_res_percent, stream_fps)
 	ui_overlay.set_input_settings(control_enabled, haptics_enabled)
+	ui_overlay.set_layout_options(snap_enabled, lock_layout)
+	ui_overlay.set_linked_monitors(_linked.keys().filter(func(k): return _linked[k]))
 	ui_overlay.set_compositor_layers(compositor_layers, true)
 
 func _show_overlay() -> void:
@@ -1088,8 +1161,12 @@ func _layout_for(monitor_id: int) -> Dictionary:
 		var head := _head()
 		var centroid := Vector3.ZERO
 		var n := 0
-		for l in _layouts.values():
-			var p: Array = l.get("position", [])
+		# Only the screens of the saved workspace: layouts of monitors that are
+		# not shown any more must not drag the centroid around.
+		for mid in _layouts:
+			if not _workspace_monitor_ids.is_empty() and not _workspace_monitor_ids.has(mid):
+				continue
+			var p: Array = _layouts[mid].get("position", [])
 			if p.size() == 3:
 				centroid += Vector3(p[0], p[1], p[2])
 				n += 1
@@ -1576,7 +1653,8 @@ func save_workspace_layout() -> void:
 	var panels := {}
 	for mid in _layouts:
 		panels[str(mid)] = _layouts[mid]
-	var payload := {"version": 2, "monitor_ids": active_monitor_ids, "panels": panels}
+	var linked: Array = _linked.keys().filter(func(k): return _linked[k])
+	var payload := {"version": 3, "monitor_ids": active_monitor_ids, "panels": panels, "linked": linked}
 	var file := FileAccess.open(WORKSPACE_PATH, FileAccess.WRITE)
 	if not file:
 		push_error("[Immersive-2] Failed to open workspace file for writing")
@@ -1591,6 +1669,7 @@ func restore_workspace_layout() -> void:
 func _load_workspace() -> void:
 	_layouts.clear()
 	_workspace_monitor_ids.clear()
+	_linked.clear()
 	if not FileAccess.file_exists(WORKSPACE_PATH):
 		return
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(WORKSPACE_PATH))
@@ -1599,6 +1678,8 @@ func _load_workspace() -> void:
 	# JSON numbers come back as floats: 1.0 != 1 for Array.has().
 	for id in parsed.get("monitor_ids", []):
 		_workspace_monitor_ids.append(int(id))
+	for id in parsed.get("linked", []):  # version 3
+		_linked[int(id)] = true
 	var panels = parsed.get("panels", {})
 	if typeof(panels) == TYPE_DICTIONARY:  # version 2
 		for key in panels:
@@ -1666,6 +1747,8 @@ func _save_config() -> void:
 	cfg.set_value("display", "compositor_layers", compositor_layers)
 	cfg.set_value("input", "control", control_enabled)
 	cfg.set_value("input", "haptics", haptics_enabled)
+	cfg.set_value("layout", "snap", snap_enabled)
+	cfg.set_value("layout", "lock", lock_layout)
 	cfg.set_value("stream", "codec", stream_codec)
 	cfg.set_value("stream", "bitrate_kbps", stream_bitrate_kbps)
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
@@ -1716,6 +1799,8 @@ func _load_config() -> void:
 		compositor_layers = cfg.get_value("display", "compositor_layers", false)
 		control_enabled = cfg.get_value("input", "control", true)
 		haptics_enabled = cfg.get_value("input", "haptics", true)
+		snap_enabled = cfg.get_value("layout", "snap", true)
+		lock_layout = cfg.get_value("layout", "lock", false)
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)

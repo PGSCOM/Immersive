@@ -36,6 +36,9 @@ signal virtual_screen_match_requested(monitor_id: int)
 ## Pointer and keyboards drive the PC (off = look only).
 signal control_toggled(enabled: bool)
 signal haptics_toggled(enabled: bool)
+signal screen_link_changed(monitor_id: int, linked: bool)
+signal snap_toggled(enabled: bool)
+signal lock_toggled(enabled: bool)
 signal compositor_layers_toggled(enabled: bool)
 
 # ---------------------------------------------------------------------------
@@ -71,6 +74,9 @@ var _notice := ""
 var _discovered: Array = []
 var _available_monitors: Array = []
 var _active_monitor_ids: Array = []
+var _linked_ids: Array = []  ## screens that move together
+var _snap_enabled := true
+var _lock_enabled := false
 var _curved_enabled := true
 var _curvature_amount := 0.5
 var _look := "night"
@@ -130,6 +136,8 @@ var _monitor_list: VBoxContainer
 var _btn_arrange: Button
 var _btn_recenter: Button
 var _btn_keyboard: Button
+var _chk_snap: CheckButton
+var _chk_lock: CheckButton
 var _virtual_row: HBoxContainer
 var _btn_sharp: Button
 var _slider_curvature: HSlider
@@ -306,6 +314,17 @@ func set_monitor_list(monitors: Array) -> void:
 func set_active_monitors(ids: Array) -> void:
 	_active_monitor_ids = ids.duplicate()
 	_rebuild_monitor_list()
+
+func set_linked_monitors(ids: Array) -> void:
+	_linked_ids = ids.duplicate()
+	_rebuild_monitor_list()
+
+func set_layout_options(snap: bool, lock: bool) -> void:
+	_snap_enabled = snap
+	_lock_enabled = lock
+	if _chk_snap:
+		_chk_snap.set_pressed_no_signal(snap)
+		_chk_lock.set_pressed_no_signal(lock)
 
 func set_screen_curvature(enabled: bool, amount: float) -> void:
 	_curved_enabled = enabled
@@ -1072,9 +1091,26 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 		b.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 		_virtual_row.add_child(b)
 
-	var tip := _label("Grip a screen to move it; the stick then sets its distance and size.", 17, UiTheme.INK_3)
-	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	body.add_child(tip)
+	var switches := _hbox(10)
+	body.add_child(switches)
+	_chk_snap = CheckButton.new()
+	_chk_snap.text = "Snap screens together"
+	_chk_snap.focus_mode = Control.FOCUS_NONE
+	_chk_snap.button_pressed = _snap_enabled
+	_chk_snap.toggled.connect(func(on):
+		_snap_enabled = on
+		snap_toggled.emit(on))
+	_chk_snap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	switches.add_child(_chk_snap)
+	_chk_lock = CheckButton.new()
+	_chk_lock.text = "Lock screens in place"
+	_chk_lock.focus_mode = Control.FOCUS_NONE
+	_chk_lock.button_pressed = _lock_enabled
+	_chk_lock.toggled.connect(func(on):
+		_lock_enabled = on
+		lock_toggled.emit(on))
+	_chk_lock.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	switches.add_child(_chk_lock)
 
 	var sp := Control.new()
 	sp.custom_minimum_size.y = 4
@@ -1132,6 +1168,21 @@ func _rebuild_monitor_list() -> void:
 		var line := _hbox(8)
 		line.add_child(row)
 		_monitor_list.add_child(line)
+		# "Together": linked screens move as one block when grabbed.
+		var together := CheckButton.new()
+		together.text = "Move together"
+		together.focus_mode = Control.FOCUS_NONE
+		together.custom_minimum_size.x = 220
+		together.button_pressed = _linked_ids.has(mid)
+		together.disabled = not on
+		together.modulate.a = 1.0 if on else 0.35
+		together.toggled.connect(func(l):
+			if l:
+				_linked_ids.append(mid)
+			else:
+				_linked_ids.erase(mid)
+			screen_link_changed.emit(mid, l))
+		line.add_child(together)
 		if not any_virtual:
 			continue
 		# Every row keeps the same trailing slot, so the switches line up;
