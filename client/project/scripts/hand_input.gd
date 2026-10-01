@@ -1,10 +1,14 @@
 ## Hand-tracking input for Immersive-2 (Pico 4 + SteamVR + Quest).
 ##
 ## Lets the user drive the virtual desktop with bare hands — no controllers:
-##   • Right hand — point with the arm; pinch (thumb + index) = left click,
-##     hold-and-move = click-drag. Works on both the streamed monitor panels and
-##     the in-VR overlay menu, with a visible laser + cursor for aiming feedback.
-##   • Left hand  — pinch-and-hold (~0.65 s) toggles the overlay menu.
+##   • Pointing hand (main.gd's pointer_hand, right by default) — point with
+##     the arm; pinch (thumb + index) = left click, hold-and-move = click-drag,
+##     on the screens, the menu and the keyboard, whichever is nearest along
+##     the ray (main.gd::pick). A pinch on the bar under a screen, the menu or
+##     the keyboard moves it until the pinch opens; reaching out / pulling the
+##     hand in pushes it away / brings it closer (LaserDrag). A pinch on a
+##     screen itself always stays a mouse click or drag, however long.
+##   • Other hand — pinch-and-hold (~0.65 s) toggles the menu, longer the keyboard.
 ##
 ## Platform-agnostic: it consumes the OpenXR XR_EXT_hand_tracking joints exposed
 ## by Godot as XRHandTracker, so the same code path serves Pico 4 / Quest (Android)
@@ -49,27 +53,32 @@ const MAX_RAY_LENGTH := 8.0
 var _right_hand_tracker: XRHandTracker = null
 var _left_hand_tracker: XRHandTracker = null
 
-# Right-hand pointer state.
+# Pointing-hand state.
+var _point_left: bool = false       # the left hand points (main.gd pointer_hand)
 var _pinch_active: bool = false     # button held down on a target
-var _right_pinching: bool = false   # fingers pinched (with hysteresis)
-var _right_tracked: bool = false
+var _point_pinching: bool = false   # fingers pinched (with hysteresis)
+var _point_tracked: bool = false
 var _press_origin: Vector3 = Vector3.ZERO
 var _press_dir: Vector3 = Vector3.FORWARD
 var _dragging: bool = false
 var _on_overlay: bool = false
 var _last_monitor_id: int = 0
 var _last_pixel: Vector2i = Vector2i.ZERO
+## Screen, menu or keyboard moved by a pinch on its bar, and the node that
+## carries the ray for LaserDrag.
+var _grab: Node = null
+var _ray_node: Node3D = null
 
 # One Euro filter state for the ray direction (ZERO = start over).
 var _dir_filtered: Vector3 = Vector3.ZERO
 var _dir_rate: Vector3 = Vector3.ZERO
 
-# Left-hand overlay-toggle state.
-var _left_pinching: bool = false
+# Other hand: menu / keyboard toggle.
+var _menu_pinching: bool = false
 var _open_s: Dictionary = {}  # tracker -> seconds its pinch has looked open
-var _left_hold_time: float = 0.0
-var _left_toggle_latched: bool = false
-var _left_kbd_latched: bool = false
+var _menu_hold_time: float = 0.0
+var _menu_toggle_latched: bool = false
+var _menu_kbd_latched: bool = false
 
 # Visual pointer (laser beam + cursor dot), created lazily in the world.
 var _laser: MeshInstance3D = null
@@ -79,26 +88,32 @@ func _ready() -> void:
 	set_process(true)
 
 func _exit_tree() -> void:
-	if is_instance_valid(_laser):
-		_laser.queue_free()
-	if is_instance_valid(_cursor):
-		_cursor.queue_free()
+	for n in [_laser, _cursor, _ray_node]:
+		if is_instance_valid(n):
+			n.queue_free()
 
 func _process(delta: float) -> void:
 	_refresh_trackers()
 
-	var tracked := _is_optical_hand_tracking(_right_hand_tracker)
-	if tracked != _right_tracked:
-		_right_tracked = tracked
-		print("[HandInput] Right hand %s" % ["tracked" if tracked else "lost"])
-	if tracked:
-		_process_right_hand_pointer(delta)
-	else:
-		_right_pinching = false
-		_end_pinch_if_active()
-		_hide_pointer_visual()
+	var left_points: bool = main_scene != null and main_scene.get("pointer_hand") == "left"
+	if left_points != _point_left:
+		_let_go()
+		_point_left = left_points
+		_menu_pinching = false
+		_menu_hold_time = 0.0
+	var point_tracker := _left_hand_tracker if _point_left else _right_hand_tracker
+	var menu_tracker := _right_hand_tracker if _point_left else _left_hand_tracker
 
-	_process_left_hand_overlay_toggle(delta)
+	var tracked := _is_optical_hand_tracking(point_tracker)
+	if tracked != _point_tracked:
+		_point_tracked = tracked
+		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
+	if tracked:
+		_process_pointing_hand(point_tracker, delta)
+	else:
+		_let_go()
+
+	_process_menu_hand(menu_tracker, delta)
 
 func _refresh_trackers() -> void:
 	if not is_instance_valid(_right_hand_tracker):
@@ -119,73 +134,101 @@ func _is_optical_hand_tracking(tracker: XRHandTracker) -> bool:
 	return source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
 		or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
 
+## The pointing hand went away: drop what it holds, release any click.
+func _let_go() -> void:
+	_point_pinching = false
+	_drop_grab()
+	_end_pinch_if_active()
+	_hide_pointer_visual()
+
+func _drop_grab() -> void:
+	if _grab != null:
+		LaserDrag.drop(_grab, main_scene)
+	_grab = null
+
 # ---------------------------------------------------------------------------
-# Right-hand pointer
+# Pointing hand
 # ---------------------------------------------------------------------------
 
-func _process_right_hand_pointer(delta: float) -> void:
-	var ray := _compute_hand_ray(_right_hand_tracker)
+func _process_pointing_hand(tracker: XRHandTracker, delta: float) -> void:
+	var ray := _compute_hand_ray(tracker)
 	if not ray.get("valid", false):
-		_right_pinching = false
-		_end_pinch_if_active()
-		_hide_pointer_visual()
+		_let_go()
 		return
 
 	var origin: Vector3 = ray["origin"]
 	var direction := _filter_direction(ray["direction"], delta)
 
-	var should_press := _is_pinching(_right_hand_tracker, _right_pinching, delta)
-	if should_press != _right_pinching:
+	var should_press := _is_pinching(tracker, _point_pinching, delta)
+	var pressed_now := should_press and not _point_pinching
+	if should_press != _point_pinching:
 		print("[HandInput] Pinch %s (%d mm)" % ["DOWN" if should_press else "UP",
-			_pinch_distance(_right_hand_tracker) * 1000.0])
+			_pinch_distance(tracker) * 1000.0])
 		if should_press:
 			_press_origin = origin
 			_press_dir = direction
 			_dragging = false
 	# Hold the ray where the pinch started (release frame included) until the
 	# hand clearly moves away: that is a drag, not a shaky click.
-	if (should_press or _right_pinching) and not _dragging:
+	if (should_press or _point_pinching) and not _dragging:
 		if direction.angle_to(_press_dir) > CLICK_SLOP_RAD:
 			_dragging = true
 		else:
 			origin = _press_origin
 			direction = _press_dir
-	_right_pinching = should_press
+	_point_pinching = should_press
+	_ensure_pointer_visual()
+	if is_instance_valid(_ray_node):
+		var up := Vector3.RIGHT if absf(direction.dot(Vector3.UP)) > 0.99 else Vector3.UP
+		_ray_node.global_transform = Transform3D(Basis.looking_at(direction, up), origin)
 
-	# 1) Overlay menu takes priority so the bare hands can connect/configure.
-	if main_scene and main_scene.has_method("get_ui_hit_from_ray"):
-		var ui_hit: Dictionary = main_scene.get_ui_hit_from_ray(origin, direction)
-		if ui_hit.get("valid", false):
-			_handle_overlay_hit(ui_hit, should_press, origin, direction)
+	# A pinch that grabbed a bar moves that thing until the fingers open.
+	if _grab != null:
+		if should_press and is_instance_valid(_grab):
+			var held: float = _grab.get_drag_distance() if _grab.has_method("get_drag_distance") else 1.0
+			_update_pointer_visual(origin, direction, held, true)
 			return
+		_drop_grab()
 
+	if not main_scene or not main_scene.has_method("pick"):
+		_hide_pointer_visual()
+		return
+	var hit: Dictionary = main_scene.pick(origin, direction)
+	var kind: String = hit.get("kind", "")
+	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
+		main_scene.leave_keyboard()
+
+	if kind == "overlay":
+		_handle_overlay_hit(hit, should_press, origin, direction)
+		return
 	# Pointer left the overlay — release any held overlay click.
 	if _on_overlay:
-		if _pinch_active and main_scene and main_scene.has_method("send_ui_pointer_button"):
+		if _pinch_active and main_scene.has_method("send_ui_pointer_button"):
 			main_scene.send_ui_pointer_button(false, MOUSE_BUTTON_LEFT)
 		_on_overlay = false
 		_pinch_active = false
 
-	# 2) In-VR QWERTY keyboard, when it is open: it floats in front of the
-	#    panels, so it takes the ray before they do.
-	var kbd_distance: float = main_scene.send_keyboard_pointer(origin, direction, should_press) \
-		if main_scene and main_scene.has_method("send_keyboard_pointer") else -1.0
-	if kbd_distance >= 0.0:
-		_pinch_active = should_press
-		_update_pointer_visual(origin, direction, kbd_distance, true)
-		return
+	match kind:
+		"keyboard":
+			main_scene.send_keyboard_pointer(origin, direction, should_press)
+			_pinch_active = should_press
+			_update_pointer_visual(origin, direction, hit.distance, true)
+		"bar":
+			_end_pinch_if_active()
+			if is_instance_valid(hit.get("bar")):
+				hit.bar.mark_hovered()
+			if pressed_now and LaserDrag.grab(hit.target, _ray_node, hit.distance, main_scene):
+				_grab = hit.target
+				_dragging = true  # from now on the ray follows the hand: no click slop
+			_update_pointer_visual(origin, direction, hit.distance, true)
+		"panel":
+			_point_at_panel(hit, should_press, origin, direction)
+		_:
+			_end_pinch_if_active()
+			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
 
-	# 3) Streamed monitor panels.
-	if not main_scene or not main_scene.has_method("get_panel_hit_from_ray"):
-		_hide_pointer_visual()
-		return
-
-	var hit: Dictionary = main_scene.get_panel_hit_from_ray(origin, direction)
-	if not hit.get("valid", false):
-		_end_pinch_if_active()
-		_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
-		return
-
+## Mouse on the PC: the pinch is the left button, however long it is held.
+func _point_at_panel(hit: Dictionary, should_press: bool, origin: Vector3, direction: Vector3) -> void:
 	var panel = hit.get("panel", null)
 	if panel == null or not panel.has_method("uv_to_pixel"):
 		_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
@@ -236,38 +279,38 @@ func _end_pinch_if_active() -> void:
 	_on_overlay = false
 
 # ---------------------------------------------------------------------------
-# Left-hand overlay toggle
+# Other hand: menu / keyboard toggle
 # ---------------------------------------------------------------------------
 
-func _process_left_hand_overlay_toggle(delta: float) -> void:
-	if not _is_optical_hand_tracking(_left_hand_tracker):
-		_left_pinching = false
-		_left_hold_time = 0.0
-		_left_toggle_latched = false
-		_left_kbd_latched = false
+func _process_menu_hand(tracker: XRHandTracker, delta: float) -> void:
+	if not _is_optical_hand_tracking(tracker):
+		_menu_pinching = false
+		_menu_hold_time = 0.0
+		_menu_toggle_latched = false
+		_menu_kbd_latched = false
 		return
 
-	_left_pinching = _is_pinching(_left_hand_tracker, _left_pinching, delta)
-	if _left_pinching:
-		_left_hold_time += delta
-		if _left_hold_time >= OVERLAY_TOGGLE_HOLD_S and not _left_toggle_latched:
+	_menu_pinching = _is_pinching(tracker, _menu_pinching, delta)
+	if _menu_pinching:
+		_menu_hold_time += delta
+		if _menu_hold_time >= OVERLAY_TOGGLE_HOLD_S and not _menu_toggle_latched:
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()
-			_left_toggle_latched = true
+			_menu_toggle_latched = true
 		# Keep holding and it becomes the keyboard toggle instead — the only way
 		# to reach the in-VR keyboard with no controllers in hand. The overlay
 		# toggle that already fired at 0.65 s is undone first, so a short pinch
 		# means "overlay" and a long one means "keyboard", never both.
-		elif _left_hold_time >= KEYBOARD_TOGGLE_HOLD_S and not _left_kbd_latched:
+		elif _menu_hold_time >= KEYBOARD_TOGGLE_HOLD_S and not _menu_kbd_latched:
 			if main_scene and main_scene.has_method("toggle_ui_overlay"):
 				main_scene.toggle_ui_overlay()
 			if main_scene and main_scene.has_method("toggle_virtual_keyboard"):
 				main_scene.toggle_virtual_keyboard()
-			_left_kbd_latched = true
+			_menu_kbd_latched = true
 	else:
-		_left_hold_time = 0.0
-		_left_toggle_latched = false
-		_left_kbd_latched = false
+		_menu_hold_time = 0.0
+		_menu_toggle_latched = false
+		_menu_kbd_latched = false
 
 # ---------------------------------------------------------------------------
 # Ray / pinch math
@@ -280,7 +323,7 @@ func _compute_hand_ray(tracker: XRHandTracker) -> Dictionary:
 		return {"valid": false}
 
 	var knuckle := _joint_world_position(tracker, knuckle_joint)
-	var right := head.global_basis.x
+	var right := head.global_basis.x * (-1.0 if _point_left else 1.0)  # the pointing side
 	right.y = 0.0
 	var shoulder := head.global_position + Vector3.DOWN * SHOULDER_DOWN_M \
 		+ right.normalized() * SHOULDER_SIDE_M
@@ -368,6 +411,10 @@ func _ensure_pointer_visual() -> void:
 	_cursor.material_override = _make_emissive_material(Color(0.93, 0.92, 0.88, 1.0), false)
 	_cursor.visible = false
 	main_scene.add_child(_cursor)
+
+	_ray_node = Node3D.new()
+	_ray_node.name = "HandRay"
+	main_scene.add_child(_ray_node)
 
 func _make_emissive_material(color: Color, transparent: bool) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()

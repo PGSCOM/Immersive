@@ -63,6 +63,8 @@ var _pointer_px := Vector2(-100, -100)
 var _held_vk := -1
 var _repeat_s := 0.0
 var _drag: LaserDrag = null
+## The bar under the keyboard; main.gd::pick() tests it.
+var grab_bar: GrabBar = null
 
 var _style_key: StyleBoxFlat
 var _style_key_hover: StyleBoxFlat
@@ -77,7 +79,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	if _drag:
-		_drag.update()
+		_drag.update(delta)
 	if _held_vk >= 0:
 		_repeat_s += delta
 		var interval := 1.0 / REPEAT_RATE_HZ
@@ -103,25 +105,32 @@ func set_shown(show_it: bool) -> void:
 		_leave()
 		_drag = null
 
-## Point at the keyboard with a ray. Returns the hit distance, or -1 when the
-## ray misses (the caller then routes it to the screens instead). `pressing`
-## is the trigger / pinch state; its changes press and release keys.
-func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
+## Where a ray meets the keyboard, touching nothing: { uv, distance }, or {}
+## on a miss.
+func ray_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	if not visible:
-		return -1.0
-	var inv := _quad.global_transform.affine_inverse()
-	var o: Vector3 = inv * ray_origin
+		return {}
+	var o: Vector3 = _quad.global_transform.affine_inverse() * ray_origin
 	var d: Vector3 = _quad.global_basis.inverse() * ray_direction
 	if absf(d.z) < 0.0001:
-		_leave()
-		return -1.0
+		return {}
 	var t := -o.z / d.z
 	var p := o + d * t
 	var uv := Vector2(p.x / WIDTH_M + 0.5, 0.5 - p.y / HEIGHT_M)
 	if t < 0.0 or uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+		return {}
+	return {"uv": uv, "distance": t}
+
+## Point at the keyboard with a ray. Returns the hit distance, or -1 when the
+## ray misses (the caller then routes it to the screens instead). `pressing`
+## is the trigger / pinch state; its changes press and release keys.
+func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
+	var hit := ray_hit(ray_origin, ray_direction)
+	if hit.is_empty():
 		_leave()
 		return -1.0
-	_pointer_px = uv * Vector2(VIEW_SIZE)
+	var t: float = hit.distance
+	_pointer_px = hit.uv * Vector2(VIEW_SIZE)
 	var motion := InputEventMouseMotion.new()
 	motion.position = _pointer_px
 	motion.global_position = _pointer_px
@@ -143,6 +152,13 @@ func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:
 
 func stop_drag() -> void:
 	_drag = null
+
+func is_dragging() -> bool:
+	return _drag != null
+
+## The pointer went elsewhere: release a held key, clear the hover.
+func pointer_leave() -> void:
+	_leave()
 
 func push_pull(delta_m: float) -> void:
 	if _drag:
@@ -274,6 +290,10 @@ func _build() -> void:
 	_quad.material_override = mat
 	_quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_quad)
+	grab_bar = GrabBar.new()
+	grab_bar.always_shown = true
+	grab_bar.position = Vector3(0.0, -HEIGHT_M / 2.0 - 0.045, 0.0)
+	add_child(grab_bar)
 
 func _make_key(def: Array) -> Button:
 	var units: float = def[3] if def.size() > 3 else 1.0

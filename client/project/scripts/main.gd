@@ -60,6 +60,13 @@ var haptics_enabled: bool = true
 ## Layout: release next to a screen to snap beside it; lock = screens cannot be moved.
 var snap_enabled: bool = true
 var lock_layout: bool = false
+## The bare hand that points, "left" or "right" (read by hand_input.gd); the
+## other one's long pinch opens the menu / keyboard.
+var pointer_hand: String = "right"
+## Controller ray tilt below the aim pose, degrees (read live by vr_input.gd).
+var ray_angle_deg: float = 40.0
+## Grabbed screens turn to face the head (LaserDrag.face_me).
+var screens_face_me: bool = true
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
@@ -479,32 +486,43 @@ func _apply_visual_settings_to_all_panels() -> void:
 func _live_panels() -> Array:
 	return screen_panels.filter(func(p): return is_instance_valid(p))
 
-## Resolve which streamed panel is hit by a world-space ray.
-## Returns { valid: bool, panel: MeshInstance3D, uv: Vector2, distance: float, monitor_id: int }.
-func get_panel_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
-	var best_panel: MeshInstance3D = null
-	var best_uv := Vector2(0.5, 0.5)
-	var best_distance := INF
-	for panel in screen_panels:
-		if not is_instance_valid(panel) or not panel.has_method("ray_to_screen_hit"):
-			continue
-		var hit: Dictionary = panel.ray_to_screen_hit(ray_origin, ray_direction)
-		if not hit.get("valid", false):
-			continue
-		var dist: float = hit.get("distance", INF)
-		if dist < best_distance:
-			best_distance = dist
-			best_panel = panel
-			best_uv = hit.get("uv", Vector2(0.5, 0.5))
-	if best_panel == null:
-		return {"valid": false}
-	return {
-		"valid": true,
-		"panel": best_panel,
-		"uv": best_uv,
-		"distance": best_distance,
-		"monitor_id": int(best_panel.get_meta("monitor_id", 0))
-	}
+## What a pointer ray lands on: the NEAREST of the menu, the keyboard, every
+## screen and every grab bar (vr_input.gd and hand_input.gd both use it).
+## Returns {} on a miss, else { kind: "overlay" / "keyboard" / "panel" / "bar",
+## distance, and uv (overlay, panel), panel + monitor_id (panel), target (the
+## node a bar moves) + bar (the GrabBar) }.
+func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	var hits: Array = []
+	var ui := get_ui_hit_from_ray(ray_origin, ray_direction)
+	if ui.get("valid", false):
+		hits.append({"kind": "overlay", "distance": ui.distance, "uv": ui.uv})
+	if is_instance_valid(virtual_keyboard) and virtual_keyboard.visible:
+		var kb: Dictionary = virtual_keyboard.ray_hit(ray_origin, ray_direction)
+		if not kb.is_empty():
+			hits.append({"kind": "keyboard", "distance": kb.distance})
+	var owners: Array = _live_panels()
+	for p in owners:
+		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
+		if h.get("valid", false):
+			hits.append({"kind": "panel", "distance": h.distance, "uv": h.uv, "panel": p,
+				"monitor_id": int(p.get_meta("monitor_id", 0))})
+	owners.append_array([ui_overlay, virtual_keyboard])
+	for o in owners:
+		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
+		var d: float = bar.hit(ray_origin, ray_direction) if bar else -1.0
+		if d >= 0.0:
+			# A bar loses a near tie (a screen stacked right under another).
+			hits.append({"kind": "bar", "distance": d, "rank": d + 0.02, "target": o, "bar": bar})
+	var best := {}
+	for h in hits:
+		if best.is_empty() or h.get("rank", h.distance) < best.get("rank", best.distance):
+			best = h
+	return best
+
+## The pointer is not on the keyboard (any more): release its key and hover.
+func leave_keyboard() -> void:
+	if is_instance_valid(virtual_keyboard):
+		virtual_keyboard.pointer_leave()
 
 func get_ui_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	if ui_overlay and ui_overlay.has_method("ray_to_overlay_hit"):
@@ -740,6 +758,12 @@ func _init_ui_overlay() -> void:
 	ui_overlay.lock_toggled.connect(func(on: bool):
 		lock_layout = on
 		_save_config())
+	ui_overlay.pointer_settings_changed.connect(func(hand: String, angle: float, face_me: bool):
+		pointer_hand = hand
+		ray_angle_deg = angle
+		screens_face_me = face_me
+		LaserDrag.face_me = face_me
+		_save_config())
 	ui_overlay.compositor_layers_toggled.connect(func(on: bool):
 		compositor_layers = on
 		_apply_visual_settings_to_all_panels()
@@ -753,6 +777,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.set_input_settings(control_enabled, haptics_enabled)
 	ui_overlay.set_layout_options(snap_enabled, lock_layout)
 	ui_overlay.set_linked_monitors(_linked.keys().filter(func(k): return _linked[k]))
+	ui_overlay.set_pointer_settings(pointer_hand, ray_angle_deg, screens_face_me)
 	ui_overlay.set_compositor_layers(compositor_layers, true)
 
 func _show_overlay() -> void:
@@ -1749,6 +1774,9 @@ func _save_config() -> void:
 	cfg.set_value("input", "haptics", haptics_enabled)
 	cfg.set_value("layout", "snap", snap_enabled)
 	cfg.set_value("layout", "lock", lock_layout)
+	cfg.set_value("input", "pointer_hand", pointer_hand)
+	cfg.set_value("input", "ray_angle", ray_angle_deg)
+	cfg.set_value("input", "face_me", screens_face_me)
 	cfg.set_value("stream", "codec", stream_codec)
 	cfg.set_value("stream", "bitrate_kbps", stream_bitrate_kbps)
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
@@ -1801,6 +1829,10 @@ func _load_config() -> void:
 		haptics_enabled = cfg.get_value("input", "haptics", true)
 		snap_enabled = cfg.get_value("layout", "snap", true)
 		lock_layout = cfg.get_value("layout", "lock", false)
+		pointer_hand = "left" if cfg.get_value("input", "pointer_hand", "right") == "left" else "right"
+		ray_angle_deg = clampf(float(cfg.get_value("input", "ray_angle", 40.0)), 0.0, 60.0)
+		screens_face_me = cfg.get_value("input", "face_me", true)
+		LaserDrag.face_me = screens_face_me
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)

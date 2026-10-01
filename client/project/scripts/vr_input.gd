@@ -4,11 +4,13 @@ extends Node
 ## right); both work the same way and the one whose trigger was pressed last
 ## drives the pointer (the other hides its laser), like the system UI.
 ##
-##   Trigger          click (desktop, menu, keyboard)
+##   Trigger          click (desktop, menu, keyboard); on the bar under a
+##                    screen, the menu or the keyboard: hold to move it
 ##   Grip, tap        right click on a screen
 ##   Grip, hold       move the screen / menu / keyboard under the pointer;
-##                    while held, stick up/down pushes it away / pulls it in
-##                    and stick left/right resizes a screen
+##                    while moving, stick up/down (or reaching out / pulling
+##                    the hand in) pushes it away / pulls it in and stick
+##                    left/right resizes a screen
 ##   Stick            scroll the screen or the menu under the pointer
 ##   Stick click      middle click
 ##   A / X            show / hide the keyboard
@@ -38,13 +40,14 @@ const IDLE_TURN_RAD := 0.05
 const IDLE_RAY_M := 0.35
 const MAX_RAY_M := 8.0
 ## Where the ray starts relative to the aim pose: tilted 40° down, as tuned on
-## the Pico 4 whose aim pose points above where the controller looks.
+## the Pico 4 whose aim pose points above where the controller looks. The tilt
+## follows main.gd's ray_angle_deg (the menu's "Ray angle") live.
 const RAY_ORIGIN := Transform3D(
 	Basis(Vector3(1, 0, 0), Vector3(0, 0.76604444, -0.6427876), Vector3(0, 0.6427876, 0.76604444)),
 	Vector3(0, 0, 0.1))
 const POINTER_COLOR := Color(0.93, 0.92, 0.88)
 
-enum Target { NONE, OVERLAY, KEYBOARD, PANEL }
+enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
 
 ## The instance whose controller drives the pointer.
 static var active: Node = null
@@ -66,6 +69,9 @@ var _target: Target = Target.NONE
 var _panel: Node3D = null
 var _uv := Vector2(-1, -1)
 var _hit_distance := MAX_RAY_M
+## What the grab bar under the pointer moves (Target.BAR).
+var _bar_target: Node = null
+var _ray_angle := 40.0
 ## Desktop mouse buttons this controller holds down, and where it last sent
 ## them (so a release always reaches the host, even off the panel).
 var _buttons := 0
@@ -76,6 +82,7 @@ var _overlay_pressed := false
 var _grip_pending_panel: Node3D = null
 var _grip_held_s := 0.0
 var _dragging: Node = null   ## panel, overlay or keyboard being moved
+var _drag_by_trigger := false   ## grabbed by its bar: the trigger lets go
 var _scroll_acc := Vector2.ZERO
 var _ui_scroll_s := 0.0
 
@@ -240,6 +247,7 @@ func _process(delta: float) -> void:
 		raycast_origin.visible = false
 		return
 	raycast_origin.visible = true
+	_apply_ray_angle()
 
 	if is_instance_valid(_dragging):
 		_update_drag(delta)
@@ -248,6 +256,13 @@ func _process(delta: float) -> void:
 		_update_grip_hold(delta)
 		_update_scroll(delta)
 	_update_beam()
+
+func _apply_ray_angle() -> void:
+	var angle = main_scene.get("ray_angle_deg") if main_scene else null
+	if angle == null or is_equal_approx(angle, _ray_angle):
+		return
+	_ray_angle = angle
+	raycast_origin.transform = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-_ray_angle)), RAY_ORIGIN.origin)
 
 func _ray() -> Array:
 	return [raycast_origin.global_position, (-raycast_origin.global_basis.z).normalized()]
@@ -259,31 +274,34 @@ func _update_pointer() -> void:
 	var origin: Vector3 = ray[0]
 	var dir: Vector3 = ray[1]
 
-	var ui_hit: Dictionary = main_scene.get_ui_hit_from_ray(origin, dir) \
-		if main_scene.has_method("get_ui_hit_from_ray") else {}
-	if ui_hit.get("valid", false):
-		_set_target(Target.OVERLAY, null)
-		_hit_distance = ui_hit.get("distance", 1.0)
-		main_scene.send_ui_pointer_move(ui_hit.get("uv", Vector2(0.5, 0.5)))
-		return
-
-	var kbd_distance: float = main_scene.send_keyboard_pointer(origin, dir, _trigger_pressed) \
-		if main_scene.has_method("send_keyboard_pointer") else -1.0
-	if kbd_distance >= 0.0:
-		_set_target(Target.KEYBOARD, null)
-		_hit_distance = kbd_distance
-		return
-
-	var hit: Dictionary = main_scene.get_panel_hit_from_ray(origin, dir) \
-		if main_scene.has_method("get_panel_hit_from_ray") else {}
-	if not hit.get("valid", false):
-		_set_target(Target.NONE, null)
-		_hit_distance = MAX_RAY_M
-		return
+	var hit: Dictionary = main_scene.pick(origin, dir) if main_scene.has_method("pick") else {}
+	var kind: String = hit.get("kind", "")
+	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
+		main_scene.leave_keyboard()
+	_hit_distance = hit.get("distance", MAX_RAY_M)
+	match kind:
+		"overlay":
+			_set_target(Target.OVERLAY, null)
+			main_scene.send_ui_pointer_move(hit.get("uv", Vector2(0.5, 0.5)))
+			return
+		"keyboard":
+			_set_target(Target.KEYBOARD, null)
+			main_scene.send_keyboard_pointer(origin, dir, _trigger_pressed)
+			return
+		"bar":
+			_set_target(Target.BAR, null)
+			_bar_target = hit.get("target")
+			if is_instance_valid(hit.get("bar")):
+				hit.bar.mark_hovered()
+			return
+		"panel":
+			pass
+		_:
+			_set_target(Target.NONE, null)
+			return
 
 	var panel: Node3D = hit.get("panel")
 	_set_target(Target.PANEL, panel)
-	_hit_distance = hit.get("distance", 1.0)
 	_uv = hit.get("uv", Vector2(0.5, 0.5))
 	if panel.has_method("mark_hovered"):
 		panel.mark_hovered()
@@ -296,6 +314,8 @@ func _set_target(t: Target, panel: Node3D) -> void:
 		_overlay_pressed = false
 	if t != Target.PANEL:
 		_uv = Vector2(-1, -1)
+	if t != Target.BAR:
+		_bar_target = null
 	_target = t
 	_panel = panel
 
@@ -348,19 +368,17 @@ func _update_grip_hold(delta: float) -> void:
 		_start_drag(_grip_pending_panel)
 		_grip_pending_panel = null
 
-func _start_drag(thing: Node) -> void:
-	if thing == null or not thing.has_method("start_drag"):
+func _start_drag(thing: Node, by_trigger := false) -> void:
+	if not LaserDrag.grab(thing, raycast_origin, _hit_distance, main_scene):
 		return
-	thing.start_drag(raycast_origin, _hit_distance)
 	_dragging = thing
+	_drag_by_trigger = by_trigger
 	_buzz(0.55, 0.04)
 
 func _stop_drag() -> void:
-	if is_instance_valid(_dragging):
-		_dragging.stop_drag()
-		if main_scene and main_scene.has_method("on_layout_changed"):
-			main_scene.on_layout_changed()
+	LaserDrag.drop(_dragging, main_scene)
 	_dragging = null
+	_drag_by_trigger = false
 
 func _update_drag(delta: float) -> void:
 	if absf(_stick.y) > STICK_DEADZONE and _dragging.has_method("push_pull"):
@@ -460,6 +478,8 @@ func _set_trigger_state(pressed: bool) -> void:
 		return
 	if pressed:
 		_take_over()
+		if is_instance_valid(_dragging):
+			return  # one thing at a time: the other button already moves something
 		if _target != Target.NONE:
 			_buzz(0.3, 0.02)
 		match _target:
@@ -469,9 +489,13 @@ func _set_trigger_state(pressed: bool) -> void:
 			Target.PANEL:
 				_buttons |= 0x01
 				_send_mouse(_last_monitor, _last_pixel, 0, 0)
+			Target.BAR:
+				_start_drag(_bar_target, true)
 			_:
 				pass  # the keyboard reads the trigger in _update_pointer()
 	else:
+		if _drag_by_trigger:
+			_stop_drag()
 		if _overlay_pressed:
 			main_scene.send_ui_pointer_button(false, MOUSE_BUTTON_LEFT)
 			_overlay_pressed = false
@@ -488,11 +512,15 @@ func _set_grip_state(pressed: bool) -> void:
 	if pressed:
 		_take_over()
 		_grip_held_s = 0.0
+		if is_instance_valid(_dragging):
+			return
 		match _target:
 			Target.OVERLAY:
 				_start_drag(main_scene.get("ui_overlay"))
 			Target.KEYBOARD:
 				_start_drag(main_scene.get("virtual_keyboard"))
+			Target.BAR:
+				_start_drag(_bar_target)
 			Target.PANEL:
 				_grip_pending_panel = _panel
 	else:
@@ -502,7 +530,8 @@ func _set_grip_state(pressed: bool) -> void:
 			_send_mouse(_last_monitor, _last_pixel, 0, 0)
 			_buzz(0.3, 0.02)
 		_grip_pending_panel = null
-		_stop_drag()
+		if not _drag_by_trigger:
+			_stop_drag()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -519,13 +548,16 @@ func _update_idle(delta: float) -> bool:
 		_idle_s += delta
 	return _idle_s >= IDLE_HIDE_S
 
-## True when the right hand is being *optically* tracked (bare-hand mode). Mirror
-## of hand_input.gd::_is_optical_hand_tracking — used to yield the pointer to the
+## True when a hand is being *optically* tracked (bare-hand mode). Mirror of
+## hand_input.gd::_is_optical_hand_tracking — used to yield the pointer to the
 ## hand-tracking path so the two never push conflicting cursor positions.
 func _hands_active() -> bool:
-	var hand := XRServer.get_tracker(&"/user/hand_tracker/right") as XRHandTracker
-	if hand == null or not hand.get_has_tracking_data():
-		return false
-	var source := hand.get_hand_tracking_source()
-	return source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
-		or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
+	for path in [&"/user/hand_tracker/right", &"/user/hand_tracker/left"]:
+		var hand := XRServer.get_tracker(path) as XRHandTracker
+		if hand == null or not hand.get_has_tracking_data():
+			continue
+		var source := hand.get_hand_tracking_source()
+		if source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
+				or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN:
+			return true
+	return false
