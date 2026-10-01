@@ -2,10 +2,14 @@ extends SceneTree
 ## Screens, grabbing and the VR keyboard, headless:
 ##   - a ray at any point of a flat or curved screen hits it at that point's
 ##     UV (so the mouse lands under the laser), at the right distance;
-##   - grabbing a screen keeps the grabbed point on the ray, the screen
-##     upright and facing the head, and push/pull moves it along the ray;
-##     reaching out pushes it too, its group follows rigidly, and with
-##     "face me" off it keeps its yaw relative to the pointer;
+##   - grabbing a screen locks it to the pointer (position and rotation, roll
+##     included; near-level roll/pitch eases flat), push/pull and reaching
+##     out move it along the ray, its group follows rigidly; with "face me" on
+##     the grabbed point stays on the ray and the screen stays upright, facing
+##     the head;
+##   - a corner handle outside each screen corner is picked as a "bar", and
+##     dragging it resizes the screen (aspect kept, opposite corner fixed,
+##     size clamped) without stealing the desktop's own corner pixels;
 ##   - main.gd::pick() returns the NEAREST of menu, keyboard, screens and the
 ##     grab bars under them;
 ##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only.
@@ -79,7 +83,8 @@ func _run(main: Node3D) -> void:
 	var miss: Dictionary = panel.ray_to_screen_hit(head.position, Vector3(0, 1, 0))
 	check(not miss.get("valid", false), "a ray at the sky misses the screen")
 
-	# --- Grabbing -----------------------------------------------------------
+	# --- Grabbing (face-me mode) --------------------------------------------
+	LaserDrag.face_me = true
 	panel.set_curvature(true, 0.5)
 	panel.place_facing(Vector3(0, 1.5, -1.3), head.position)
 	var pointer := Node3D.new()
@@ -116,7 +121,8 @@ func _run(main: Node3D) -> void:
 	panel.stop_drag()
 	check(up_err < 0.35, "stays upright (tilt %.2f rad)" % up_err)
 
-	# --- A group moves rigidly; "face me" off keeps the yaw -----------------
+	# --- Rigid: locked to the pointer, group follows ------------------------
+	LaserDrag.face_me = false
 	var other := MeshInstance3D.new()
 	other.set_script(load("res://scripts/screen_panel.gd"))
 	main.add_child(other)
@@ -126,23 +132,44 @@ func _run(main: Node3D) -> void:
 	other.place_facing(Vector3(1.6, 1.4, -0.9), head.position)
 	var rel: Transform3D = panel.global_transform.affine_inverse() * other.global_transform
 	main.group = [other]
-	LaserDrag.face_me = false
 	pointer.global_position = Vector3(0.2, 1.2, -0.3)
 	pointer.look_at(panel.global_position)
-	var front0: Vector3 = panel.global_basis.z
-	panel.start_drag(pointer, pointer.global_position.distance_to(panel.global_position))
-	pointer.rotate_y(deg_to_rad(20.0))
+	var held: Transform3D = pointer.global_transform.affine_inverse() * panel.global_transform
+	var d_start: float = pointer.global_position.distance_to(panel.global_position)
+	panel.start_drag(pointer, d_start)
+	# Swing it up and sideways and roll the wrist well past the level assist.
+	pointer.global_position += Vector3(0.3, 0.2, -0.1)
+	pointer.rotate_y(deg_to_rad(35.0))
+	pointer.rotate_object_local(Vector3.RIGHT, deg_to_rad(25.0))
+	pointer.rotate_object_local(Vector3.FORWARD, deg_to_rad(30.0))
 	await _frames(40)
+	var held_now: Transform3D = pointer.global_transform.affine_inverse() * panel.global_transform
+	# (moving the hand away from the shoulder also pushed it along the ray)
+	held.origin.z -= panel.get_drag_distance() - d_start
+	check(held_now.origin.distance_to(held.origin) < 0.002 and held_now.basis.get_rotation_quaternion().angle_to(held.basis.get_rotation_quaternion()) < 0.01,
+		"locked to the pointer: same place and rotation relative to it, roll too")
+	check(absf(panel.global_basis.x.y) > 0.1, "it rolled with the wrist")
 	var rel_now: Transform3D = panel.global_transform.affine_inverse() * other.global_transform
 	check(rel_now.origin.distance_to(rel.origin) < 0.001 and rel_now.basis.is_equal_approx(rel.basis),
 		"the rest of the group follows rigidly")
-	var want_front := front0.rotated(Vector3.UP, deg_to_rad(20.0))
-	check(panel.global_basis.z.angle_to(want_front) < 0.01 and absf(panel.global_basis.x.y) < 0.001,
-		"face me off: it turns with the pointer's yaw, no roll")
+	var d_rigid: float = panel.get_drag_distance()
+	var at_before: float = panel.global_position.distance_to(pointer.global_position)
+	panel.push_pull(0.4)
+	await _frames(40)
+	check(absf(panel.global_position.distance_to(pointer.global_position) - at_before - 0.4) < 0.01
+		and absf(panel.get_drag_distance() - d_rigid - 0.4) < 0.001,
+		"push moves a locked screen 0.4 m along the ray")
 	panel.stop_drag()
-	LaserDrag.face_me = true
 	main.group = []
 	other.queue_free()
+
+	# Near-level roll and pitch ease flat; a real tilt is left alone.
+	var tilt := Basis(Vector3.UP, 0.7) * Basis(Vector3.FORWARD, deg_to_rad(2.0)) * Basis(Vector3.RIGHT, deg_to_rad(-2.5))
+	var flat := LaserDrag.level_basis(tilt)
+	check(absf(flat.x.y) < 0.0001 and absf(flat.z.y) < 0.0001 and flat.is_equal_approx(flat.orthonormalized()),
+		"2 degrees of roll and pitch ease flat")
+	var real_tilt := Basis(Vector3.UP, 0.7) * Basis(Vector3.FORWARD, deg_to_rad(15.0)) * Basis(Vector3.RIGHT, deg_to_rad(-12.0))
+	check(LaserDrag.level_basis(real_tilt).is_equal_approx(real_tilt), "a 15 degree tilt is kept")
 
 	# --- Picking: nearest wins, grab bars included --------------------------
 	var ov = load("res://scripts/ui_overlay.gd").new()
@@ -177,6 +204,81 @@ func _run(main: Node3D) -> void:
 	check(ov_bar.get("kind") == "bar" and ov_bar.get("target") == ov, "the menu has a grab bar too")
 	ov.set_shown(false)
 	picker.free()
+
+	# --- Corner handles ------------------------------------------------------
+	var picker2 = load("res://scripts/main.gd").new()
+	picker2.screen_panels = [panel]
+	for curve in [0.0, 0.5]:
+		panel.set_curvature(curve > 0.0, curve)
+		panel.set_panel_width(1.6)
+		panel.place_facing(Vector3(0.2, 1.5, -1.3), head.position)
+		await _frames(2)
+		var t0: Transform3D = panel.global_transform
+		var w0: float = panel.panel_width
+		var h0: float = panel.panel_height
+		var corner_w: Vector3 = panel.to_global(panel.local_point(1.0, 0.0))
+		var anchor_w: Vector3 = panel.to_global(panel.local_point(0.0, 1.0))
+		var handle: ResizeHandle = panel.resize_handles[1]
+		var outside: Vector3 = corner_w + t0.basis * Vector3(0.05, 0.05, 0.0)
+		var pk: Dictionary = picker2.pick(head.position, (outside - head.position).normalized())
+		check(pk.get("kind") == "bar" and pk.get("target") == handle and pk.get("bar") == handle,
+			"curve %.1f: outside the top-right corner picks its handle -> %s" % [curve, pk.get("kind")])
+		var inside: Vector3 = panel.to_global(panel.local_point(0.985, 0.03))
+		check(picker2.pick(head.position, (inside - head.position).normalized()).get("kind") == "panel",
+			"curve %.1f: the screen's own corner pixels stay the screen's" % curve)
+		var far: Vector3 = corner_w + t0.basis * Vector3(0.6, 0.6, 0.0)
+		check(picker2.pick(head.position, (far - head.position).normalized()).is_empty(),
+			"curve %.1f: far from every corner is nothing" % curve)
+		await _frames(1)
+		check(not panel.resize_handles[2].visible,
+			"curve %.1f: a corner the pointer is far from shows no bracket" % curve)
+		picker2.pick(head.position, (outside - head.position).normalized())
+		await _frames(1)
+		check(handle.visible, "curve %.1f: the corner it is near shows its bracket" % curve)
+		# Grab it like the input scripts do and drag it out along the diagonal.
+		var pointer2 := Node3D.new()
+		main.add_child(pointer2)
+		pointer2.global_position = head.position
+		pointer2.look_at(outside)
+		check(LaserDrag.grab(handle, pointer2, pk.distance, main) and handle.is_dragging(), "the handle can be grabbed")
+		var ca: Vector3 = panel.local_point(0.0, 1.0)
+		var diag: Vector3 = panel.local_point(1.0, 0.0) - ca
+		for scale in [1.5, 0.5, 9.0, 0.01]:
+			var want_local: Vector3 = ca + diag * scale + Vector3(0.05, 0.05, 0.0)
+			want_local.z = panel.local_point(1.0, 0.0).z
+			var aim: Vector3 = t0 * want_local
+			pointer2.look_at(aim)
+			await _frames(40)
+			var expect: float = clampf(w0 * scale, panel.MIN_WIDTH, panel.MAX_WIDTH)
+			check(absf(panel.panel_width - expect) < 0.02 * expect,
+				"curve %.1f: x%.2f -> width %.3f m (wanted %.3f)" % [curve, scale, panel.panel_width, expect])
+			check(absf(panel.panel_height / panel.panel_width - h0 / w0) < 0.0001, "aspect ratio kept")
+			check(panel.to_global(panel.local_point(0.0, 1.0)).distance_to(anchor_w) < 0.002,
+				"the opposite corner stays put")
+			check(panel.global_basis.is_equal_approx(t0.basis), "resizing never turns it")
+			check(handle.get_drag_distance() > 0.5, "the ray ends at the screen's plane")
+		LaserDrag.drop(handle, main)
+		check(not handle.is_dragging(), "dropped")
+		check(absf(panel.get_layout_state().panel_width - panel.panel_width) < 0.0001, "the size is in the saved layout")
+		pointer2.queue_free()
+	picker2.free()
+	panel.set_curvature(true, 0.5)
+	panel.set_panel_width(1.6)
+	panel.place_facing(Vector3(0.2, 1.5, -1.3), head.position)
+
+	# The snap frame outlines a screen of the given size, flat or curved.
+	var frame := SnapFrame.new()
+	main.add_child(frame)
+	frame.show_at(Transform3D(Basis(), Vector3(0, 1.5, -2.0)), 1.6, 0.9, 0.0)
+	var box: AABB = frame.mesh.get_aabb()
+	check(frame.visible and absf(box.size.x - 1.6) < 0.001 and absf(box.size.y - 0.9) < 0.001
+		and frame.global_position.is_equal_approx(Vector3(0, 1.5, -2.0)), "snap frame: a white outline of the screen's size")
+	frame.show_at(Transform3D.IDENTITY, 1.6, 0.9, 0.875)
+	var curved: AABB = frame.mesh.get_aabb()
+	check(curved.size.z > 0.05 and curved.size.x < 1.6, "snap frame: follows the arc of a curved screen")
+	frame.clear()
+	check(not frame.visible, "snap frame: cleared")
+	frame.queue_free()
 
 	# --- Compositor layer -------------------------------------------------
 	var origin := Node3D.new()

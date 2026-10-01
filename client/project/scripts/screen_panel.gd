@@ -5,9 +5,12 @@
 ##
 ## Features:
 ##   - Texture updated each received video frame (MJPEG or raw RGBA)
-##   - Laser drag (LaserDrag): the grabbed point stays on the pointer ray, the
-##     panel never rolls; push/pull and resize while held, its group follows
+##   - Laser drag (LaserDrag): locked to the pointer (or facing the head);
+##     push/pull while held, its group follows
 ##   - A grab bar under the panel (GrabBar): point at it and press to move it
+##   - Corner handles (ResizeHandle): drag one to resize, aspect kept
+##   - landing_beside(): where a screen of a given size sits flush against one
+##     of this panel's four sides (main.gd's snap preview)
 ##   - Panel size follows the monitor aspect ratio
 
 extends MeshInstance3D
@@ -27,6 +30,7 @@ const MAX_ARC := 1.75
 const CURVE_COLUMNS := 48
 const MIN_WIDTH := 0.4
 const MAX_WIDTH := 4.0
+enum Side { LEFT, RIGHT, TOP, BOTTOM }
 
 ## Texture-orientation compensation for the zero-copy ExternalTexture (OES) path.
 ## The MediaCodec→SurfaceTexture→OES frame is vertically mirrored relative to
@@ -72,6 +76,8 @@ var _drag: LaserDrag = null
 var _placeholder_label: Label3D = null
 ## The bar under the screen; main.gd::pick() tests it.
 var grab_bar: GrabBar = null
+## The four corner handles; main.gd::pick() probes them.
+var resize_handles: Array[ResizeHandle] = []
 
 # OpenXR compositor layer (see set_compositor_layer()).
 var _layer_wanted: bool = false
@@ -90,6 +96,10 @@ func _ready() -> void:
 	_create_placeholder_texture()
 	grab_bar = GrabBar.new()
 	add_child(grab_bar)
+	for c in [Vector2(-1, 1), Vector2(1, 1), Vector2(-1, -1), Vector2(1, -1)]:
+		var handle := ResizeHandle.new(c)
+		add_child(handle)
+		resize_handles.append(handle)
 	_place_decorations()
 	set_process(true)
 
@@ -274,6 +284,27 @@ func _update_layer_geometry() -> void:
 func _sync_layer() -> void:
 	var offset := Vector3(0.0, 0.0, _radius()) if _arc() >= 0.001 else Vector3.ZERO
 	_layer.global_transform = global_transform * Transform3D(Basis(), offset)
+
+## Where a screen `w` x `h` metres sits flush beside this one, `gap` apart, on
+## `side`: world transform, same orientation (a curved screen continues its
+## arc on the left and right; above and below it stacks straight).
+func landing_beside(side: Side, w: float, h: float, gap: float) -> Transform3D:
+	var local := Transform3D.IDENTITY
+	if side == Side.TOP or side == Side.BOTTOM:
+		local.origin.y = (panel_height / 2.0 + gap + h / 2.0) * (1.0 if side == Side.TOP else -1.0)
+	else:
+		var along := (panel_width / 2.0 + gap + w / 2.0) * (1.0 if side == Side.RIGHT else -1.0)
+		if _arc() < 0.001:
+			local.origin.x = along
+		else:
+			var phi := along / _radius()
+			local = Transform3D(Basis(Vector3.UP, -phi),
+				Vector3(_radius() * sin(phi), 0.0, _radius() * (1.0 - cos(phi))))
+	return global_transform * local
+
+## Arc angle in radians (0 = flat).
+func get_arc() -> float:
+	return _arc()
 
 ## Called every frame a pointer rests on the panel: shows the grab bar.
 func mark_hovered() -> void:
@@ -610,6 +641,11 @@ func _place_decorations() -> void:
 		_placeholder_label.position = Vector3(0.0, 0.0, bulge + 0.004)
 	if grab_bar:
 		grab_bar.position = local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
+	for h in resize_handles:
+		var u := 0.5 + 0.5 * h.corner.x
+		# Tilted with the surface, so the bracket lies in the screen's plane.
+		h.transform = Transform3D(Basis(Vector3.UP, -(u - 0.5) * _arc()),
+			local_point(u, 0.5 - 0.5 * h.corner.y))
 
 func _apply_texture() -> void:
 	var mat := material_override

@@ -1,8 +1,11 @@
 extends SceneTree
 ## Linked screens, snapping, locking and saving the links, headless:
 ##   - drag_group_for lists the other linked screens only for a linked one;
-##   - releasing a screen next to a neighbour snaps it flush beside it,
-##     same distance, facing the head; linked blocks move rigidly;
+##   - a screen dragged near any side of another (flat or curved) is offered
+##     a frame there (snap_target_for), and released it lands exactly in it,
+##     flush, with its neighbour's orientation; far, turned away or occupied
+##     sides offer nothing; linked blocks move rigidly and snapping links
+##     nothing;
 ##   - a locked layout refuses moves; snap off leaves the screen alone;
 ##   - link flags survive a save and a load of the workspace file.
 ##
@@ -40,7 +43,7 @@ func _run() -> void:
 	var head := Vector3(0, 1.6, 0)
 	var a := _panel(main, 0, Vector3(0, 1.52, -1.25))
 	var b := _panel(main, 1, Vector3(1.9, 1.52, -1.25))
-	var c := _panel(main, 2, Vector3(-1.9, 1.52, -1.25))
+	var c := _panel(main, 2, Vector3(-3.5, 1.52, -3.0))
 	await process_frame
 
 	check(main.drag_group_for(a).is_empty(), "unlinked screen: no group")
@@ -49,41 +52,62 @@ func _run() -> void:
 	check(main.drag_group_for(c).is_empty(), "an unlinked screen has no group")
 	main._linked = {}
 
-	# Snap: drop b a hand-width away from a's right edge.
-	var want: float = a.panel_width / 2.0 + main.ARC_GAP_M + b.panel_width / 2.0
-	var dist := Vector2(a.global_position.x - head.x, a.global_position.z - head.z).length()
-	var drop := Vector3(sin(want / dist + 0.06) * dist, 1.55, -cos(want / dist + 0.06) * dist) + Vector3(0, 0.05, 0)
-	b.place_facing(Vector3(drop.x, 1.55, drop.z - 0.3 * 0), head)
-	main.on_panel_drag_ended(b)
-	var gap: float = absf(Vector3(b.global_position.x - head.x, 0, b.global_position.z - head.z).signed_angle_to(
-		Vector3(a.global_position.x - head.x, 0, a.global_position.z - head.z), Vector3.UP)) * dist
-	check(absf(gap - want) < 0.005, "released screen snaps flush beside its neighbour (%.3f vs %.3f)" % [gap, want])
-	check(absf(b.global_position.y - a.global_position.y) < 0.001, "same height")
-	var dist_b := Vector2(b.global_position.x - head.x, b.global_position.z - head.z).length()
-	check(absf(dist_b - dist) < 0.005, "same distance from the head")
-	check(b.global_basis.z.normalized().dot((head - b.global_position).normalized()) > 0.99, "facing the head")
-	check(b.global_position.x > a.global_position.x, "stays on its own side")
+	# Snap: b dropped near each side of a lands exactly where the frame shows.
+	for curve in [0.0, 0.5]:
+		for pn in [a, b, c]:
+			pn.set_curvature(curve > 0.0, curve)
+		for side in 4:
+			var land: Transform3D = a.landing_beside(side, b.panel_width, b.panel_height, main.SNAP_GAP_M)
+			# 12 cm off and turned 10 degrees: well inside the capture zone.
+			b.global_transform = Transform3D(land.basis * Basis(Vector3.UP, deg_to_rad(10.0)),
+				land.origin + Vector3(0.08, 0.06, 0.05))
+			var tgt: Dictionary = main.snap_target_for(b)
+			check(tgt.get("panel") == a and tgt.get("side") == side,
+				"curve %.1f side %d: the frame is offered on that side" % [curve, side])
+			main.on_panel_drag_ended(b)
+			check(b.global_transform.is_equal_approx(land), "curve %.1f side %d: released, it lands in the frame" % [curve, side])
+		# Flush: the facing edges are a gap apart (curved: along the arc's chord).
+		b.global_transform = a.landing_beside(1, b.panel_width, b.panel_height, main.SNAP_GAP_M)
+		var edge: float = a.to_global(a.local_point(1.0, 0.5)).distance_to(b.to_global(b.local_point(0.0, 0.5)))
+		check(edge > main.SNAP_GAP_M * 0.9 and edge < main.SNAP_GAP_M + 0.002,
+			"curve %.1f: snapped screens are flush, %.3f m apart" % [curve, edge])
+		check(b.global_basis.y.is_equal_approx(a.global_basis.y), "curve %.1f: same upright as its neighbour" % curve)
+	for pn in [a, b, c]:
+		pn.set_curvature(false, 0.0)
 
-	# Far from everything: untouched.
+	# Far from everything, or turned away: no frame, nothing moves.
 	b.place_facing(Vector3(1.2, 1.5, -3.5), head)
-	var before := b.global_transform
+	var before: Transform3D = b.global_transform
+	check(main.snap_target_for(b).is_empty(), "far from the others: no frame")
 	main.on_panel_drag_ended(b)
 	check(b.global_transform.is_equal_approx(before), "a screen far from the others stays put")
+	var near: Transform3D = a.landing_beside(1, b.panel_width, b.panel_height, main.SNAP_GAP_M)
+	b.global_transform = Transform3D(near.basis * Basis(Vector3.UP, deg_to_rad(120.0)), near.origin)
+	check(main.snap_target_for(b).is_empty(), "turned right away from the neighbour: no frame")
 
-	# Rigid block: b and c linked, released near a: both move by the same transform.
+	# A side that is taken is not offered.
+	c.global_transform = a.landing_beside(1, c.panel_width, c.panel_height, main.SNAP_GAP_M)
+	b.global_transform = Transform3D(near.basis, near.origin + Vector3(0.0, 0.1, 0.1))
+	check(main.snap_target_for(b).get("side") != 1 or main.snap_target_for(b).get("panel") != a,
+		"a side with a screen already on it is not offered")
+	c.place_facing(Vector3(-3.5, 1.52, -3.0), head)
+
+	# Rigid block: b and c linked, b released near a: both move by the same transform.
 	main._linked = {1: true, 2: true}
-	b.place_facing(Vector3(drop.x, 1.55, drop.z), head)
+	var land_r: Transform3D = a.landing_beside(1, b.panel_width, b.panel_height, main.SNAP_GAP_M)
+	b.global_transform = Transform3D(land_r.basis, land_r.origin + Vector3(0.1, 0.05, 0.0))
 	c.place_facing(b.global_position + Vector3(0, 0, -2.5), head)
 	var rel_before: Transform3D = b.global_transform.affine_inverse() * c.global_transform
 	main.on_panel_drag_ended(b)
 	var rel_after: Transform3D = b.global_transform.affine_inverse() * c.global_transform
-	check(rel_before.is_equal_approx(rel_after) and absf(b.global_position.distance_to(drop)) > 0.001,
+	check(rel_before.is_equal_approx(rel_after) and b.global_transform.is_equal_approx(land_r),
 		"linked block moves rigidly while snapping")
+	check(main._linked == {1: true, 2: true}, "snapping does not link or unlink screens")
 	main._linked = {}
 
 	# Snap off, lock.
 	main.snap_enabled = false
-	b.place_facing(Vector3(drop.x, 1.55, drop.z), head)
+	b.global_transform = Transform3D(near.basis, near.origin + Vector3(0.1, 0.05, 0.0))
 	before = b.global_transform
 	main.on_panel_drag_ended(b)
 	check(b.global_transform.is_equal_approx(before), "snap off: nothing moves")

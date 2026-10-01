@@ -97,7 +97,7 @@ var _control_enabled := true
 var _haptics_enabled := true
 var _pointer_hand := "right"
 var _ray_angle := 40.0
-var _face_me := true
+var _face_me := false
 var _layers_enabled := false
 var _pin_visible := false
 var _last_pointer_uv := Vector2(0.5, 0.5)
@@ -1294,7 +1294,7 @@ func _build_input_tab(body: VBoxContainer) -> void:
 	body.add_child(sp)
 	_heading(body, "Moving and feedback")
 	_chk_face_me = CheckButton.new()
-	_chk_face_me.text = "Screens turn to face me while moving"
+	_chk_face_me.text = "Screens face me while moving (off: follow the controller)"
 	_chk_face_me.focus_mode = Control.FOCUS_NONE
 	_chk_face_me.toggled.connect(func(on):
 		_face_me = on

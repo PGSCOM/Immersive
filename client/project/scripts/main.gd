@@ -20,8 +20,13 @@ const WORKSPACE_PATH := "user://immersive2_workspace.json"
 const ARC_RADIUS := 1.25
 const ARC_GAP_M := 0.06
 const EYE_DROP_M := 0.08
-const SNAP_DIST_M := 0.10       ## Release this close to a neighbour's side edge to snap to it
-const SNAP_DEPTH_M := 0.30      ## ...if it is about as far from the head as that neighbour
+## Snapping: a dragged screen whose centre comes within SNAP_CAPTURE_M of
+## where it would sit flush beside another screen (and is turned within
+## SNAP_TURN_DEG of it) shows a white frame there and lands in it on release.
+const SNAP_GAP_M := 0.03        ## Space left between snapped screens
+const SNAP_CAPTURE_M := 0.45
+const SNAP_TURN_DEG := 60.0
+const SNAP_STICKY_M := 0.08     ## The side already shown keeps this much advantage
 ## A restored layout further than this off the gaze is swung back in front.
 const RESTORE_MAX_YAW_DEG := 60.0
 const CODEC_NAMES := {0: "H.264", 1: "HEVC", 2: "MJPEG", 3: "AV1"}
@@ -65,8 +70,9 @@ var lock_layout: bool = false
 var pointer_hand: String = "right"
 ## Controller ray tilt below the aim pose, degrees (read live by vr_input.gd).
 var ray_angle_deg: float = 40.0
-## Grabbed screens turn to face the head (LaserDrag.face_me).
-var screens_face_me: bool = true
+## Grabbed screens turn to face the head (LaserDrag.face_me); off = they follow
+## the controller's position and rotation rigidly.
+var screens_face_me: bool = false
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
@@ -241,6 +247,7 @@ func _process(delta: float) -> void:
 	_handle_stats(delta)
 	_handle_debug_capture(delta)
 	_update_decoders()
+	_update_snap_preview()
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -490,7 +497,8 @@ func _live_panels() -> Array:
 ## screen and every grab bar (vr_input.gd and hand_input.gd both use it).
 ## Returns {} on a miss, else { kind: "overlay" / "keyboard" / "panel" / "bar",
 ## distance, and uv (overlay, panel), panel + monitor_id (panel), target (the
-## node a bar moves) + bar (the GrabBar) }.
+## node a bar moves: a screen, the menu, the keyboard or a ResizeHandle) + bar
+## (the GrabBar or ResizeHandle, both have mark_hovered()) }.
 func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	var hits: Array = []
 	var ui := get_ui_hit_from_ray(ray_origin, ray_direction)
@@ -503,9 +511,15 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	var owners: Array = _live_panels()
 	for p in owners:
 		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
-		if h.get("valid", false):
+		var on_screen: bool = h.get("valid", false)
+		if on_screen:
 			hits.append({"kind": "panel", "distance": h.distance, "uv": h.uv, "panel": p,
 				"monitor_id": int(p.get_meta("monitor_id", 0))})
+		for handle in p.resize_handles:
+			# Probe always (it shows the bracket), but the screen's own pixels win.
+			var d: float = handle.probe(ray_origin, ray_direction)
+			if d >= 0.0 and not on_screen:
+				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
 	owners.append_array([ui_overlay, virtual_keyboard])
 	for o in owners:
 		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
@@ -650,6 +664,10 @@ func _place_new_panel(panel: MeshInstance3D) -> void:
 	at.y = rightmost.global_position.y
 	panel.place_facing(at, Vector3(pos.x, at.y + EYE_DROP_M, pos.z))
 
+## The landing shown by the white frame (see snap_target_for()), and the frame.
+var _snap_pick: Dictionary = {}
+var _snap_frame: SnapFrame = null
+
 func _is_linked(panel: Node3D) -> bool:
 	return _linked.get(int(panel.get_meta("monitor_id", -1)), false)
 
@@ -663,46 +681,63 @@ func drag_group_for(panel: Node3D) -> Array:
 func can_move_panel(_panel: Node3D) -> bool:
 	return not lock_layout
 
-## A screen grab ended: snap the screen (and its linked block) beside the
-## neighbour whose side edge it was released next to. Called before
-## on_layout_changed().
-func on_panel_drag_ended(panel: Node3D) -> void:
+## Where `panel` would land if released now: { panel: the neighbour, side:
+## ScreenPanel.Side, xform: world transform } beside the nearest free side of
+## another screen, or {} (snapping off, or nothing close). The side shown last
+## frame is favoured a little so the choice does not flicker between two.
+func snap_target_for(panel: Node3D) -> Dictionary:
 	if not snap_enabled or not is_instance_valid(panel):
-		return
+		return {}
 	var group := drag_group_for(panel)
-	var head_pos: Vector3 = _head()[0]
-	var d: Vector3 = panel.global_position - head_pos
-	d.y = 0.0
-	var best: Node3D = null
-	var best_err := SNAP_DIST_M
-	var best_side := 0.0
-	var best_want := 0.0
-	for n in _live_panels():
-		if n == panel or group.has(n):
-			continue
-		var dn: Vector3 = n.global_position - head_pos
-		dn.y = 0.0
-		if dn.length() < 0.3 or d.length() < 0.3 or absf(d.length() - dn.length()) > SNAP_DEPTH_M \
-				or absf(panel.global_position.y - n.global_position.y) > 0.35:
-			continue
-		var ang := dn.signed_angle_to(d, Vector3.DOWN)  # + = panel is to the right of n
-		var want: float = n.panel_width / 2.0 + ARC_GAP_M + panel.panel_width / 2.0
-		var err := absf(absf(ang) * dn.length() - want)
-		if err <= best_err:
-			best = n
+	var others := _live_panels().filter(func(p): return p != panel and not group.has(p))
+	var best := {}
+	var best_err := SNAP_CAPTURE_M
+	for n in others:
+		for side in 4:
+			var x: Transform3D = n.landing_beside(side, panel.panel_width, panel.panel_height, SNAP_GAP_M)
+			var err := x.origin.distance_to(panel.global_position)
+			if _snap_pick.get("panel") == n and _snap_pick.get("side") == side:
+				err -= SNAP_STICKY_M
+			if err > best_err or x.basis.z.angle_to(panel.global_basis.z) > deg_to_rad(SNAP_TURN_DEG):
+				continue
+			# Somebody already sits there.
+			var min_side := minf(panel.panel_width, panel.panel_height) * 0.4
+			if others.any(func(q): return q != n and q.global_position.distance_to(x.origin) < min_side):
+				continue
+			best = {"panel": n, "side": side, "xform": x}
 			best_err = err
-			best_side = signf(ang)
-			best_want = want
-	if not best:
+	return best
+
+## Every frame: the white frame follows the screen being dragged, if any.
+func _update_snap_preview() -> void:
+	var dragged: Node3D = null
+	for p in _live_panels():
+		if p.is_dragging():
+			dragged = p
+	_snap_pick = snap_target_for(dragged) if dragged else {}
+	if _snap_pick.is_empty():
+		if _snap_frame:
+			_snap_frame.clear()
 		return
-	var dir: Vector3 = best.global_position - head_pos
-	dir.y = 0.0
-	var dist := dir.length()
-	dir = Basis(Vector3.DOWN, best_side * best_want / dist) * dir.normalized()
+	if not _snap_frame:
+		_snap_frame = SnapFrame.new()
+		add_child(_snap_frame)
+	_snap_frame.show_at(_snap_pick.xform, dragged.panel_width, dragged.panel_height, dragged.get_arc())
+
+## A screen grab ended: it lands in the frame that was showing, and its linked
+## block moves with it. Snapping does not link screens: "Move together" stays
+## the user's choice. Called before on_layout_changed().
+func on_panel_drag_ended(panel: Node3D) -> void:
+	var target := snap_target_for(panel)
+	_snap_pick = {}
+	if _snap_frame:
+		_snap_frame.clear()
+	if target.is_empty():
+		return
 	var old := panel.global_transform
-	panel.place_facing(Vector3(head_pos.x, best.global_position.y, head_pos.z) + dir * dist, head_pos)
-	var moved := panel.global_transform * old.inverse()
-	for g in group:
+	panel.global_transform = target.xform
+	var moved := panel.global_transform * old.affine_inverse()
+	for g in drag_group_for(panel):
 		g.global_transform = moved * g.global_transform
 
 ## Called by vr_input.gd when a grab ends: the layout is now the user's, so
@@ -1776,7 +1811,7 @@ func _save_config() -> void:
 	cfg.set_value("layout", "lock", lock_layout)
 	cfg.set_value("input", "pointer_hand", pointer_hand)
 	cfg.set_value("input", "ray_angle", ray_angle_deg)
-	cfg.set_value("input", "face_me", screens_face_me)
+	cfg.set_value("input", "face_me_moving", screens_face_me)
 	cfg.set_value("stream", "codec", stream_codec)
 	cfg.set_value("stream", "bitrate_kbps", stream_bitrate_kbps)
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
@@ -1831,7 +1866,7 @@ func _load_config() -> void:
 		lock_layout = cfg.get_value("layout", "lock", false)
 		pointer_hand = "left" if cfg.get_value("input", "pointer_hand", "right") == "left" else "right"
 		ray_angle_deg = clampf(float(cfg.get_value("input", "ray_angle", 40.0)), 0.0, 60.0)
-		screens_face_me = cfg.get_value("input", "face_me", true)
+		screens_face_me = cfg.get_value("input", "face_me_moving", false)
 		LaserDrag.face_me = screens_face_me
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
