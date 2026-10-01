@@ -1104,6 +1104,8 @@ func set_sharp_size(w: int, h: int) -> void:
 	for c in _btn_sharp.pressed.get_connections():
 		_btn_sharp.pressed.disconnect(c.callable)
 	_btn_sharp.visible = w > 0
+	# Room for it: the biggest fixed size makes way.
+	_virtual_row.get_child(_virtual_row.get_child_count() - 1).visible = w <= 0
 	_btn_sharp.text = "Sharp (%d × %d)" % [w, h]
 	_btn_sharp.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 
