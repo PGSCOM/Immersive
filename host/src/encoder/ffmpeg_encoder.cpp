@@ -143,13 +143,14 @@ public:
                                       uint32_t pitch, uint64_t timestamp_us) override {
         if (!ctx_ && !reopen()) return {};
 
-        // BGRA (any size) → NV12 at the stream size, BT.601 limited range.
+        // BGRA (any size) → NV12 at the stream size, BT.601 limited range:
+        // swscale's default for RGB → YUV. (Setting it explicitly on every
+        // frame gave the same bytes but re-initialised the context, doubling
+        // the conversion: 3.6 → 6.9 ms at 1080p.)
         sws_ = sws_getCachedContext(sws_, static_cast<int>(width), static_cast<int>(height),
                                     AV_PIX_FMT_BGRA, ctx_->width, ctx_->height, AV_PIX_FMT_NV12,
                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!sws_) return {};
-        const int* coef = sws_getCoefficients(SWS_CS_ITU601);
-        sws_setColorspaceDetails(sws_, coef, 1, coef, 0, 0, 1 << 16, 1 << 16);
 
         if (av_frame_make_writable(sw_frame_) < 0) return {};
         const uint8_t* src[1] = {bgra};
@@ -269,7 +270,11 @@ private:
             av_dict_set(&opts, "forced-idr", "1", 0);
             av_dict_set(&opts, "x264-params", "repeat-headers=1", 0);
         } else if (vaapi) {
-            av_dict_set(&opts, "rc_mode", "CBR", 0);
+            // VBR capped at the bitrate, not CBR: Intel's iHD driver pads
+            // every CBR frame to bitrate/fps (measured: a still 1080p screen
+            // at 20 Mbps sent 41 666-byte P-frames, 123 bytes in VBR), so a
+            // moving mouse cost the Wi-Fi the full rate on every monitor.
+            av_dict_set(&opts, "rc_mode", "VBR", 0);
             av_dict_set(&opts, "async_depth", "1", 0);  // no frames in flight
         } else {  // nvenc
             av_dict_set(&opts, "preset", "p4", 0);
@@ -311,7 +316,7 @@ private:
         return true;
     }
 
-    /// CBR at config_.bitrate_kbps with ~50 ms of VBV, capped at 600 kbit: an
+    /// At most config_.bitrate_kbps with ~50 ms of VBV, capped at 600 kbit: an
     /// IDR must fit, so it stays a few dozen UDP chunks (same reasoning as
     /// mf_encoder.cpp).
     /// The encoders budget bits per frame from the frame rate they were

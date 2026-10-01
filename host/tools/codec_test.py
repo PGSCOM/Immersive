@@ -8,6 +8,8 @@ H.264 fallback, downscaled to 640 px wide by the encoder; a keyframe asked
 for mid-stream (REQUEST_KEYFRAME) arrives within a few frames, carries its
 parameter sets and decodes on its own — what a headset joining late or
 recovering from Wi-Fi loss relies on — to the right grey on every monitor.
+A still screen gets P-frames after that keyframe (refining it), and then no
+keyframe arrives that nobody asked for (no periodic or keepalive IDR).
 host/tools/x11_test.py reuses check_codecs() on real red/blue X11 content.
 """
 import os
@@ -120,7 +122,9 @@ def check_codecs(s, udp, want_rgb, sizes):
     s.settimeout(0.5)
     for req, label in ((0, "H.264"), (1, "HEVC"), (3, "AV1")):
         drain(s)  # earlier STREAM_STARTs still queued on the socket
-        send_stream_config(s, req, 8000, 0, 640, 30)
+        # 1 Mbps: the host's floor, so the adaptive rate never changes it (on
+        # VAAPI each change is a re-open, whose IDR the checks below would see).
+        send_stream_config(s, req, 1000, 0, 640, 30)
         starts = wait_stream_starts(s, ids)
         if set(starts) != set(ids):
             fail(f"{label}: no STREAM_START for every monitor: {starts}")
@@ -151,6 +155,22 @@ def check_codecs(s, udp, want_rgb, sizes):
             if n < len(tail) or any(abs(a - b) > 40 for a, b in zip(pix, want)):
                 fail(f"{label}: monitor {mid} decoded {n}/{len(tail)} frames, "
                      f"pixel {pix}, expected {want}")
+            # A still screen (the stub's monitors 0-1 send one frame, then
+            # nothing) is refined after that IDR with P-frames, not left at
+            # the IDR's blurred quality.
+            if len(tail) < 10:
+                fail(f"{label}: monitor {mid}: {len(tail)} frames after the keyframe, "
+                     "a still screen should be refined with P-frames")
+        # Then no IDR unless asked: not a periodic one, not the 1 s keepalive
+        # of a still screen (each would blur its text again).
+        quiet = collect(udp, 2.5)
+        for mid in ids:
+            got = quiet.get(mid, {})
+            keys = [n for n in sorted(got) if is_keyframe(codec, got[n])]
+            if not got or keys:
+                fail(f"{label}: monitor {mid}: {len(got)} frames, keyframes {keys} "
+                     "in 2.5 s nobody asked for one")
+        print(f"[codec] {label}: still screens refined, then kept alive without IDRs")
 
 
 def main():

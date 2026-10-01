@@ -550,20 +550,27 @@ int main(int argc, char* argv[]) {
         enc_config.fps          = (cfg.max_fps > 0)
                                       ? cfg.max_fps
                                       : static_cast<uint32_t>(display.refresh_rate);
-        // Keyframes are driven explicitly from the streaming loop below: a fixed
-        // ~1 s periodic refresh plus on-demand IDRs whenever the client reports
-        // packet loss. The encoder's own GOP is therefore only a safety ceiling.
-        // Driving IDRs in software is deterministic even on hardware MFTs that
-        // quietly ignore CODECAPI_AVEncMPVGOPSize and would otherwise emit a
-        // single IDR followed by an unbroken run of P-frames — the root cause of
-        // inter-frame artefacts (e.g. a "ghost" cursor left by a dropped delta)
-        // lingering until something else forces a refresh.
-        enc_config.gop_size     = std::max<uint32_t>(30, enc_config.fps * 4);
+        // Keyframes are driven from the streaming loop below: the first frame,
+        // and on demand whenever the client sees a frame missing (it asks with
+        // REQUEST_KEYFRAME; every lost frame shows as a gap in frame numbers,
+        // a lost last one at the next 1 s idle re-send). No periodic IDR: an
+        // IDR must fit the small VBV, so it shows a desktop's text blurred
+        // (~30 dB PSNR against ~54 dB once P-frames have refined it), and a
+        // refresh every second made the whole picture pulse. The encoder's own
+        // GOP is only a safety ceiling.
+        enc_config.gop_size     = std::max<uint32_t>(30, enc_config.fps * 60);
         enc_config.jpeg_quality = (cfg.jpeg_quality >= 10 && cfg.jpeg_quality <= 95)
                                       ? cfg.jpeg_quality : jpeg_quality.load();
-        if (cfg.bitrate_kbps > 0) {
-            enc_config.bitrate_kbps = std::min<uint32_t>(cfg.bitrate_kbps, 100000);
-        }
+        // A bitrate ceiling scaled to this client's share of its link (the
+        // server's rate control, from FRAME_ACKs), at least 1 Mbps. The
+        // encoder opens at it, as retune() below keeps it: opened at the
+        // ceiling, VAAPI had to re-open (an IDR) at once.
+        auto link_kbps = [&](uint32_t ceil) {
+            return std::max(std::min(ceil, 1000u),
+                            static_cast<uint32_t>(ceil * server->link_rate_scale(client_id)));
+        };
+        enc_config.bitrate_kbps = link_kbps(cfg.bitrate_kbps > 0
+            ? std::min<uint32_t>(cfg.bitrate_kbps, 100000) : enc_config.bitrate_kbps);
 
         // Fallback chain: requested codec → H.264 → MJPEG. `actual_codec`
         // (protocol value) is what we announce in STREAM_START.
@@ -654,15 +661,18 @@ int main(int argc, char* argv[]) {
                 f = std::min(f, std::max(1u, static_cast<uint32_t>(
                                                  fps_cap * std::min(1.0f, 2 * share) + 0.5f)));
             } else {
-                c.bitrate_kbps = std::max(std::min(ceil_kbps, 1000u),
-                                          static_cast<uint32_t>(ceil_kbps * share));
+                c.bitrate_kbps = link_kbps(ceil_kbps);
             }
             c.fps = f;
             const bool same = c.fps == enc_config.fps && c.jpeg_quality == enc_config.jpeg_quality;
-            const uint32_t kbps_delta = c.bitrate_kbps > enc_config.bitrate_kbps
-                ? c.bitrate_kbps - enc_config.bitrate_kbps : enc_config.bitrate_kbps - c.bitrate_kbps;
-            if (same && (forced ? kbps_delta == 0 : kbps_delta * 20 < enc_config.bitrate_kbps))
-                return true;  // automatic: ignore changes under 5%
+            // Automatic: a cut at once (the server cuts by 30 %), a raise once
+            // it adds up to 25 % or reaches the ceiling. On VAAPI every change
+            // is a re-open (an IDR, a 20-40 ms stall), so the climb from half
+            // rate is three of them instead of one a second for six seconds.
+            const uint32_t kbps = c.bitrate_kbps, cur = enc_config.bitrate_kbps;
+            const bool minor = kbps >= cur ? kbps == cur || (kbps * 4 < cur * 5 && kbps != ceil_kbps)
+                                           : kbps * 20 > cur * 19;
+            if (same && (forced ? kbps == cur : minor)) return true;
             if (!forced && !auto_tune) return true;
 
             immersive::EncoderConfig live = c;
@@ -740,23 +750,24 @@ int main(int argc, char* argv[]) {
         uint32_t frame_number = first_frame;
         auto last_sent = std::chrono::steady_clock::time_point{};
 
-        // Guaranteed periodic IDR (~1 s of sent frames). Independent of whether
-        // the MFT honours its GOP, this bounds how long any inter-frame
-        // corruption can persist; the client's on-demand REQUEST_KEYFRAME clears
-        // it faster (within a round-trip) when loss is actually detected.
         // On-demand IDRs at most every 200 ms: a client that keeps asking
         // while the last one is still on its way gets it once, not per ask.
-        uint32_t frames_since_keyframe = fps;  // force one promptly
+        // The first frame is one.
+        ctx->force_keyframe = true;
         auto last_idr = std::chrono::steady_clock::time_point{};
         const auto kIdrGap = std::chrono::milliseconds(200);
 
-        // Encoder overload: the CPU time of one frame (scale + encode)
-        // against the frame interval. A CPU encoder that can't keep up
-        // otherwise delivers whatever rate it manages while budgeting its
-        // bits for frames that never come; paced to what it holds, with 15%
-        // headroom, the frames it does send get the whole bitrate.
-        // Judged only while frames flow (an idle screen sends one IDR a
-        // second) and after the encoder's slow first frames.
+        // Encoder overload, software encoders only (libx264, MJPEG): the CPU
+        // time of one frame (scale + encode) against the frame interval. A
+        // CPU encoder that can't keep up otherwise delivers whatever rate it
+        // manages while budgeting its bits for frames that never come; paced
+        // to what it holds, with 15% headroom, the frames it does send get
+        // the whole bitrate. (A GPU encoder that is slow simply takes the
+        // newest frame when it is free; pacing it below that only lost frames,
+        // and on VAAPI every new frame rate meant a re-open and an IDR.)
+        // Judged only on freshly captured frames (a re-sent still frame is
+        // not the load of a moving screen) and after the slow first frames.
+        const bool cpu_paced = stream_encoder->backend() == immersive::EncoderBackend::SOFTWARE;
         double busy_ms = 0;        // moving average
         uint32_t encoded = 0;      // frames encoded, all time
         uint32_t tick_frames = 0;  // since the last tune tick
@@ -771,10 +782,30 @@ int main(int argc, char* argv[]) {
         // come. Both are served from this frame when the capture goes idle.
         std::unique_ptr<immersive::CapturedFrame> last_frame;
         bool last_frame_unsent = false;
+        // Still-screen refinement (inter codecs): once the screen stops
+        // changing an event-driven capture sends nothing more, so the last
+        // frame would stay at the quality its bit budget allowed in motion
+        // (or an IDR's). It is re-encoded as P-frames at the paced rate this
+        // many times after each change or IDR, which brings static text from
+        // ~30 to ~54 dB PSNR in about 20 frames (VAAPI and libx264, measured),
+        // then every second as a keepalive (a few hundred bytes).
+        constexpr uint32_t kRefineFrames = 30;
+        uint32_t refine_left = 0;
 
         while (g_running && !ctx->stop) {
-            auto frame = stream_capture->acquire_frame(16);  // ~60fps timeout
+            // Wake when a held or refining frame is due, not a whole capture
+            // interval later: waiting for the next capture made a frame held
+            // by the pacing go out up to one capture interval late (measured:
+            // 28 fps out of a 40 fps pace).
+            uint32_t wait_ms = 16;  // ~60 fps
+            if (last_frame && (last_frame_unsent || refine_left > 0)) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    last_sent + min_interval - std::chrono::steady_clock::now()).count();
+                wait_ms = static_cast<uint32_t>(std::clamp<long long>(left, 1, 16));
+            }
+            auto frame = stream_capture->acquire_frame(wait_ms);
             auto now = std::chrono::steady_clock::now();
+            bool resend = false;  // frame is last_frame again, not a new capture
 
             if (ctx->cfg_changed.exchange(false)) {
                 immersive::protocol::StreamConfig c;
@@ -791,7 +822,7 @@ int main(int argc, char* argv[]) {
             }
             if (now >= next_tune) {
                 next_tune = now + std::chrono::milliseconds(500);
-                if (busy_ms > 0 && tick_frames >= 5) {
+                if (cpu_paced && busy_ms > 0 && tick_frames >= 5) {
                     const uint32_t can = std::min(fps_cap, std::max(5u,
                         static_cast<uint32_t>(1000.0 / (busy_ms * 1.15))));
                     const uint32_t cur = std::min(cpu_fps, fps_cap);
@@ -810,11 +841,11 @@ int main(int argc, char* argv[]) {
 
             if (!frame && stream_capture->is_capturing() && last_frame) {
                 const bool due = now - last_sent >= min_interval;
-                if ((last_frame_unsent && due) ||
+                if (((last_frame_unsent || refine_left > 0) && due) ||
                     (ctx->force_keyframe && now - last_idr >= kIdrGap) ||
                     now - last_sent >= std::chrono::seconds(1)) {
+                    resend = !last_frame_unsent;
                     frame = std::move(last_frame);  // idle: (re)send the newest
-                    if (!last_frame_unsent) ctx->force_keyframe = true;
                 }
             }
             if (!frame) {
@@ -867,19 +898,11 @@ int main(int argc, char* argv[]) {
                 w = out_w; h = out_h; pitch = out_w * 4;
             }
 
-            // Emit an IDR when the client asks (recovery after packet loss) or
-            // when the periodic refresh interval elapses. The periodic IDR caps
-            // how long a dropped P-frame can leave artefacts on screen; the
-            // on-demand request clears them within a round-trip. Both are no-ops
-            // for MJPEG (every frame is already independent).
-            bool want_keyframe = frames_since_keyframe >= fps;
+            // An IDR when the client asks (recovery after packet loss, a
+            // no-op for MJPEG whose every frame stands alone) and first.
             if (ctx->force_keyframe && now - last_idr >= kIdrGap) {
                 ctx->force_keyframe = false;
-                want_keyframe = true;
-            }
-            if (want_keyframe) {
                 stream_encoder->request_keyframe();
-                frames_since_keyframe = 0;
                 last_idr = now;
             }
 
@@ -887,10 +910,15 @@ int main(int argc, char* argv[]) {
                 pixels, w, h, pitch, frame->timestamp_us);
             const double work_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - now).count();
-            if (++encoded > 5) {
+            if (!resend && ++encoded > 5) {
                 busy_ms = busy_ms > 0 ? busy_ms * 0.95 + work_ms * 0.05 : work_ms;
                 ++tick_frames;
             }
+            bool key = false;
+            for (const auto& pkt : packets) key = key || pkt.is_keyframe;
+            if (is_mjpeg) refine_left = 0;
+            else if (!resend || key) refine_left = kRefineFrames;
+            else if (refine_left > 0) --refine_left;
 
             for (const auto& pkt : packets) {
                 server->send_video_packet(
@@ -906,7 +934,6 @@ int main(int argc, char* argv[]) {
                 frame_number++;  // number only frames actually sent
                 ctx->frames++;
                 last_sent = now;
-                frames_since_keyframe++;
             }
             last_frame = std::move(frame);
             last_frame_unsent = false;
