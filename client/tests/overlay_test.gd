@@ -167,7 +167,8 @@ func _run() -> void:
 	check(text_w <= st.size.x, "status line fits (%d <= %d px) -> '%s'" % [text_w, st.size.x, st.text])
 	ov.set_host_label("desk-pc")
 	ov.set_link("USB")
-	var rows: Array = ov._monitor_list.find_children("*", "CheckButton", true, false)
+	var rows: Array = ov._monitor_list.find_children("*", "CheckButton", true, false).filter(
+		func(b): return b.text != "Move together")
 	check(rows.size() == 3 and rows[0].button_pressed and not rows[1].button_pressed,
 		"monitor switches show what streams")
 	await _click(rows[1])
