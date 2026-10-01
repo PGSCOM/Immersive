@@ -48,7 +48,10 @@ class AndroidExportPlugin extends EditorExportPlugin:
 	# that declare these. They used to sit in export_presets.cfg under
 	# "gradle_build/manifest_additions", which is not a Godot option, so they
 	# never reached the APK. This is the supported way to add manifest entries.
+	# "controller" + "handtracking" is what PICO's own OpenXR SDK writes for an
+	# app that takes both controllers and bare hands.
 	func _get_android_manifest_application_element_contents(
 			_platform: EditorExportPlatform, _debug: bool) -> String:
 		return "<meta-data android:name=\"handtracking\" android:value=\"1\" />\n" + \
+			"<meta-data android:name=\"controller\" android:value=\"1\" />\n" + \
 			"<meta-data android:name=\"Hand_Tracking_HighFrequency\" android:value=\"1\" />\n"

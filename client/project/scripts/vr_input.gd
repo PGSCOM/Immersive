@@ -18,6 +18,11 @@ extends Node
 ##
 ## Builds its own laser, cursor dot and controller model (the runtime's model
 ## when it offers one through OpenXRRenderModelManager, a plain one otherwise).
+##
+## Bare hands win: while the runtime reports a hand (HandInput.any_hand(), the
+## hand interaction profile or a camera-tracked hand) every controller hides
+## its laser and leaves the pointer to hand_input.gd, and a side that is a
+## hand hides its model too (its tracker then follows the hand's aim pose).
 
 const TRIGGER_PRESS_THRESHOLD := 0.55
 const TRIGGER_RELEASE_THRESHOLD := 0.35
@@ -48,6 +53,8 @@ const RAY_ORIGIN := Transform3D(
 const POINTER_COLOR := Color(0.93, 0.92, 0.88)
 
 enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
+
+const HandInput := preload("res://scripts/hand_input.gd")
 
 ## The instance whose controller drives the pointer.
 static var active: Node = null
@@ -88,6 +95,8 @@ var _ui_scroll_s := 0.0
 
 var _idle_ref := Transform3D()
 var _idle_s := 0.0
+## Who drives this side right now, for the log ("pointer", "hands", ...).
+var _role := ""
 ## Strength of the last vibration asked for (tests read it).
 var last_buzz := 0.0
 
@@ -229,23 +238,28 @@ func _process(delta: float) -> void:
 	if not controller:
 		return
 	var idle := _update_idle(delta)
+	var hands := HandInput.any_hand()
+	var shown := not idle and not HandInput.is_hand(not _is_right())
 	var has_model := is_instance_valid(_render_models) and _render_models.get_child_count() > 0
-	_visual.visible = not idle and not has_model
+	_visual.visible = shown and not has_model
 	if is_instance_valid(_render_models):
-		_render_models.visible = not idle
+		_render_models.visible = shown
 
 	# Bare hands own the pointer (hand_input.gd); a put-down controller gives it up.
-	if _hands_active() or idle:
+	if hands or idle:
 		_release_all()
 		raycast_origin.visible = false
 		if active == self and idle:
 			active = null
+		_set_role("hands" if hands else "put down")
 		return
 	if active == null:
 		active = self
 	if active != self:
 		raycast_origin.visible = false
+		_set_role("standby")
 		return
+	_set_role("pointer")
 	raycast_origin.visible = true
 	_apply_ray_angle()
 
@@ -474,7 +488,7 @@ func _set_trigger_state(pressed: bool) -> void:
 		return
 	_trigger_pressed = pressed
 	# Runtimes may map a hand pinch onto the trigger; hand_input.gd clicks for it.
-	if not main_scene or _hands_active():
+	if not main_scene or HandInput.any_hand():
 		return
 	if pressed:
 		_take_over()
@@ -507,7 +521,7 @@ func _set_grip_state(pressed: bool) -> void:
 	if _grip_pressed == pressed:
 		return
 	_grip_pressed = pressed
-	if _hands_active() or not main_scene:
+	if HandInput.any_hand() or not main_scene:
 		return
 	if pressed:
 		_take_over()
@@ -548,16 +562,12 @@ func _update_idle(delta: float) -> bool:
 		_idle_s += delta
 	return _idle_s >= IDLE_HIDE_S
 
-## True when a hand is being *optically* tracked (bare-hand mode). Mirror of
-## hand_input.gd::_is_optical_hand_tracking — used to yield the pointer to the
-## hand-tracking path so the two never push conflicting cursor positions.
-func _hands_active() -> bool:
-	for path in [&"/user/hand_tracker/right", &"/user/hand_tracker/left"]:
-		var hand := XRServer.get_tracker(path) as XRHandTracker
-		if hand == null or not hand.get_has_tracking_data():
-			continue
-		var source := hand.get_hand_tracking_source()
-		if source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED \
-				or source == XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN:
-			return true
-	return false
+func _set_role(role: String) -> void:
+	if role != _role:
+		_role = role
+		print("[VRInput] %s controller: %s (profile %s)" % [
+			"right" if _is_right() else "left", role, _profile()])
+
+func _profile() -> String:
+	var t := XRServer.get_tracker(controller.tracker) as XRPositionalTracker
+	return t.profile if t else "-"

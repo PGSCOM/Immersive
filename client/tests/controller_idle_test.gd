@@ -9,7 +9,9 @@ extends SceneTree
 ##   - the trigger on the grab bar under the screen grabs it (no click) until
 ##     it is let go; a locked layout refuses the grab;
 ##   - the ray tilt follows main.gd's ray_angle_deg live;
-##   - the other controller's trigger takes the pointer over.
+##   - the other controller's trigger takes the pointer over;
+##   - bare hands (the hand interaction profile, or a tracked hand) take the
+##     pointer and hide that side's model; the controller gets it back.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/controller_idle_test.gd"
@@ -206,6 +208,39 @@ func _run() -> void:
 	r._set_trigger_state(true)
 	r._set_trigger_state(false)
 	await _frames(2)
+
+	# --- Bare hands take the pointer, a controller gets it back -------------
+	var pad := XRControllerTracker.new()  # what OpenXR reports for /user/hand/right
+	pad.name = &"right_hand"
+	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
+	XRServer.add_tracker(pad)
+	_aim(right, Vector3(0, 1.25, -1.5))
+	await _frames(3)
+	check(laser.visible and model.visible, "a controller in use has the pointer")
+	pad.profile = "/interaction_profiles/ext/hand_interaction_ext"
+	await _frames(2)
+	check(not laser.visible and not model.visible,
+		"the runtime switched the right side to a bare hand: no laser, no controller model")
+	mark = main.sent.size()
+	r._set_trigger_state(true)
+	await _frames(2)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(main.sent.slice(mark).all(func(e): return e[2] == 0), "meanwhile a trigger event does not click")
+	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
+	await _frames(2)
+	check(laser.visible and model.visible, "the controller again: it drives the pointer at once")
+	XRServer.remove_tracker(pad)
+	var hand := XRHandTracker.new()
+	hand.name = &"/user/hand_tracker/left"
+	hand.has_tracking_data = true  # source UNKNOWN, as on the Pico (no data-source extension)
+	XRServer.add_tracker(hand)
+	await _frames(2)
+	check(not laser.visible, "a camera-tracked hand takes the pointer")
+	hand.has_tracking_data = false
+	await _frames(2)
+	check(laser.visible, "the hand gone, the controller has it back")
+	XRServer.remove_tracker(hand)
 
 	# --- Put down: disappears, and comes back when moved -------------------
 	await _frames(72)
