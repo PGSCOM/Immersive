@@ -32,6 +32,8 @@ signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int,
 signal auto_quality_requested
 signal virtual_screen_requested(width: int, height: int)
 signal virtual_screen_remove_requested(monitor_id: int)
+## A virtual screen's "1:1" button: resize it to what the headset resolves.
+signal virtual_screen_match_requested(monitor_id: int)
 ## Pointer and keyboards drive the PC (off = look only).
 signal control_toggled(enabled: bool)
 signal haptics_toggled(enabled: bool)
@@ -132,6 +134,7 @@ var _btn_arrange: Button
 var _btn_recenter: Button
 var _btn_keyboard: Button
 var _virtual_row: HBoxContainer
+var _btn_sharp: Button
 var _slider_curvature: HSlider
 var _lbl_curvature_value: Label
 
@@ -1071,6 +1074,10 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	var vlabel := _label("Add a virtual screen", 20, UiTheme.INK_2)
 	vlabel.custom_minimum_size.x = 210
 	_virtual_row.add_child(vlabel)
+	_btn_sharp = _button("Sharp")
+	_btn_sharp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_btn_sharp.visible = false
+	_virtual_row.add_child(_btn_sharp)
 	for size in VIRTUAL_SIZES:
 		var b := _button("%d × %d" % size)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1089,6 +1096,16 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	var r := _slider_row(body, "Curvature", 0, 100, 1, _on_curvature_changed)
 	_slider_curvature = r[0]
 	_lbl_curvature_value = r[1]
+
+## The size that is 1:1 for a new screen at the default spot (0 = unknown).
+func set_sharp_size(w: int, h: int) -> void:
+	if not _btn_sharp:
+		return
+	for c in _btn_sharp.pressed.get_connections():
+		_btn_sharp.pressed.disconnect(c.callable)
+	_btn_sharp.visible = w > 0
+	_btn_sharp.text = "Sharp (%d × %d)" % [w, h]
+	_btn_sharp.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 
 func _curve_text() -> String:
 	var amount := _curvature_amount if _curved_enabled else 0.0
@@ -1132,13 +1149,20 @@ func _rebuild_monitor_list() -> void:
 		# Every row keeps the same trailing slot, so the switches line up;
 		# a virtual screen fills it with its Remove button.
 		var slot := Control.new()
-		slot.custom_minimum_size = Vector2(116, 0)
+		slot.custom_minimum_size = Vector2(190, 0)
 		line.add_child(slot)
 		if mon.get("virtual", false):
+			var btns := _hbox(6)
+			btns.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			slot.add_child(btns)
+			var match_btn := _button("1:1")
+			match_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			match_btn.pressed.connect(func(): virtual_screen_match_requested.emit(mid))
+			btns.add_child(match_btn)
 			var remove := _button("Remove")
-			remove.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			remove.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			remove.pressed.connect(func(): virtual_screen_remove_requested.emit(mid))
-			slot.add_child(remove)
+			btns.add_child(remove)
 
 func _on_curvature_changed(value: float) -> void:
 	_curvature_amount = value / 100.0

@@ -141,6 +141,8 @@ var _audio_on: bool = false
 var _host_flags: int = 0
 ## A virtual screen we asked for, to show as soon as the host lists it.
 var _pending_virtual_id: int = -1
+## A 1:1 resize in flight: old id, size, old layout, whether it is creating.
+var _match: Dictionary = {}
 
 # ---------------------------------------------------------------------------
 # Test/debug harness — driven from immersive2_config.cfg [test] section or
@@ -677,6 +679,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.auto_quality_requested.connect(_on_overlay_auto_quality_requested)
 	ui_overlay.virtual_screen_requested.connect(request_virtual_screen)
 	ui_overlay.virtual_screen_remove_requested.connect(remove_virtual_screen)
+	ui_overlay.virtual_screen_match_requested.connect(match_virtual_screen)
 	ui_overlay.control_toggled.connect(func(on: bool):
 		control_enabled = on
 		_last_mouse_state.clear()
@@ -712,6 +715,8 @@ func _update_overlay_state() -> void:
 func _update_overlay_monitors() -> void:
 	if ui_overlay:
 		ui_overlay.set_active_monitors(active_monitor_ids)
+		var sharp := one_to_one_size(1.6, ARC_RADIUS, 16.0 / 9.0, _headset_ppd())
+		ui_overlay.set_sharp_size(sharp.x, sharp.y)
 
 # ---------------------------------------------------------------------------
 # Stream quality
@@ -722,13 +727,46 @@ func _send_stream_config() -> void:
 		network_client.send_stream_config(stream_codec, stream_bitrate_kbps,
 			stream_jpeg_quality, stream_max_width, stream_fps)
 
-## Native size of the monitor shown on the first panel (or first available
+## The screen being worked on: the one the pointer was last on, else the first.
+func _reference_panel() -> MeshInstance3D:
+	var panels := _live_panels()
+	var i := pick_reference(_last_pointed_monitor,
+		panels.map(func(p): return int(p.get_meta("monitor_id", -1))))
+	return panels[i] if i >= 0 else null
+
+## Index into `shown_ids` of the pointed monitor, else 0; -1 when none shown.
+static func pick_reference(pointed: int, shown_ids: Array) -> int:
+	if shown_ids.is_empty():
+		return -1
+	return maxi(shown_ids.find(pointed), 0)
+
+## What the headset resolves, pixels per degree: the eye buffer width over the
+## real horizontal FOV when XR is up, else the old guess (95 degrees).
+func _headset_ppd() -> float:
+	var xr := XRServer.get_primary_interface()
+	if xr and xr.is_initialized():
+		var size: Vector2 = xr.get_render_target_size()
+		if size.x > 0.0 and size.y > 0.0:
+			var proj: Projection = xr.get_projection_for_view(0, size.x / size.y, 0.05, 100.0)
+			if proj.x.x > 0.01:
+				return maxf(8.0, size.x / rad_to_deg(2.0 * atan(1.0 / proj.x.x)))
+	return maxf(8.0, float(get_viewport().size.x) / 95.0)
+
+## Pixels that make a screen `width_m` wide, `distance_m` away, 1:1 with a
+## headset resolving `ppd`: multiples of 8, within 640..3840 x 480..2160.
+static func one_to_one_size(width_m: float, distance_m: float, aspect: float, ppd: float) -> Vector2i:
+	var angle := rad_to_deg(2.0 * atan(width_m / (2.0 * maxf(0.3, distance_m))))
+	var w := clampi(roundi(ppd * angle / 8.0) * 8, 640, 3840)
+	var h := clampi(roundi(w / maxf(aspect, 0.1) / 8.0) * 8, 480, 2160)
+	return Vector2i(w, h)
+
+## Native size of the monitor shown on the pointed panel (or first available
 ## monitor) — reference for percentage-based downscaling.
 func _reference_monitor() -> Dictionary:
 	var mon_id := -1
-	for panel in _live_panels():
-		mon_id = int(panel.get_meta("monitor_id", -1))
-		break
+	var ref := _reference_panel()
+	if ref:
+		mon_id = int(ref.get_meta("monitor_id", -1))
 	if mon_id < 0 and not active_monitor_ids.is_empty():
 		mon_id = active_monitor_ids[0]
 	for m in available_monitors:
@@ -760,20 +798,18 @@ func _recompute_stream_max_width() -> void:
 func compute_ideal_stream_settings() -> Dictionary:
 	var panel_w_m := 1.6
 	var distance := ARC_RADIUS
-	var panels := _live_panels()
-	if not panels.is_empty():
-		panel_w_m = panels[0].panel_width
+	var ref := _reference_panel()
+	if ref:
+		panel_w_m = ref.panel_width
 		if xr_camera:
-			distance = (panels[0].global_position - xr_camera.global_position).length()
+			distance = (ref.global_position - xr_camera.global_position).length()
 
 	var mon := _reference_monitor()
 	var native_w: int = mon.get("width", 1920)
 	var native_h: int = mon.get("height", 1080)
 	var native_hz: int = mon.get("refresh_rate", 60)
 
-	# Headset pixels-per-degree from the XR eye buffer (approx. 95° hFOV)
-	var vp_w := float(get_viewport().size.x)
-	var ppd: float = max(8.0, vp_w / 95.0)
+	var ppd := _headset_ppd()
 	var panel_angle_deg := rad_to_deg(2.0 * atan(panel_w_m / (2.0 * max(0.3, distance))))
 	var ideal_w := int(clamp(ppd * panel_angle_deg, 480.0, float(native_w)))
 	ideal_w = int(round(ideal_w / 16.0)) * 16
@@ -947,6 +983,7 @@ func _on_disconnected() -> void:
 	var was_streaming := current_state == State.STREAMING
 	current_state = State.DISCONNECTED
 	_pending_virtual_id = -1
+	_match.clear()
 	_update_overlay_state()
 	_update_discovery()
 	if audio_receiver:
@@ -1338,6 +1375,8 @@ func remove_virtual_screen(monitor_id: int) -> void:
 	network_client.send_virtual_display_remove(monitor_id)
 
 func _on_virtual_display_result(status: int, removed: bool, monitor_id: int) -> void:
+	if not _match.is_empty() and _match_step(status, monitor_id):
+		return
 	if status != 0:
 		var why := {
 			1: "This PC can't make virtual screens (it needs GNOME on Wayland, X11 or macOS).",
@@ -1357,6 +1396,48 @@ func _on_virtual_display_result(status: int, removed: bool, monitor_id: int) -> 
 		if int(m.id) == monitor_id:
 			_show_new_virtual_screen()
 			return
+
+## Replace a virtual screen by one sized 1:1 for where it hangs now. The new
+## one takes the old one's place and width when its stream starts.
+func match_virtual_screen(monitor_id: int) -> void:
+	if not _match.is_empty() or not ui_overlay:
+		return
+	var panel := _find_panel_for_monitor(monitor_id)
+	if panel == null:
+		ui_overlay.set_notice("Turn that screen on first.")
+		return
+	var head: Vector3 = _head()[0]
+	var size := one_to_one_size(panel.panel_width, (panel.global_position - head).length(),
+		float(panel.screen_width) / float(panel.screen_height), _headset_ppd())
+	if absf(panel.screen_width - size.x) <= 0.03 * size.x:
+		ui_overlay.set_notice("Already sharp at %d × %d for this distance." % [panel.screen_width, panel.screen_height])
+		return
+	_match = {"old": monitor_id, "size": size, "layout": panel.get_layout_state(), "creating": false}
+	remove_virtual_screen(monitor_id)
+
+## Next step of match_virtual_screen; true when the result was consumed.
+func _match_step(status: int, monitor_id: int) -> bool:
+	var size: Vector2i = _match["size"]
+	if not _match["creating"]:
+		if status != 0:
+			_match.clear()
+			ui_overlay.set_notice("The PC would not change that screen.")
+			return true
+		_match["creating"] = true
+		_layouts.erase(_match["old"])
+		network_client.send_virtual_display_create(size.x, size.y, 60)
+		return true
+	var layout: Dictionary = _match["layout"]
+	_match.clear()
+	if status != 0:
+		return false  # normal error notice; the old screen is gone
+	_layouts[monitor_id] = layout
+	ui_overlay.set_notice("Screen set to %d × %d for this distance." % [size.x, size.y])
+	_pending_virtual_id = monitor_id
+	for m in available_monitors:
+		if int(m.id) == monitor_id:
+			_show_new_virtual_screen()
+	return true
 
 func _show_new_virtual_screen() -> void:
 	var mid := _pending_virtual_id
