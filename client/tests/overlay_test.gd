@@ -31,6 +31,7 @@ func _initialize() -> void:
 	ov.control_toggled.connect(func(on): events.append(["control", on]))
 	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
 	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
+	ov.pointer_settings_changed.connect(func(h, a, f): events.append(["pointer", h, a, f]))
 	_run()
 
 func check(cond: bool, what: String) -> void:
@@ -54,6 +55,14 @@ func _click(ctrl: Control) -> void:
 	await _frames(2)
 	ov.inject_pointer_move(uv + Vector2(0.002, 0.001))  # pointers jitter
 	await _frames(1)
+	ov.inject_pointer_button(false)
+	await _frames(3)
+
+func _click_at(uv: Vector2) -> void:
+	ov.inject_pointer_move(uv)
+	await _frames(2)
+	ov.inject_pointer_button(true)
+	await _frames(2)
 	ov.inject_pointer_button(false)
 	await _frames(3)
 
@@ -203,8 +212,6 @@ func _run() -> void:
 	check(events.back() == ["look", "dusk"], "Space: pick Dusk")
 	await _click(ov._chk_layers)
 	check(events.back() == ["layers", true], "Space: sharper-text switch")
-	await _click(ov._chk_haptics)
-	check(events.back() == ["haptics", false], "Space: vibration switch")
 	await _step("space")
 
 	await _click(ov._tab_buttons[3])
@@ -229,6 +236,26 @@ func _run() -> void:
 	check(during == 0 and bitrates.size() == 1 and bitrates[0] == ov._bitrate_kbps and bitrates[0] > 60000,
 		"Quality: a bitrate drag applies once, on release -> %s (%d while held)" % [bitrates, during])
 	await _step("quality")
+
+	ov.set_pointer_settings("right", 40.0, true)
+	await _click(ov._tab_buttons[4])
+	check(ov._tab == 4 and _btn("Right hand").button_pressed and ov._lbl_ray_value.text == "40°"
+		and ov._chk_face_me.button_pressed, "Input: shows what main.gd pushed in")
+	await _click(_btn("Left hand"))
+	check(events.back() == ["pointer", "left", 40.0, true], "Input: point with the left hand -> %s" % [events.back()])
+	var rr: Rect2 = ov._slider_ray.get_global_rect()
+	await _click_at((rr.position + Vector2(2.0, rr.size.y / 2.0)) / Vector2(ov._viewport.size))
+	check(events.back()[0] == "pointer" and events.back()[2] < 5.0 and ov._lbl_ray_value.text == "%d°" % int(events.back()[2]),
+		"Input: the ray angle slider -> %s" % [events.back()])
+	await _click(ov._chk_face_me)
+	check(events.back()[0] == "pointer" and events.back()[3] == false, "Input: face-me switch")
+	await _click(ov._chk_haptics)
+	check(events.back() == ["haptics", false], "Input: vibration switch")
+	var ind: Panel = ov._tab_indicator
+	var tab: Button = ov._tab_buttons[4]
+	check(tab.get_global_rect().end.x <= ov._viewport.size.x - 30 and absf(ind.position.x - tab.position.x - 14) < 1.0,
+		"five tabs fit the bar and the indicator sits under Input")
+	await _step("input")
 
 	await _click(_btn("Close"))
 	check(not ov.visible, "Close hides the menu")

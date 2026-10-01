@@ -4,9 +4,13 @@ extends SceneTree
 ##     UV (so the mouse lands under the laser), at the right distance;
 ##   - grabbing a screen keeps the grabbed point on the ray, the screen
 ##     upright and facing the head, and push/pull moves it along the ray;
+##     reaching out pushes it too, its group follows rigidly, and with
+##     "face me" off it keeps its yaw relative to the pointer;
+##   - main.gd::pick() returns the NEAREST of menu, keyboard, screens and the
+##     grab bars under them;
 ##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only.
 ##
-##   godot --headless --xr-mode off --path client/project \
+##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/workspace_test.gd"
 ##
 ## Prints one ok/FAIL line per check and "RESULT fails=N".
@@ -14,6 +18,8 @@ extends SceneTree
 const FAKE_MAIN := """
 extends Node3D
 var keys: Array = []
+var group: Array = []
+func drag_group_for(_p) -> Array: return group
 func send_keyboard_input(_m, vk, pressed, mods):
 	if pressed:
 		keys.append([vk, mods])
@@ -84,7 +90,7 @@ func _run(main: Node3D) -> void:
 	panel.start_drag(pointer, hit0.distance)
 	pointer.rotate_y(deg_to_rad(-25.0))
 	pointer.rotate_object_local(Vector3.FORWARD, deg_to_rad(30.0))  # a twist of the wrist
-	await _frames(2)
+	await _frames(40)  # the drag is smoothed: let it settle
 	var up_err: float = panel.global_basis.y.angle_to(Vector3.UP)
 	var to_head: Vector3 = (head.position - panel.global_position).normalized()
 	check(panel.global_basis.x.y < 0.001, "grabbed screen never rolls")
@@ -94,12 +100,83 @@ func _run(main: Node3D) -> void:
 		and (hit1.uv - hit0.uv).length() < 0.01,
 		"the grabbed point stays under the laser -> %s vs %s" % [hit1.get("uv"), hit0.uv])
 	panel.push_pull(0.5)
-	await _frames(2)
+	await _frames(40)
 	var hit2: Dictionary = panel.ray_to_screen_hit(pointer.global_position, -pointer.global_basis.z)
 	check(hit2.get("valid", false) and absf(hit2.distance - hit0.distance - 0.5) < 0.02,
 		"push moves it 0.5 m along the ray")
+	# Reaching 10 cm out from the (estimated right) shoulder pushes 3.5x that.
+	var d_before: float = panel.get_drag_distance()
+	var shoulder := head.position + Vector3(0.17, -0.18, 0.0)
+	pointer.global_position += (pointer.global_position - shoulder).normalized() * 0.1
+	await _frames(40)
+	var hit3: Dictionary = panel.ray_to_screen_hit(pointer.global_position, -pointer.global_basis.z)
+	check(absf(panel.get_drag_distance() - d_before - 0.35) < 0.02 and hit3.get("valid", false)
+		and absf(hit3.distance - panel.get_drag_distance()) < 0.03,
+		"reaching 10 cm out pushes it 0.35 m (%.2f -> %.2f m)" % [d_before, panel.get_drag_distance()])
 	panel.stop_drag()
 	check(up_err < 0.35, "stays upright (tilt %.2f rad)" % up_err)
+
+	# --- A group moves rigidly; "face me" off keeps the yaw -----------------
+	var other := MeshInstance3D.new()
+	other.set_script(load("res://scripts/screen_panel.gd"))
+	main.add_child(other)
+	await _frames(1)
+	other.set_resolution(1920, 1080)
+	panel.place_facing(Vector3(0, 1.5, -1.3), head.position)
+	other.place_facing(Vector3(1.6, 1.4, -0.9), head.position)
+	var rel: Transform3D = panel.global_transform.affine_inverse() * other.global_transform
+	main.group = [other]
+	LaserDrag.face_me = false
+	pointer.global_position = Vector3(0.2, 1.2, -0.3)
+	pointer.look_at(panel.global_position)
+	var front0: Vector3 = panel.global_basis.z
+	panel.start_drag(pointer, pointer.global_position.distance_to(panel.global_position))
+	pointer.rotate_y(deg_to_rad(20.0))
+	await _frames(40)
+	var rel_now: Transform3D = panel.global_transform.affine_inverse() * other.global_transform
+	check(rel_now.origin.distance_to(rel.origin) < 0.001 and rel_now.basis.is_equal_approx(rel.basis),
+		"the rest of the group follows rigidly")
+	var want_front := front0.rotated(Vector3.UP, deg_to_rad(20.0))
+	check(panel.global_basis.z.angle_to(want_front) < 0.01 and absf(panel.global_basis.x.y) < 0.001,
+		"face me off: it turns with the pointer's yaw, no roll")
+	panel.stop_drag()
+	LaserDrag.face_me = true
+	main.group = []
+	other.queue_free()
+
+	# --- Picking: nearest wins, grab bars included --------------------------
+	var ov = load("res://scripts/ui_overlay.gd").new()
+	main.add_child(ov)
+	var picker = load("res://scripts/main.gd").new()  # not in the tree: just its pick()
+	picker.screen_panels = [panel]
+	picker.ui_overlay = ov
+	await _frames(1)
+	ov.set_shown(true)
+	panel.set_curvature(true, 0.5)
+	panel.place_facing(Vector3(0, 1.5, -1.3), head.position)
+	ov.global_transform = Transform3D(LaserDrag.facing_basis(Vector3(0, 1.5, -2.0), head.position), Vector3(0, 1.5, -2.0))
+	var at_centre := (panel.global_position - head.position).normalized()
+	check(picker.pick(head.position, at_centre).get("kind") == "panel",
+		"a menu behind a screen does not steal the pointer")
+	ov.global_transform = Transform3D(LaserDrag.facing_basis(Vector3(0, 1.5, -0.8), head.position), Vector3(0, 1.5, -0.8))
+	check(picker.pick(head.position, at_centre).get("kind") == "overlay", "a menu in front of it does")
+	ov.set_shown(false)
+	var bar_at: Vector3 = panel.grab_bar.global_position + Vector3(0.12, 0.025, 0.0)
+	var bar_hit: Dictionary = picker.pick(head.position, (bar_at - head.position).normalized())
+	check(bar_hit.get("kind") == "bar" and bar_hit.get("target") == panel
+		and absf(bar_hit.distance - head.position.distance_to(bar_at)) < 0.01,
+		"the hit zone around the bar under a screen picks the bar -> %s" % [bar_hit.get("kind")])
+	var just_above: Vector3 = panel.to_global(panel.local_point(0.5, 0.98))
+	check(picker.pick(head.position, (just_above - head.position).normalized()).get("kind") == "panel",
+		"just above the bottom edge is still the screen")
+	var below_bar: Vector3 = panel.grab_bar.global_position + Vector3(0.0, -0.06, 0.0)
+	check(picker.pick(head.position, (below_bar - head.position).normalized()).is_empty(),
+		"below the bar's zone is nothing")
+	ov.set_shown(true)
+	var ov_bar: Dictionary = picker.pick(head.position, (ov.grab_bar.global_position - head.position).normalized())
+	check(ov_bar.get("kind") == "bar" and ov_bar.get("target") == ov, "the menu has a grab bar too")
+	ov.set_shown(false)
+	picker.free()
 
 	# --- Compositor layer -------------------------------------------------
 	var origin := Node3D.new()
@@ -162,6 +239,8 @@ func _run(main: Node3D) -> void:
 		"Shift and Ctrl hold for one key only -> %s" % [main.keys])
 	var miss_d: float = kb.pointer_ray(head.position, Vector3.UP, false)
 	check(miss_d < 0.0, "a ray above the keyboard misses it")
+	var kb_bar: float = kb.grab_bar.hit(head.position, (kb.grab_bar.global_position - head.position).normalized())
+	check(kb_bar > 0.0 and kb.grab_bar.visible, "the keyboard shows a grab bar under it")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
 

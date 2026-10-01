@@ -6,6 +6,9 @@ extends SceneTree
 ##     the PC (no stuck button);
 ##   - a short grip squeeze right-clicks, a held grip grabs the screen instead
 ##     (and sends no click);
+##   - the trigger on the grab bar under the screen grabs it (no click) until
+##     it is let go; a locked layout refuses the grab;
+##   - the ray tilt follows main.gd's ray_angle_deg live;
 ##   - the other controller's trigger takes the pointer over.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
@@ -19,19 +22,23 @@ const FAKE_MAIN := """
 extends Node3D
 var sent: Array = []
 var haptics_enabled := true
+var ray_angle_deg := 40.0
 var grabbed := 0
 var released := 0
-func get_ui_hit_from_ray(_o, _d): return {}
-func send_keyboard_pointer(_o, _d, _p) -> float: return -1.0
-func get_panel_hit_from_ray(o: Vector3, d: Vector3) -> Dictionary:
+var locked := false
+func pick(o: Vector3, d: Vector3) -> Dictionary:
 	if d.z > -0.01:
 		return {}
 	var t := (-1.5 - o.z) / d.z
 	var p := o + d * t
-	if absf(p.x) > 1.0 or absf(p.y - 1.25) > 0.56:
-		return {}
-	return {"valid": true, "panel": self, "monitor_id": 0, "distance": t,
-		"uv": Vector2((p.x + 1.0) / 2.0, (1.81 - p.y) / 1.12)}
+	if absf(p.x) <= 1.0 and absf(p.y - 1.25) <= 0.56:
+		return {"kind": "panel", "panel": self, "monitor_id": 0, "distance": t,
+			"uv": Vector2((p.x + 1.0) / 2.0, (1.81 - p.y) / 1.12)}
+	if absf(p.x) <= 0.15 and absf(p.y - 0.63) <= 0.035:
+		return {"kind": "bar", "target": self, "distance": t}
+	return {}
+func ray_to_screen_hit(_o, _d): return {}  # makes LaserDrag treat it as a screen
+func can_move_panel(_p) -> bool: return not locked
 func uv_to_pixel(uv: Vector2) -> Vector2i: return Vector2i(uv * Vector2(1920, 1080))
 func mark_hovered(): pass
 func start_drag(_p, _d): grabbed += 1
@@ -146,6 +153,36 @@ func _run() -> void:
 	check(main.released == 1, "letting go of the grip drops it")
 	check(main.sent.slice(mark).all(func(e): return e[2] == 0),
 		"grabbing sends no mouse button")
+
+	# --- Trigger on the bar under the screen --------------------------------
+	_aim(right, Vector3(0.0, 0.63, -1.5))
+	await _frames(3)
+	mark = main.sent.size()
+	r._set_trigger_state(true)
+	await _frames(10)
+	check(main.grabbed == 2, "trigger on the bar grabs the screen")
+	r._set_grip_state(true)
+	r._set_grip_state(false)
+	await _frames(2)
+	check(main.released == 1, "a grip tap meanwhile does not drop it")
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(main.released == 2, "letting go of the trigger drops it")
+	check(main.sent.slice(mark).all(func(e): return e[2] == 0), "the bar sends no mouse button")
+	main.locked = true
+	r._set_trigger_state(true)
+	await _frames(3)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(main.grabbed == 2, "a locked layout refuses the grab")
+	main.locked = false
+
+	main.ray_angle_deg = 0.0
+	await _frames(2)
+	check(laser.transform.basis.z.is_equal_approx(Vector3.BACK), "the ray tilt follows ray_angle_deg live")
+	main.ray_angle_deg = 40.0
+	await _frames(2)
+	check(laser.transform.basis.is_equal_approx(r.RAY_ORIGIN.basis), "40 degrees is the Pico 4 tilt")
 
 	main.haptics_enabled = false
 	r.last_buzz = 0.0

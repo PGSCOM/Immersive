@@ -1,31 +1,53 @@
 extends SceneTree
 ## Feeds hand_input.gd a fake tracked right hand and checks that a pinch clicks
-## exactly where the hand was pointing, without drifting or dragging.
+## exactly where the hand was pointing, without drifting or dragging; that a
+## pinch on the grab bar under the screen moves it (no click reaches the PC)
+## while a long pinch on the screen stays a click; and that with the left
+## hand set to point, the right hand's long pinch opens the menu instead.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/hand_input_test.gd"
 ##
 ## Prints one ok/FAIL line per check and "RESULT fails=N".
 
-## Stands in for main.gd: one 2 x 1.6 m monitor panel 1.5 m ahead (1920x1080).
+## Stands in for main.gd: one 2 x 1.6 m monitor panel 1.5 m ahead (1920x1080)
+## with a grab bar zone under it that moves `box` through a real LaserDrag.
 const FAKE_MAIN := """
 extends Node3D
 var sent: Array = []
-func get_ui_hit_from_ray(_o, _d): return {}
-func send_keyboard_pointer(_o, _d, _p) -> float: return -1.0
-func get_panel_hit_from_ray(o: Vector3, d: Vector3) -> Dictionary:
+var pointer_hand := "right"
+var grabbed := 0
+var released := 0
+var toggles := 0
+var box := Node3D.new()
+var drag: LaserDrag = null
+func _ready(): add_child(box); box.position = Vector3(0.0, 0.5, -1.5)
+func _process(delta): if drag: drag.update(delta)
+func pick(o: Vector3, d: Vector3) -> Dictionary:
 	var t := (-1.5 - o.z) / d.z
 	var p := o + d * t
-	if absf(p.x) > 1.0:
-		return {}
-	return {"valid": true, "panel": self, "monitor_id": 0, "distance": t,
-		"uv": Vector2((p.x + 1.0) / 2.0, (2.2 - p.y) / 1.6)}
+	if absf(p.x) <= 1.0 and p.y >= 0.6 and p.y <= 2.2:
+		return {"kind": "panel", "panel": self, "monitor_id": 0, "distance": t,
+			"uv": Vector2((p.x + 1.0) / 2.0, (2.2 - p.y) / 1.6)}
+	if absf(p.x) <= 0.3 and absf(p.y - 0.5) <= 0.05:
+		return {"kind": "bar", "target": self, "distance": t}
+	return {}
 func uv_to_pixel(uv: Vector2) -> Vector2i: return Vector2i(uv * Vector2(1920, 1080))
 func send_mouse_input(_m, x, y, b, _s, _h = 0): sent.append([x, y, b])
+func start_drag(p, dist):
+	grabbed += 1
+	drag = LaserDrag.new(box, p, dist)
+func stop_drag():
+	released += 1
+	drag = null
+func get_drag_distance() -> float: return drag.distance if drag else 0.0
+func toggle_ui_overlay(): toggles += 1
 """
 
 ## Index knuckle, straight ahead of the right shoulder: aims at pixel (1123, 526).
 const KNUCKLE := Vector3(0.17, 1.42, -0.45)
+## Lower: the ray from the shoulder meets the bar zone (y 0.5 at z -1.5).
+const BAR_KNUCKLE := Vector3(0.17, 1.144, -0.45)
 
 var main: Node3D
 var hand := XRHandTracker.new()
@@ -141,6 +163,47 @@ func _run() -> void:
 	_pose(KNUCKLE, 0.08)
 	await _frames(40)
 	check(input._laser.visible, "laser back when it points at the panel")
+
+	# --- A long pinch on the screen stays a click, never a grab -----------
+	_pose(KNUCKLE, 0.005)
+	await _frames(150)  # ~2 s
+	check(_last()[2] == 1 and main.grabbed == 0, "a 2 s pinch on the screen is still a held click, not a grab")
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
+	check(_last()[2] == 0, "and lets go on the PC")
+
+	# --- Pinch on the bar grabs and moves the screen ------------------------
+	_pose(BAR_KNUCKLE, 0.08)
+	await _frames(40)
+	var mark2: int = main.sent.size()
+	var box0: Vector3 = main.box.global_position
+	_pose(BAR_KNUCKLE, 0.005)
+	await _frames(3)
+	check(main.grabbed == 1, "a pinch on the bar grabs the screen")
+	var d0: float = main.get_drag_distance()
+	for i in 20:  # sweep right by 10 cm and reach 8 cm further out
+		_pose(BAR_KNUCKLE + Vector3(0.005 * (i + 1), 0, -0.004 * (i + 1)), 0.005)
+		await _frames(2)
+	await _frames(30)
+	var moved: Vector3 = main.box.global_position - box0
+	check(moved.x > 0.15, "the grabbed screen follows the hand (not frozen by the click slop) -> %.2f m" % moved.x)
+	check(main.get_drag_distance() > d0 + 0.15, "reaching out pushes it away (%.2f -> %.2f m)" % [d0, main.get_drag_distance()])
+	check(main.sent.slice(mark2).all(func(e): return e[2] == 0), "moving by the bar sends no mouse button")
+	_pose(BAR_KNUCKLE, 0.08)
+	await _frames(15)
+	check(main.released == 1, "opening the pinch drops it")
+
+	# --- Point with the left hand: the right one opens the menu -------------
+	main.pointer_hand = "left"
+	mark2 = main.sent.size()
+	_pose(KNUCKLE, 0.005)
+	await _frames(60)  # ~0.8 s
+	check(main.toggles == 1 and main.sent.slice(mark2).all(func(e): return e[2] == 0),
+		"pointing with the left hand: a long right pinch opens the menu, no click")
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
+	main.pointer_hand = "right"
+	await _frames(40)
 
 	hand.has_tracking_data = false
 	await _frames(3)
