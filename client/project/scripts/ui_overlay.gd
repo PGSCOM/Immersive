@@ -1091,26 +1091,6 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 		b.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 		_virtual_row.add_child(b)
 
-	var switches := _hbox(10)
-	body.add_child(switches)
-	_chk_snap = CheckButton.new()
-	_chk_snap.text = "Snap screens together"
-	_chk_snap.focus_mode = Control.FOCUS_NONE
-	_chk_snap.button_pressed = _snap_enabled
-	_chk_snap.toggled.connect(func(on):
-		_snap_enabled = on
-		snap_toggled.emit(on))
-	_chk_snap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	switches.add_child(_chk_snap)
-	_chk_lock = CheckButton.new()
-	_chk_lock.text = "Lock screens in place"
-	_chk_lock.focus_mode = Control.FOCUS_NONE
-	_chk_lock.button_pressed = _lock_enabled
-	_chk_lock.toggled.connect(func(on):
-		_lock_enabled = on
-		lock_toggled.emit(on))
-	_chk_lock.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	switches.add_child(_chk_lock)
 
 	var sp := Control.new()
 	sp.custom_minimum_size.y = 4
@@ -1243,6 +1223,26 @@ func _build_space_tab(body: VBoxContainer) -> void:
 		_haptics_enabled = on
 		haptics_toggled.emit(on))
 	body.add_child(_chk_haptics)
+	var sp3 := Control.new()
+	sp3.custom_minimum_size.y = 6
+	body.add_child(sp3)
+	_heading(body, "Moving screens")
+	_chk_snap = CheckButton.new()
+	_chk_snap.text = "Snap screens together"
+	_chk_snap.focus_mode = Control.FOCUS_NONE
+	_chk_snap.button_pressed = _snap_enabled
+	_chk_snap.toggled.connect(func(on):
+		_snap_enabled = on
+		snap_toggled.emit(on))
+	body.add_child(_chk_snap)
+	_chk_lock = CheckButton.new()
+	_chk_lock.text = "Lock screens in place"
+	_chk_lock.focus_mode = Control.FOCUS_NONE
+	_chk_lock.button_pressed = _lock_enabled
+	_chk_lock.toggled.connect(func(on):
+		_lock_enabled = on
+		lock_toggled.emit(on))
+	body.add_child(_chk_lock)
 
 # ---------------------------------------------------------------------------
 # Quality tab
