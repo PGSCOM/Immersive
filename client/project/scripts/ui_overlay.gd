@@ -2,8 +2,8 @@
 ##
 ## Four tabs — Connect (PCs found on the network, an address keypad, USB,
 ## PIN pairing), Screens (which monitors, arrangement, curvature), Space
-## (surroundings, passthrough, foveation) and Quality (codec, resolution,
-## frame rate, bitrate). A status line in the header says what is going on.
+## (surroundings, passthrough) and Quality (codec, resolution, frame rate, bitrate).
+## A status line in the header says what is going on.
 ## Stays where it was opened; grab it with the grip to move it.
 ##
 ## Holds no settings of its own: main.gd owns and saves them and pushes them
@@ -24,7 +24,6 @@ signal arrange_requested
 signal recenter_requested
 signal keyboard_toggle_requested
 signal screen_curvature_changed(enabled: bool, amount: float)
-signal foveation_settings_changed(enabled: bool, strength: float)
 ## "night" / "dusk" / "void" / "passthrough"
 signal look_changed(look: String)
 ## codec: 0xFF auto, 0 H.264, 1 HEVC, 2 MJPEG, 3 AV1 · res_percent: 100/75/50, -1 auto · fps: 0 auto
@@ -72,8 +71,6 @@ var _available_monitors: Array = []
 var _active_monitor_ids: Array = []
 var _curved_enabled := true
 var _curvature_amount := 0.5
-var _foveation_enabled := false
-var _foveation_strength := 0.55
 var _look := "night"
 var _passthrough_supported := false
 var _stream_codec := 0xFF
@@ -137,10 +134,8 @@ var _lbl_curvature_value: Label
 
 # Space tab
 var _look_buttons: Dictionary = {}
-var _chk_foveation: CheckButton
 var _chk_layers: CheckButton
 var _chk_haptics: CheckButton
-var _slider_foveation: HSlider
 
 # Quality tab
 var _codec_buttons: Dictionary = {}
@@ -315,14 +310,6 @@ func set_screen_curvature(enabled: bool, amount: float) -> void:
 	if _slider_curvature:
 		_slider_curvature.set_value_no_signal(_curvature_amount * 100.0 if enabled else 0.0)
 		_lbl_curvature_value.text = _curve_text()
-
-func set_foveation_settings(enabled: bool, strength: float) -> void:
-	_foveation_enabled = enabled
-	_foveation_strength = clampf(strength, 0.0, 1.0)
-	if _chk_foveation:
-		_chk_foveation.set_pressed_no_signal(enabled)
-		_slider_foveation.set_value_no_signal(_foveation_strength * 100.0)
-		_set_slider_active(_slider_foveation, enabled)
 
 func set_look(look: String, passthrough_supported: bool) -> void:
 	_look = look
@@ -764,7 +751,6 @@ func _build_ui() -> void:
 	_rebuild_monitor_list()
 	_refresh_quality_ui()
 	set_screen_curvature(_curved_enabled, _curvature_amount)
-	set_foveation_settings(_foveation_enabled, _foveation_strength)
 	set_look(_look, _passthrough_supported)
 	_refresh_control()
 
@@ -1180,24 +1166,6 @@ func _build_space_tab(body: VBoxContainer) -> void:
 		_haptics_enabled = on
 		haptics_toggled.emit(on))
 	body.add_child(_chk_haptics)
-
-	var sp2 := Control.new()
-	sp2.custom_minimum_size.y = 6
-	body.add_child(sp2)
-	_heading(body, "Eye-tracked foveation")
-	_chk_foveation = CheckButton.new()
-	_chk_foveation.text = "Sharpest where you look, softer around it"
-	_chk_foveation.focus_mode = Control.FOCUS_NONE
-	_chk_foveation.toggled.connect(func(on):
-		_foveation_enabled = on
-		_set_slider_active(_slider_foveation, on)
-		foveation_settings_changed.emit(on, _foveation_strength))
-	body.add_child(_chk_foveation)
-	var r := _slider_row(body, "Strength", 0, 100, 1, func(v):
-		_foveation_strength = v / 100.0
-		foveation_settings_changed.emit(_foveation_enabled, _foveation_strength))
-	_slider_foveation = r[0]
-	r[1].text = ""
 
 # ---------------------------------------------------------------------------
 # Quality tab

@@ -35,13 +35,6 @@ uniform float contrast : hint_range(0.0, 2.0) = 1.0;
 uniform vec2 panel_size_m = vec2(1.6, 0.9);
 uniform float corner_radius_m = 0.014;
 
-// Eye-tracked foveated rendering controls.
-uniform int foveation_enabled : hint_range(0, 1) = 0;
-uniform vec2 gaze_uv = vec2(0.5, 0.5);
-uniform float foveation_strength : hint_range(0.0, 1.0) = 0.0;
-uniform float foveation_inner_radius : hint_range(0.05, 0.5) = 0.18;
-uniform float foveation_outer_radius : hint_range(0.2, 1.0) = 0.72;
-
 vec4 sample_screen_color(vec2 sample_uv) {
 	// Apply the orientation correction BEFORE the SurfaceTexture transform.
 	// Pre-rotating the sample UV by 180° (flip both axes) exactly cancels a
@@ -64,21 +57,6 @@ void fragment() {
 
 	vec2 inner_uv = UV;
 	vec4 color = sample_screen_color(inner_uv);
-
-	if (foveation_enabled == 1 && foveation_strength > 0.001) {
-		float dist_to_gaze = distance(inner_uv, clamp(gaze_uv, vec2(0.0), vec2(1.0)));
-		float peripheral = smoothstep(foveation_inner_radius, foveation_outer_radius, dist_to_gaze);
-		float foveation_mix = clamp(peripheral * foveation_strength, 0.0, 1.0);
-
-		float bucket_px = mix(1.0, 8.0, foveation_mix);
-		vec2 bucket_uv = (floor(inner_uv * tex_size / bucket_px) * bucket_px + (bucket_px * 0.5)) / tex_size;
-		bucket_uv = clamp(bucket_uv, vec2(0.0), vec2(1.0));
-
-		vec4 coarse_color = sample_screen_color(bucket_uv);
-		float coarse_luma = dot(coarse_color.rgb, vec3(0.299, 0.587, 0.114));
-		coarse_color.rgb = mix(coarse_color.rgb, vec3(coarse_luma), 0.15 * foveation_mix);
-		color = mix(color, coarse_color, foveation_mix);
-	}
 
 	color.rgb = ((color.rgb - 0.5) * contrast + 0.5) * brightness;
 	color.rgb = clamp(color.rgb, 0.0, 1.0);

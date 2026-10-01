@@ -54,11 +54,8 @@ func _ready() -> void:
 	_mat.shader = shader
 	_mat.set_shader_parameter("tex_transform", Projection.IDENTITY)
 	_mat.set_shader_parameter("tex_size", Vector2(WIDTH, HEIGHT))
-	_mat.set_shader_parameter("border_width", 0.0)
 	_mat.set_shader_parameter("brightness", 1.0)
 	_mat.set_shader_parameter("contrast", 1.0)
-	_mat.set_shader_parameter("curvature", 0.0)
-	_mat.set_shader_parameter("foveation_enabled", 0)
 	_mesh.material_override = _mat
 
 	_parse_clip()

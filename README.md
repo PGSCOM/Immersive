@@ -99,7 +99,7 @@ Immersive-2/
 │   │   ├── main.tscn        # XR origin, both controllers, keyboard
 │   │   └── virtual_keyboard.tscn # Virtual keyboard scene
 │   ├── shaders/
-│   │   ├── screen.gdshader  # Screen (rounded corners, foveation, NV12)
+│   │   ├── screen.gdshader  # Screen (rounded corners, NV12)
 │   │   ├── screen_external.gdshader # Same for the zero-copy MediaCodec texture
 │   │   ├── sky.gdshader, floor.gdshader # The surroundings
 │   └── tests/               # Headless / offscreen client tests (run by e2e_test.py)
@@ -364,7 +364,6 @@ shows the screens wrong.
 - [x] Remote control switch in the headset, and `--view-only` on the host
 - [x] Host tray icon + settings window (PIN, headsets, live switches, start at login)
 - [x] Mouse and keyboard in the WebXR scene
-- [x] Eye-tracking based foveated rendering (OpenXR eye gaze + head-gaze fallback)
 - [x] Hand tracking support (pinch pointer/click, no controllers required)
 - [x] Workspace persistence (panel transform + monitor assignments, saved automatically)
 - [x] macOS host (ScreenCaptureKit capture + audio, CGEvent input)

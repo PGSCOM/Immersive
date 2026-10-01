@@ -22,7 +22,6 @@ const LAYER_EXTERNAL_SHADER_PATH := "res://shaders/screen_layer_external.gdshade
 ## A layer's swapchain is as big as the stream, up to this width.
 const LAYER_MAX_WIDTH := 3840
 const DEFAULT_CURVATURE := 0.5
-const DEFAULT_FOVEATION_STRENGTH := 0.55
 ## Arc covered by the panel at curvature 1.0 (radians, ~100°).
 const MAX_ARC := 1.75
 const CURVE_COLUMNS := 48
@@ -66,11 +65,6 @@ var _using_external_texture: bool = false
 ## Curved-screen state. Effective curvature 0 = flat, 1 = MAX_ARC.
 var _curved_mode: bool = false
 var _curvature_amount: float = DEFAULT_CURVATURE
-
-## Eye-tracked foveated rendering state.
-var _foveation_enabled: bool = false
-var _foveation_strength: float = DEFAULT_FOVEATION_STRENGTH
-var _foveation_focus_uv: Vector2 = Vector2(0.5, 0.5)
 
 ## Set while a pointer holds the panel (see LaserDrag).
 var _drag: LaserDrag = null
@@ -173,7 +167,6 @@ func set_external_texture(ext_tex: ExternalTexture, width: int, height: int) -> 
 	mat.set_shader_parameter("flip_y", 1 if DISPLAY_FLIP_Y else 0)
 	material_override = mat
 	_apply_panel_size_to_material()
-	_apply_foveation_to_material()
 
 	_using_external_texture = true
 	_ext_tex = ext_tex
@@ -193,16 +186,6 @@ func set_curvature(enabled: bool, amount: float) -> void:
 		# Flat and curved screens are different kinds of layer.
 		if _layer and (before >= 0.001) != (_arc() >= 0.001):
 			_rebuild_layer()
-
-func set_foveation(enabled: bool, strength: float) -> void:
-	_foveation_enabled = enabled
-	_foveation_strength = clamp(strength, 0.0, 1.0)
-	_apply_foveation_to_material()
-
-func set_foveation_focus_uv(uv: Vector2) -> void:
-	_foveation_focus_uv = Vector2(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0))
-	if material_override is ShaderMaterial:
-		(material_override as ShaderMaterial).set_shader_parameter("gaze_uv", _foveation_focus_uv)
 
 ## Show the screen as an OpenXR compositor layer parented to `origin` (the
 ## XROrigin3D): the runtime samples the picture once, straight through the
@@ -541,7 +524,7 @@ func world_to_screen_uv(world_pos: Vector3) -> Vector2:
 		return Vector2(-1, -1)
 	return Vector2(u, v)
 
-## Ray/screen intersection used by pointers and gaze-based foveation.
+## Ray/screen intersection used by pointers.
 ## Returns { valid: bool, uv: Vector2, distance: float }.
 func ray_to_screen_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	var o: Vector3 = global_transform.affine_inverse() * ray_origin
@@ -665,7 +648,6 @@ func _apply_texture() -> void:
 		material_override = new_mat
 
 	_apply_panel_size_to_material()
-	_apply_foveation_to_material()
 	if _layer_content is TextureRect:
 		(_layer_content as TextureRect).texture = screen_texture
 
@@ -674,10 +656,3 @@ func _apply_panel_size_to_material() -> void:
 	if material_override is ShaderMaterial:
 		(material_override as ShaderMaterial).set_shader_parameter(
 			"panel_size_m", Vector2(panel_width, panel_height))
-
-func _apply_foveation_to_material() -> void:
-	if material_override is ShaderMaterial:
-		var mat := material_override as ShaderMaterial
-		mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
-		mat.set_shader_parameter("foveation_strength", _foveation_strength)
-		mat.set_shader_parameter("gaze_uv", _foveation_focus_uv)
