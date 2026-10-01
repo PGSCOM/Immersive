@@ -5,9 +5,9 @@
 ##
 ## Features:
 ##   - Texture updated each received video frame (MJPEG or raw RGBA)
-##   - Laser drag: the grabbed point stays on the pointer ray, the panel keeps
-##     facing the head and never rolls; push/pull and resize while held
-##   - A small handle under the panel shows it can be grabbed
+##   - Laser drag (LaserDrag): the grabbed point stays on the pointer ray, the
+##     panel never rolls; push/pull and resize while held, its group follows
+##   - A grab bar under the panel (GrabBar): point at it and press to move it
 ##   - Panel size follows the monitor aspect ratio
 
 extends MeshInstance3D
@@ -76,8 +76,8 @@ var _foveation_focus_uv: Vector2 = Vector2(0.5, 0.5)
 var _drag: LaserDrag = null
 
 var _placeholder_label: Label3D = null
-var _handle: MeshInstance3D = null
-var _hover_frames: int = 0
+## The bar under the screen; main.gd::pick() tests it.
+var grab_bar: GrabBar = null
 
 # OpenXR compositor layer (see set_compositor_layer()).
 var _layer_wanted: bool = false
@@ -94,24 +94,19 @@ var _ext_tex: ExternalTexture = null
 func _ready() -> void:
 	_rebuild_mesh()
 	_create_placeholder_texture()
-	_create_handle()
+	grab_bar = GrabBar.new()
+	add_child(grab_bar)
+	_place_decorations()
 	set_process(true)
 
 func _exit_tree() -> void:
 	_free_layer()  # the layer lives under XROrigin3D, not under this panel
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _drag:
-		_drag.update()
+		_drag.update(delta)
 	if _layer:
 		_sync_layer()
-	if _hover_frames > 0:
-		_hover_frames -= 1
-	var show_handle := _drag != null or _hover_frames > 0
-	if _handle and _handle.visible != show_handle:
-		_handle.visible = show_handle
-	if _handle and show_handle:
-		(_handle.material_override as StandardMaterial3D).albedo_color.a = 0.95 if _drag else 0.55
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -297,9 +292,10 @@ func _sync_layer() -> void:
 	var offset := Vector3(0.0, 0.0, _radius()) if _arc() >= 0.001 else Vector3.ZERO
 	_layer.global_transform = global_transform * Transform3D(Basis(), offset)
 
-## Called every frame a pointer rests on the panel: shows the grab handle.
+## Called every frame a pointer rests on the panel: shows the grab bar.
 func mark_hovered() -> void:
-	_hover_frames = 3
+	if grab_bar:
+		grab_bar.mark_owner_hovered()
 
 ## Update the screen texture with new video frame data.
 ## frame_data may be:
@@ -443,9 +439,12 @@ func apply_layout_state(state: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 
 ## Grab the panel with `pointer` (ray along its -Z), which hit it
-## `hit_distance` metres away.
+## `hit_distance` metres away. The rest of its group (main.gd) comes along.
 func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:
 	_drag = LaserDrag.new(self, pointer, hit_distance)
+	var main := get_node_or_null("/root/Main")
+	if main and main.has_method("drag_group_for"):
+		_drag.add_followers(main.drag_group_for(self))
 
 func stop_drag() -> void:
 	_drag = null
@@ -620,33 +619,14 @@ func _create_placeholder_texture() -> void:
 	add_child(_placeholder_label)
 	_place_decorations()
 
-## The visionOS-style grab bar under the screen: only there while pointed at.
-func _create_handle() -> void:
-	_handle = MeshInstance3D.new()
-	var cap := CapsuleMesh.new()
-	cap.radius = 0.0075
-	cap.height = 0.15
-	cap.radial_segments = 12
-	cap.rings = 2
-	_handle.mesh = cap
-	_handle.rotation = Vector3(0.0, 0.0, PI / 2.0)  # lie horizontally
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.93, 0.92, 0.88, 0.55)
-	_handle.material_override = mat
-	_handle.visible = false
-	add_child(_handle)
-	_place_decorations()
-
-## Keep the label on the surface and the handle under the bottom edge.
+## Keep the label on the surface and the grab bar under the bottom edge.
 func _place_decorations() -> void:
 	if _placeholder_label:
 		# The text is flat and ~0.4 m wide: lift it clear of the curve's bulge.
 		var bulge := local_point(0.5 + 0.22 / panel_width, 0.5).z
 		_placeholder_label.position = Vector3(0.0, 0.0, bulge + 0.004)
-	if _handle:
-		_handle.position = local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
+	if grab_bar:
+		grab_bar.position = local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
 
 func _apply_texture() -> void:
 	var mat := material_override

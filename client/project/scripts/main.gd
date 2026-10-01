@@ -57,6 +57,13 @@ var compositor_layers: bool = false
 var control_enabled: bool = true
 ## Controllers tick on clicks and grabs (read by vr_input.gd).
 var haptics_enabled: bool = true
+## The bare hand that points, "left" or "right" (read by hand_input.gd); the
+## other one's long pinch opens the menu / keyboard.
+var pointer_hand: String = "right"
+## Controller ray tilt below the aim pose, degrees (read live by vr_input.gd).
+var ray_angle_deg: float = 40.0
+## Grabbed screens turn to face the head (LaserDrag.face_me).
+var screens_face_me: bool = true
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
@@ -514,6 +521,44 @@ func get_panel_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dict
 		"monitor_id": int(best_panel.get_meta("monitor_id", 0))
 	}
 
+## What a pointer ray lands on: the NEAREST of the menu, the keyboard, every
+## screen and every grab bar (vr_input.gd and hand_input.gd both use it).
+## Returns {} on a miss, else { kind: "overlay" / "keyboard" / "panel" / "bar",
+## distance, and uv (overlay, panel), panel + monitor_id (panel), target (the
+## node a bar moves) + bar (the GrabBar) }.
+func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
+	var hits: Array = []
+	var ui := get_ui_hit_from_ray(ray_origin, ray_direction)
+	if ui.get("valid", false):
+		hits.append({"kind": "overlay", "distance": ui.distance, "uv": ui.uv})
+	if is_instance_valid(virtual_keyboard) and virtual_keyboard.visible:
+		var kb: Dictionary = virtual_keyboard.ray_hit(ray_origin, ray_direction)
+		if not kb.is_empty():
+			hits.append({"kind": "keyboard", "distance": kb.distance})
+	var owners: Array = _live_panels()
+	for p in owners:
+		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
+		if h.get("valid", false):
+			hits.append({"kind": "panel", "distance": h.distance, "uv": h.uv, "panel": p,
+				"monitor_id": int(p.get_meta("monitor_id", 0))})
+	owners.append_array([ui_overlay, virtual_keyboard])
+	for o in owners:
+		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
+		var d: float = bar.hit(ray_origin, ray_direction) if bar else -1.0
+		if d >= 0.0:
+			# A bar loses a near tie (a screen stacked right under another).
+			hits.append({"kind": "bar", "distance": d, "rank": d + 0.02, "target": o, "bar": bar})
+	var best := {}
+	for h in hits:
+		if best.is_empty() or h.get("rank", h.distance) < best.get("rank", best.distance):
+			best = h
+	return best
+
+## The pointer is not on the keyboard (any more): release its key and hover.
+func leave_keyboard() -> void:
+	if is_instance_valid(virtual_keyboard):
+		virtual_keyboard.pointer_leave()
+
 func get_ui_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	if ui_overlay and ui_overlay.has_method("ray_to_overlay_hit"):
 		return ui_overlay.ray_to_overlay_hit(ray_origin, ray_direction)
@@ -684,6 +729,12 @@ func _init_ui_overlay() -> void:
 	ui_overlay.haptics_toggled.connect(func(on: bool):
 		haptics_enabled = on
 		_save_config())
+	ui_overlay.pointer_settings_changed.connect(func(hand: String, angle: float, face_me: bool):
+		pointer_hand = hand
+		ray_angle_deg = angle
+		screens_face_me = face_me
+		LaserDrag.face_me = face_me
+		_save_config())
 	ui_overlay.compositor_layers_toggled.connect(func(on: bool):
 		compositor_layers = on
 		_apply_visual_settings_to_all_panels()
@@ -696,6 +747,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
 		stream_jpeg_quality, stream_res_percent, stream_fps)
 	ui_overlay.set_input_settings(control_enabled, haptics_enabled)
+	ui_overlay.set_pointer_settings(pointer_hand, ray_angle_deg, screens_face_me)
 	ui_overlay.set_compositor_layers(compositor_layers, true)
 
 func _show_overlay() -> void:
@@ -1629,6 +1681,9 @@ func _save_config() -> void:
 	cfg.set_value("display", "compositor_layers", compositor_layers)
 	cfg.set_value("input", "control", control_enabled)
 	cfg.set_value("input", "haptics", haptics_enabled)
+	cfg.set_value("input", "pointer_hand", pointer_hand)
+	cfg.set_value("input", "ray_angle", ray_angle_deg)
+	cfg.set_value("input", "face_me", screens_face_me)
 	cfg.set_value("stream", "codec", stream_codec)
 	cfg.set_value("stream", "bitrate_kbps", stream_bitrate_kbps)
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
@@ -1681,6 +1736,10 @@ func _load_config() -> void:
 		compositor_layers = cfg.get_value("display", "compositor_layers", false)
 		control_enabled = cfg.get_value("input", "control", true)
 		haptics_enabled = cfg.get_value("input", "haptics", true)
+		pointer_hand = "left" if cfg.get_value("input", "pointer_hand", "right") == "left" else "right"
+		ray_angle_deg = clampf(float(cfg.get_value("input", "ray_angle", 40.0)), 0.0, 60.0)
+		screens_face_me = cfg.get_value("input", "face_me", true)
+		LaserDrag.face_me = screens_face_me
 		stream_codec = _resolve_codec(cfg.get_value("stream", "codec", stream_codec))
 		stream_bitrate_kbps = cfg.get_value("stream", "bitrate_kbps", 20000)
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)

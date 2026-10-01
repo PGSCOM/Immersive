@@ -1,10 +1,11 @@
 ## The in-VR menu: a 2D UI in a SubViewport, shown on a floating panel.
 ##
-## Four tabs — Connect (PCs found on the network, an address keypad, USB,
+## Five tabs: Connect (PCs found on the network, an address keypad, USB,
 ## PIN pairing), Screens (which monitors, arrangement, curvature), Space
-## (surroundings, passthrough, foveation) and Quality (codec, resolution,
-## frame rate, bitrate). A status line in the header says what is going on.
-## Stays where it was opened; grab it with the grip to move it.
+## (surroundings, passthrough, foveation), Quality (codec, resolution,
+## frame rate, bitrate) and Input (pointing hand, ray angle, how screens turn
+## while moved, vibration). A status line in the header says what is going on.
+## Stays where it was opened; move it by the bar under it or with the grip.
 ##
 ## Holds no settings of its own: main.gd owns and saves them and pushes them
 ## in with the set_* functions; the menu only reports what the user did.
@@ -35,6 +36,9 @@ signal virtual_screen_remove_requested(monitor_id: int)
 ## Pointer and keyboards drive the PC (off = look only).
 signal control_toggled(enabled: bool)
 signal haptics_toggled(enabled: bool)
+## hand: "left" / "right" (the bare hand that points) · ray_angle: controller
+## ray tilt in degrees · face_me: grabbed screens turn to the head.
+signal pointer_settings_changed(hand: String, ray_angle: float, face_me: bool)
 signal compositor_layers_toggled(enabled: bool)
 
 # ---------------------------------------------------------------------------
@@ -47,7 +51,7 @@ const VIEW_SIZE := Vector2i(1000, 680)
 var panel_height: float = panel_width * VIEW_SIZE.y / VIEW_SIZE.x
 
 const AUTO_APPLY_DELAY := 0.45
-const TAB_NAMES := ["Connect", "Screens", "Space", "Quality"]
+const TAB_NAMES := ["Connect", "Screens", "Space", "Quality", "Input"]
 const LOOKS := [["Night", "night"], ["Dusk", "dusk"], ["Void", "void"], ["Passthrough", "passthrough"]]
 const VIRTUAL_SIZES := [[1920, 1080], [2560, 1440], [3840, 2160]]
 
@@ -86,11 +90,16 @@ var _host_view_only := false
 var _host_virtual := false
 var _control_enabled := true
 var _haptics_enabled := true
+var _pointer_hand := "right"
+var _ray_angle := 40.0
+var _face_me := true
 var _layers_enabled := false
 var _pin_visible := false
 var _last_pointer_uv := Vector2(0.5, 0.5)
 var _tab := 0
 var _drag: LaserDrag = null
+## The bar under the menu; main.gd::pick() tests it.
+var grab_bar: GrabBar = null
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -139,7 +148,6 @@ var _lbl_curvature_value: Label
 var _look_buttons: Dictionary = {}
 var _chk_foveation: CheckButton
 var _chk_layers: CheckButton
-var _chk_haptics: CheckButton
 var _slider_foveation: HSlider
 
 # Quality tab
@@ -154,6 +162,13 @@ var _lbl_auto_info: Label
 var _apply_debounce: Timer
 var _slider_held := false  ## a Quality slider is being dragged
 
+# Input tab
+var _hand_buttons: Dictionary = {}
+var _slider_ray: HSlider
+var _lbl_ray_value: Label
+var _chk_face_me: CheckButton
+var _chk_haptics: CheckButton
+
 # Styles
 var _st_button: Dictionary
 var _st_primary: Dictionary
@@ -167,9 +182,9 @@ func _ready() -> void:
 	_build_ui()
 	hide()
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _drag:
-		_drag.update()
+		_drag.update(delta)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -261,6 +276,12 @@ func set_input_settings(control: bool, haptics: bool) -> void:
 	_refresh_control()
 	if _chk_haptics:
 		_chk_haptics.set_pressed_no_signal(haptics)
+
+func set_pointer_settings(hand: String, ray_angle: float, face_me: bool) -> void:
+	_pointer_hand = hand
+	_ray_angle = ray_angle
+	_face_me = face_me
+	_refresh_input_tab()
 
 func set_compositor_layers(enabled: bool, _supported: bool = true) -> void:
 	_layers_enabled = enabled
@@ -411,6 +432,9 @@ func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:
 
 func stop_drag() -> void:
 	_drag = null
+
+func is_dragging() -> bool:
+	return _drag != null
 
 func push_pull(delta_m: float) -> void:
 	if _drag:
@@ -728,7 +752,7 @@ func _build_ui() -> void:
 	var pages := Control.new()
 	pages.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	column.add_child(pages)
-	for builder in [_build_connect_tab, _build_screens_tab, _build_space_tab, _build_quality_tab]:
+	for builder in [_build_connect_tab, _build_screens_tab, _build_space_tab, _build_quality_tab, _build_input_tab]:
 		var page := ScrollContainer.new()
 		page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		page.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -756,6 +780,10 @@ func _build_ui() -> void:
 	_panel_mesh.material_override = mat
 	_panel_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_panel_mesh)
+	grab_bar = GrabBar.new()
+	grab_bar.always_shown = true
+	grab_bar.position = Vector3(0.0, -panel_height / 2.0 - 0.045, 0.0)
+	add_child(grab_bar)
 
 	_select_tab(0)
 	_refresh_status()
@@ -763,6 +791,7 @@ func _build_ui() -> void:
 	_rebuild_hosts_list()
 	_rebuild_monitor_list()
 	_refresh_quality_ui()
+	_refresh_input_tab()
 	set_screen_curvature(_curved_enabled, _curvature_amount)
 	set_foveation_settings(_foveation_enabled, _foveation_strength)
 	set_look(_look, _passthrough_supported)
@@ -1079,7 +1108,7 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 		b.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 		_virtual_row.add_child(b)
 
-	var tip := _label("Grip a screen to move it; the stick then sets its distance and size.", 17, UiTheme.INK_3)
+	var tip := _label("Move a screen by the bar under it, or hold the grip on it. While held, the stick sets its distance and size.", 17, UiTheme.INK_3)
 	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(tip)
 
@@ -1172,14 +1201,6 @@ func _build_space_tab(body: VBoxContainer) -> void:
 		_layers_enabled = on
 		compositor_layers_toggled.emit(on))
 	body.add_child(_chk_layers)
-	_chk_haptics = CheckButton.new()
-	_chk_haptics.text = "Vibrate the controllers on clicks and grabs"
-	_chk_haptics.focus_mode = Control.FOCUS_NONE
-	_chk_haptics.button_pressed = _haptics_enabled
-	_chk_haptics.toggled.connect(func(on):
-		_haptics_enabled = on
-		haptics_toggled.emit(on))
-	body.add_child(_chk_haptics)
 
 	var sp2 := Control.new()
 	sp2.custom_minimum_size.y = 6
@@ -1198,6 +1219,58 @@ func _build_space_tab(body: VBoxContainer) -> void:
 		foveation_settings_changed.emit(_foveation_enabled, _foveation_strength))
 	_slider_foveation = r[0]
 	r[1].text = ""
+
+# ---------------------------------------------------------------------------
+# Input tab
+# ---------------------------------------------------------------------------
+
+func _build_input_tab(body: VBoxContainer) -> void:
+	_heading(body, "Pointer")
+	_hand_buttons = _segmented(_quality_row(body, "Point with"),
+		[["Left hand", "left"], ["Right hand", "right"]], func(v):
+			_pointer_hand = v
+			_refresh_input_tab()
+			_emit_pointer_settings())
+	var r := _slider_row(body, "Ray angle", 0, 60, 1, func(v):
+		_ray_angle = v
+		_lbl_ray_value.text = "%d°" % int(v)
+		_emit_pointer_settings())
+	_slider_ray = r[0]
+	_lbl_ray_value = r[1]
+	var note := _label("Point with: bare hands. A long pinch with the other hand opens the menu. Ray angle tilts the controller ray down: 40° suits the Pico 4.", 17, UiTheme.INK_3)
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.add_child(note)
+
+	var sp := Control.new()
+	sp.custom_minimum_size.y = 6
+	body.add_child(sp)
+	_heading(body, "Moving and feedback")
+	_chk_face_me = CheckButton.new()
+	_chk_face_me.text = "Screens turn to face me while moving"
+	_chk_face_me.focus_mode = Control.FOCUS_NONE
+	_chk_face_me.toggled.connect(func(on):
+		_face_me = on
+		_emit_pointer_settings())
+	body.add_child(_chk_face_me)
+	_chk_haptics = CheckButton.new()
+	_chk_haptics.text = "Vibrate the controllers on clicks and grabs"
+	_chk_haptics.focus_mode = Control.FOCUS_NONE
+	_chk_haptics.button_pressed = _haptics_enabled
+	_chk_haptics.toggled.connect(func(on):
+		_haptics_enabled = on
+		haptics_toggled.emit(on))
+	body.add_child(_chk_haptics)
+
+func _emit_pointer_settings() -> void:
+	pointer_settings_changed.emit(_pointer_hand, _ray_angle, _face_me)
+
+func _refresh_input_tab() -> void:
+	if not _slider_ray:
+		return
+	_refresh_segmented(_hand_buttons, _pointer_hand)
+	_slider_ray.set_value_no_signal(_ray_angle)
+	_lbl_ray_value.text = "%d°" % int(_ray_angle)
+	_chk_face_me.set_pressed_no_signal(_face_me)
 
 # ---------------------------------------------------------------------------
 # Quality tab
