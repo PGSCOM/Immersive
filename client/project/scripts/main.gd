@@ -46,8 +46,6 @@ var host_tcp_port: int = 19800
 var host_udp_port: int = 19801
 var curved_screen_enabled: bool = true
 var curved_screen_amount: float = 0.5
-var foveation_enabled: bool = false
-var foveation_strength: float = 0.55
 var passthrough_enabled: bool = false
 var look: String = "night"
 ## Draw the screens as OpenXR compositor layers (sharper text) when the
@@ -164,7 +162,6 @@ var _ephemeral: bool = false
 
 ## XR interface (managed by XRStarter).
 var xr_interface: XRInterface = null
-var eye_gaze_controller: XRController3D = null
 # Reconnect timer
 var _reconnect_timer: float = 0.0
 var _should_reconnect: bool = false
@@ -191,7 +188,6 @@ func _ready() -> void:
 	_load_config()
 	_load_workspace()
 	_init_world()
-	_init_eye_gaze_controller()
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
@@ -229,7 +225,6 @@ func _process(delta: float) -> void:
 	_update_usb_probe()
 	_handle_latency_probe(delta)
 	_handle_stats(delta)
-	_update_foveation_focus()
 	_handle_debug_capture(delta)
 	_update_decoders()
 
@@ -242,16 +237,6 @@ func _init_world() -> void:
 	world.name = "World"
 	add_child(world)
 	world.set_look(look)
-
-func _init_eye_gaze_controller() -> void:
-	if not xr_origin:
-		return
-	eye_gaze_controller = XRController3D.new()
-	eye_gaze_controller.name = "EyeGazeController"
-	eye_gaze_controller.tracker = &"/user/eyes_ext"
-	eye_gaze_controller.pose = &"eye_pose"
-	eye_gaze_controller.visible = false
-	xr_origin.add_child(eye_gaze_controller)
 
 ## Bare-hand (controller-free) pointer + pinch input. Inert until the OpenXR
 ## runtime reports optical hand tracking, so it's harmless on controller setups.
@@ -465,8 +450,6 @@ func _clear_all_screens() -> void:
 func _apply_panel_visual_settings(panel: MeshInstance3D) -> void:
 	if panel and panel.has_method("set_curvature"):
 		panel.set_curvature(curved_screen_enabled, curved_screen_amount)
-	if panel and panel.has_method("set_foveation"):
-		panel.set_foveation(foveation_enabled, foveation_strength)
 	if panel and panel.has_method("set_compositor_layer"):
 		panel.set_compositor_layer(compositor_layers and layers_supported(), xr_origin)
 
@@ -673,7 +656,6 @@ func _init_ui_overlay() -> void:
 	ui_overlay.recenter_requested.connect(recenter_workspace)
 	ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
 	ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
-	ui_overlay.foveation_settings_changed.connect(_on_overlay_foveation_settings_changed)
 	ui_overlay.look_changed.connect(_on_overlay_look_changed)
 	ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
 	ui_overlay.auto_quality_requested.connect(_on_overlay_auto_quality_requested)
@@ -694,7 +676,6 @@ func _init_ui_overlay() -> void:
 
 	ui_overlay.set_host_address(host_ip, host_tcp_port, host_udp_port)
 	ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
-	ui_overlay.set_foveation_settings(foveation_enabled, foveation_strength)
 	ui_overlay.set_look("passthrough" if passthrough_enabled else look, _is_passthrough_supported())
 	ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
 		stream_jpeg_quality, stream_res_percent, stream_fps)
@@ -1484,12 +1465,6 @@ func _on_overlay_screen_curvature_changed(enabled: bool, amount: float) -> void:
 	_apply_visual_settings_to_all_panels()
 	_save_config()
 
-func _on_overlay_foveation_settings_changed(enabled: bool, strength: float) -> void:
-	foveation_enabled = enabled
-	foveation_strength = clamp(strength, 0.0, 1.0)
-	_apply_visual_settings_to_all_panels()
-	_save_config()
-
 func _on_overlay_look_changed(new_look: String) -> void:
 	passthrough_enabled = new_look == "passthrough"
 	if not passthrough_enabled:
@@ -1585,24 +1560,6 @@ func _input(event: InputEvent) -> void:
 			toggle_virtual_keyboard()
 		KEY_ESCAPE:
 			get_tree().quit()
-
-func _update_foveation_focus() -> void:
-	if not foveation_enabled:
-		return
-	var ray := _resolve_gaze_ray()
-	var hit := get_panel_hit_from_ray(ray["origin"], ray["direction"])
-	var best_panel: MeshInstance3D = hit.get("panel", null)
-	var best_uv: Vector2 = hit.get("uv", Vector2(0.5, 0.5))
-	for panel in _live_panels():
-		panel.set_foveation_focus_uv(best_uv if panel == best_panel else Vector2(0.5, 0.5))
-
-func _resolve_gaze_ray() -> Dictionary:
-	var origin := xr_camera.global_transform.origin
-	var direction := (-xr_camera.global_transform.basis.z).normalized()
-	if is_instance_valid(eye_gaze_controller) and eye_gaze_controller.get_has_tracking_data():
-		origin = eye_gaze_controller.global_transform.origin
-		direction = (-eye_gaze_controller.global_transform.basis.z).normalized()
-	return {"origin": origin, "direction": direction}
 
 # ---------------------------------------------------------------------------
 # Workspace persistence
@@ -1704,8 +1661,6 @@ func _save_config() -> void:
 	cfg.set_value("pairing", "pins", pins)
 	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
-	cfg.set_value("display", "foveation_enabled", foveation_enabled)
-	cfg.set_value("display", "foveation_strength", foveation_strength)
 	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
 	cfg.set_value("display", "look", look)
 	cfg.set_value("display", "compositor_layers", compositor_layers)
@@ -1756,8 +1711,6 @@ func _load_config() -> void:
 		curved_screen_enabled = cfg.get_value("display", "curved_enabled", true)
 		# Curvature used to be a 0-0.5 texture warp; it is now 0-1 of a real arc.
 		curved_screen_amount = clamp(float(cfg.get_value("display", "curved_amount", 0.5)), 0.0, 1.0)
-		foveation_enabled = cfg.get_value("display", "foveation_enabled", false)
-		foveation_strength = cfg.get_value("display", "foveation_strength", 0.55)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
 		look = cfg.get_value("display", "look", "night")
 		compositor_layers = cfg.get_value("display", "compositor_layers", false)
