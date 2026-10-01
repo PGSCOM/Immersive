@@ -5,7 +5,6 @@ import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES30;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -18,6 +17,7 @@ import org.godotengine.godot.plugin.UsedByGodot;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Godot Android plugin that exposes hardware video decoding (H.264 / HEVC /
@@ -50,7 +50,13 @@ public class Im2VideoDecoder extends GodotPlugin {
         SurfaceTexture surfaceTexture;
         Surface surface;
         int glTexName;
-        volatile boolean frameAvailable = false;
+        // Frames rendered into the SurfaceTexture and not latched yet. Its
+        // queue can hold several, and updateTexImage() latches the oldest:
+        // with a flag, a burst of two left the picture one frame behind for
+        // as long as frames kept coming, and the newest frame of the burst
+        // waited for the next one (on a still screen, the host's 1 s
+        // keepalive). Latching them all shows the newest at once.
+        final AtomicInteger framesPending = new AtomicInteger();
         float[] transformMatrix = new float[16];
         long startTimeNs;
         // Dedicated thread for onFrameAvailableListener callbacks — avoids
@@ -64,6 +70,8 @@ public class Im2VideoDecoder extends GodotPlugin {
         int submitCount;
         int outputCount;
         int consumeCount;
+        int skipped;          // latched over in a burst, never shown
+        boolean lowLatency;   // configured with the low-latency keys
     }
 
     private final ConcurrentHashMap<Integer, StreamDecoder> streams =
@@ -142,12 +150,26 @@ public class Im2VideoDecoder extends GodotPlugin {
             // No KEY_COLOR_FORMAT — the driver chooses the optimal internal format
             // when a Surface output is provided.
             MediaFormat fmt = MediaFormat.createVideoFormat(mime, width, height);
-            if (Build.VERSION.SDK_INT >= 30) {
-                try {
-                    fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
-                } catch (Exception ignored) { /* optional feature, not fatal */ }
+            // Hand each frame out as soon as it is decoded instead of holding
+            // a few back. KEY_LOW_LATENCY ("low-latency") is Android 11+; the
+            // Pico 4 runs Android 10, where only Qualcomm's own keys do it
+            // (the ones Moonlight and ALVR set; decode order is display order
+            // here: the host never sends B-frames). Keys a decoder does not
+            // know are ignored; one that refuses them is configured without.
+            fmt.setInteger("low-latency", 1);
+            fmt.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
+            fmt.setInteger("vendor.qti-ext-dec-picture-order.enable", 1);
+            fmt.setInteger(MediaFormat.KEY_PRIORITY, 0);  // realtime
+            boolean lowLatency = true;
+            try {
+                codec.configure(fmt, surf, null, 0);
+            } catch (Exception e) {
+                Log.w(TAG, "low-latency configure refused (" + e + "), plain decoder");
+                codec.release();
+                codec = MediaCodec.createDecoderByType(mime);
+                codec.configure(MediaFormat.createVideoFormat(mime, width, height), surf, null, 0);
+                lowLatency = false;
             }
-            codec.configure(fmt, surf, null, 0);
             codec.start();
 
             // --- StreamDecoder bookkeeping ---
@@ -159,26 +181,24 @@ public class Im2VideoDecoder extends GodotPlugin {
             sd.frameWidth = width;
             sd.frameHeight = height;
             sd.startTimeNs = System.nanoTime();
+            sd.lowLatency = lowLatency;
 
             // Use a dedicated HandlerThread rather than the Android UI thread (main
             // Looper). On PicoOS the UI thread is occupied by the OpenXR event loop
             // and processes very few messages per second, causing onFrameAvailable
             // callbacks to arrive tens of frames late — or never — making
-            // frameAvailable permanently false and the decoded texture appear black.
+            // framesPending permanently 0 and the decoded texture appear black.
             HandlerThread ht = new HandlerThread("Im2FrameAvail-" + streamId);
             ht.start();
             sd.callbackThread = ht;
-            st.setOnFrameAvailableListener(t -> {
-                if (!sd.frameAvailable) {
-                    Log.d(TAG, "onFrameAvailable stream=" + streamId);
-                }
-                sd.frameAvailable = true;
-            }, new Handler(ht.getLooper()));
+            st.setOnFrameAvailableListener(t -> sd.framesPending.incrementAndGet(),
+                    new Handler(ht.getLooper()));
 
             streams.put(streamId, sd);
             Log.i(TAG, "Surface decoder created: stream=" + streamId
                     + " mime=" + mime + " " + width + "x" + height
-                    + " glTex=" + glTexId + " (Godot-owned)");
+                    + " glTex=" + glTexId + " (Godot-owned)"
+                    + (lowLatency ? " low-latency" : ""));
             return true;
 
         } catch (Exception e) {
@@ -256,13 +276,16 @@ public class Im2VideoDecoder extends GodotPlugin {
             // finished after the last submit would otherwise wait for the
             // next one (up to the host's 1 s idle refresh on a still desktop).
             drain(sd);
-            if (!sd.frameAvailable) return false;
-            sd.frameAvailable = false;
-            sd.surfaceTexture.updateTexImage();
+            int pending = sd.framesPending.getAndSet(0);
+            if (pending == 0) return false;
+            if (pending > 1) sd.skipped += pending - 1;
+            while (pending-- > 0) sd.surfaceTexture.updateTexImage();  // the last one stays
             sd.surfaceTexture.getTransformMatrix(sd.transformMatrix);
             sd.consumeCount++;
-            if (sd.consumeCount <= 5 || sd.consumeCount % 60 == 0) {
-                Log.i(TAG, "consumed frame #" + sd.consumeCount + " stream=" + streamId);
+            if (sd.consumeCount <= 5 || sd.consumeCount % 300 == 0) {
+                Log.i(TAG, "consumed frame #" + sd.consumeCount + " stream=" + streamId
+                        + " (decoded " + sd.outputCount + ", passed over " + sd.skipped
+                        + ", low-latency " + sd.lowLatency + ")");
             }
             return true;
         } catch (Exception e) {
@@ -306,7 +329,6 @@ public class Im2VideoDecoder extends GodotPlugin {
         if (sd == null) return;
         try {
             sd.codec.flush();
-            sd.frameAvailable = false;
             Log.i(TAG, "flush_decoder: stream=" + streamId);
         } catch (Exception e) {
             Log.w(TAG, "flush_decoder failed for stream=" + streamId + ": " + e);
