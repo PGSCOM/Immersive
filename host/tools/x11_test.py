@@ -19,6 +19,10 @@ RandR monitors (left painted red, right blue):
      one too big for Xvfb's fixed framebuffer is refused (FAILED).
   6. H.264 / HEVC / AV1 (needs ffmpeg) on that real red/blue content, via
      codec_test.check_codecs(): chroma survives the encoder colour pipeline.
+  7. Main screen off: the LEFT monitor's CRTC gamma goes to zero (Xvfb's
+     all-zero default ramp, which looks like a killed host's leftover, was
+     lit at start-up) while its stream stays red; SCREEN_OFF 0 lights it, and
+     so does the client leaving.
 """
 import io
 import os
@@ -32,7 +36,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from smoke_client import (CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg,  # noqa: E402
-                          send_multi_select, vdisplay, wait_for)
+                          screen_off_msgs, send_multi_select, send_stream_config, vdisplay,
+                          wait_for)
 import codec_test  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -242,12 +247,46 @@ def run():
     else:
         print("[x11] (ffmpeg not installed: H.264/HEVC/AV1 check skipped)")
 
+    # 7. Main screen off: gamma, not the framebuffer
+    def brightness():
+        out = x(env, "xrandr", "--verbose")
+        return float(out.split("Brightness:")[1].split()[0])
+    if brightness() != 1.0:
+        fail(f"the dark gamma Xvfb starts with should be lit at start-up (brightness {brightness()})")
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(s, 1.5) != [1] or brightness() != 0.0:
+        fail(f"SCREEN_OFF 1: expected answer 1 and gamma 0 (brightness {brightness()})")
+    send_multi_select(s, [0])
+    send_stream_config(s, 2, 0, 70, 0, 0)  # MJPEG again after the codec check
+    wait_for(s, [0x05])
+    udp.setblocking(False)  # drop the codec check's frames still queued
+    try:
+        while True:
+            udp.recv(2048)
+    except BlockingIOError:
+        pass
+    udp.settimeout(0.5)
+    frame = recv_frames(udp, [0], 10).get(0, b"")
+    got = (Image.open(io.BytesIO(frame)).convert("RGB").getpixel((100, 100))
+           if frame.startswith(b"\xff\xd8") else None)
+    if got is None or any(abs(a - b) > 40 for a, b in zip(got, (255, 0, 0))):
+        fail(f"the dark main screen should still stream red, got {got}")
+    s.sendall(struct.pack("<BIB", 0x25, 1, 0))
+    if screen_off_msgs(s, 1.5) != [0] or brightness() != 1.0:
+        fail("SCREEN_OFF 0 should light the screen again")
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    screen_off_msgs(s, 1.0)
     s.close()
+    time.sleep(0.5)
+    if brightness() != 1.0:
+        fail("the client leaving should light the main screen again")
+    print("[x11] main screen off: gamma 0 while streaming, lit on request and when the client left")
+
     host.terminate()
     if host.wait(timeout=5) != 0:
         fail("host did not exit cleanly")
     print("[x11] OK: RandR monitors, per-monitor capture, mouse, keyboard, wheel, "
-          "virtual screens, codecs")
+          "virtual screens, codecs, main screen off")
 
 
 if __name__ == "__main__":

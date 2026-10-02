@@ -202,8 +202,9 @@ def check_view_only(p, log):
         fail(f"the panel does not show the streaming headset: {h}", log)
 
     p.set("view_only", 1)
-    if not next_ack(s) & 0x01:
-        fail("the re-sent HELLO_ACK lacks HOST_FLAG_VIEW_ONLY")
+    flags = next_ack(s)
+    if not flags & 0x01 or not flags & 0x04:
+        fail(f"the re-sent HELLO_ACK should keep HOST_FLAG_SCREEN_OFF and add VIEW_ONLY: {flags}")
     if not discovery_flags() & 0x02:
         fail("discovery does not say view-only")
     send_input(s)

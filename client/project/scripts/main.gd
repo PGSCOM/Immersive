@@ -157,6 +157,11 @@ var _last_host_name: String = ""
 var _audio_on: bool = false
 ## HOST_FLAG_* of the connected PC (view-only, can make virtual screens).
 var _host_flags: int = 0
+## The PC's main screen is dark (the menu's switch). Never saved: every
+## connection starts with it lit, and the host lights it again by itself when
+## this stops being re-sent (_handle_latency_probe), so it is never dark
+## without the headset.
+var _screen_off: bool = false
 ## A virtual screen we asked for, to show as soon as the host lists it.
 var _pending_virtual_id: int = -1
 ## A 1:1 resize in flight: old id, size, old layout, whether it is creating.
@@ -296,6 +301,7 @@ func _init_network() -> void:
 	network_client.disconnected_from_host.connect(_on_disconnected)
 	network_client.handshake_accepted.connect(_on_handshake_accepted)
 	network_client.virtual_display_result.connect(_on_virtual_display_result)
+	network_client.screen_off_changed.connect(_show_screen_off)
 	network_client.connection_rejected.connect(_on_connection_rejected)
 	network_client.monitor_list_received.connect(_on_monitor_list)
 	network_client.stream_started.connect(_on_stream_started)
@@ -413,6 +419,7 @@ func disconnect_from_host() -> void:
 		audio_receiver.stop()
 	_audio_on = false
 	current_state = State.DISCONNECTED
+	_show_screen_off(false)
 	active_monitor_ids.clear()
 	_update_overlay_state()
 	_update_overlay_monitors()
@@ -858,6 +865,9 @@ func _init_ui_overlay() -> void:
 	ui_overlay.virtual_screen_remove_requested.connect(remove_virtual_screen)
 	ui_overlay.virtual_screen_match_requested.connect(match_virtual_screen)
 	ui_overlay.virtual_page_requested.connect(_open_virtual_page)
+	ui_overlay.screen_off_toggled.connect(func(off: bool):
+		_screen_off = off
+		network_client.send_screen_off(off))
 	ui_overlay.control_toggled.connect(func(on: bool):
 		control_enabled = on
 		_last_mouse_state.clear()
@@ -1064,6 +1074,8 @@ func _handle_latency_probe(delta: float) -> void:
 		_probe_id += 1
 		_probe_sent_us = Time.get_ticks_usec()
 		network_client.send_latency_probe(_probe_id, _probe_sent_us)
+		if _screen_off:
+			network_client.send_screen_off(true)  # renews the host's lease
 
 ## Once a second: received fps / Mbps for the status line and the details.
 func _handle_stats(delta: float) -> void:
@@ -1102,6 +1114,7 @@ func _connection_details(stats: Dictionary) -> Array:
 
 func _on_connected() -> void:
 	current_state = State.CONNECTED
+	_show_screen_off(false)
 	_reconnect_timer = 0.0
 	_codec_fallback_sent = false
 	_update_overlay_state()
@@ -1114,7 +1127,8 @@ func _on_connected() -> void:
 func _on_handshake_accepted(host_name: String, host_flags: int = 0) -> void:
 	_host_flags = host_flags
 	if ui_overlay:
-		ui_overlay.set_host_capabilities(_host_view_only(), (host_flags & 0x02) != 0)
+		ui_overlay.set_host_capabilities(_host_view_only(), (host_flags & 0x02) != 0,
+			(host_flags & 0x04) != 0)
 	if _cmdline_virtual != Vector2i.ZERO:
 		print("[Immersive-2][TEST] requesting a %dx%d virtual screen" % [_cmdline_virtual.x, _cmdline_virtual.y])
 		network_client.send_virtual_display_create(_cmdline_virtual.x, _cmdline_virtual.y, 60)
@@ -1164,9 +1178,23 @@ func _on_pin_entered(pin: int) -> void:
 		ui_overlay.set_notice("")
 	connect_to_host()
 
+## The host's word on the main screen (or a reset): the switch follows it.
+func _show_screen_off(off: bool) -> void:
+	_screen_off = off
+	if ui_overlay:
+		ui_overlay.set_screen_off(off)
+
+## Headset taken off: light the PC's screen now rather than when the host's
+## lease runs out (it would anyway, if this never gets out).
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_PAUSED and _screen_off:
+		network_client.send_screen_off(false)
+		_show_screen_off(false)
+
 func _on_disconnected() -> void:
 	var was_streaming := current_state == State.STREAMING
 	current_state = State.DISCONNECTED
+	_show_screen_off(false)  # the host lights it when we leave
 	_pending_virtual_id = -1
 	_match.clear()
 	_update_overlay_state()

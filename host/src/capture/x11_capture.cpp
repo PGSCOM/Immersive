@@ -347,11 +347,44 @@ public:
             }
         }
         fit_screen();
+        relight_dark_crtcs();
     }
 
     ~X11VirtualDisplayManager() override {
+        set_primary_off(false);
         remove_all_displays();
         XCloseDisplay(dpy_);
+    }
+
+    /// The main screen goes dark through its CRTCs' gamma ramps: the scanout
+    /// applies them after the framebuffer, so XShm still grabs the picture.
+    bool can_turn_off_primary() const override { return !primary_crtcs().empty(); }
+
+    bool set_primary_off(bool off) override {
+        if (!off) {
+            for (auto& [crtc, ramp] : saved_gamma_) {
+                XRRSetCrtcGamma(dpy_, crtc, ramp);
+                XRRFreeGamma(ramp);
+            }
+            if (!saved_gamma_.empty()) XSync(dpy_, False);
+            saved_gamma_.clear();
+            return true;
+        }
+        if (!saved_gamma_.empty()) return true;
+        for (RRCrtc crtc : primary_crtcs()) {
+            XRRCrtcGamma* ramp = XRRGetCrtcGamma(dpy_, crtc);
+            if (!ramp || ramp->size <= 0) {
+                if (ramp) XRRFreeGamma(ramp);
+                continue;
+            }
+            XRRCrtcGamma* dark = XRRAllocGamma(ramp->size);
+            for (int i = 0; i < ramp->size; ++i) dark->red[i] = dark->green[i] = dark->blue[i] = 0;
+            XRRSetCrtcGamma(dpy_, crtc, dark);
+            XRRFreeGamma(dark);
+            saved_gamma_.emplace_back(crtc, ramp);
+        }
+        XSync(dpy_, False);
+        return !saved_gamma_.empty();
     }
 
     bool can_create_displays() const override { return true; }
@@ -461,9 +494,62 @@ private:
         return attr.width == w && attr.height == h;
     }
 
+    /// CRTCs of the primary monitor, else of the first one with outputs.
+    std::vector<RRCrtc> primary_crtcs() const {
+        std::vector<RRCrtc> crtcs;
+        const Window root = DefaultRootWindow(dpy_);
+        int count = 0;
+        XRRMonitorInfo* mons = XRRGetMonitors(dpy_, root, True, &count);
+        XRRScreenResources* res = XRRGetScreenResourcesCurrent(dpy_, root);
+        int pick = -1;
+        for (int i = 0; mons && i < count; ++i) {
+            if (mons[i].noutput == 0) continue;
+            char* name = mons[i].name ? XGetAtomName(dpy_, mons[i].name) : nullptr;
+            const bool ours = name && virtual_index(name) >= 0;
+            if (name) XFree(name);
+            if (ours) continue;
+            if (pick < 0 || mons[i].primary) pick = i;
+            if (mons[i].primary) break;
+        }
+        for (int o = 0; res && pick >= 0 && o < mons[pick].noutput; ++o) {
+            XRROutputInfo* info = XRRGetOutputInfo(dpy_, res, mons[pick].outputs[o]);
+            if (info && info->crtc && XRRGetCrtcGammaSize(dpy_, info->crtc) > 0 &&
+                std::find(crtcs.begin(), crtcs.end(), info->crtc) == crtcs.end())
+                crtcs.push_back(info->crtc);
+            if (info) XRRFreeOutputInfo(info);
+        }
+        if (res) XRRFreeScreenResources(res);
+        if (mons) XRRFreeMonitors(mons);
+        return crtcs;
+    }
+
+    /// A host killed while the main screen was off leaves an all-zero gamma
+    /// ramp behind (X keeps it): nobody sets that on purpose, so light it.
+    void relight_dark_crtcs() {
+        XRRScreenResources* res = XRRGetScreenResourcesCurrent(dpy_, DefaultRootWindow(dpy_));
+        for (int c = 0; res && c < res->ncrtc; ++c) {
+            XRRCrtcGamma* ramp = XRRGetCrtcGamma(dpy_, res->crtcs[c]);
+            if (!ramp) continue;
+            bool dark = ramp->size > 1;
+            for (int i = 0; dark && i < ramp->size; ++i)
+                dark = !ramp->red[i] && !ramp->green[i] && !ramp->blue[i];
+            if (dark) {
+                for (int i = 0; i < ramp->size; ++i)
+                    ramp->red[i] = ramp->green[i] = ramp->blue[i] =
+                        static_cast<unsigned short>(i * 65535 / (ramp->size - 1));
+                XRRSetCrtcGamma(dpy_, res->crtcs[c], ramp);
+                std::cout << "[X11Virtual] A screen left dark by an earlier run is lit again\n";
+            }
+            XRRFreeGamma(ramp);
+        }
+        if (res) XRRFreeScreenResources(res);
+        XSync(dpy_, False);
+    }
+
     Display* dpy_;
     int base_w_ = 0, base_h_ = 0, base_mm_w_ = 0, base_mm_h_ = 0;
     std::map<int, Rect> active_;  // n -> placement
+    std::vector<std::pair<RRCrtc, XRRCrtcGamma*>> saved_gamma_;  // while the main screen is off
 };
 
 }  // namespace

@@ -39,6 +39,8 @@ signal virtual_screen_match_requested(monitor_id: int, width: int, height: int)
 signal virtual_page_requested(monitor_id: int)
 ## Pointer and keyboards drive the PC (off = look only).
 signal control_toggled(enabled: bool)
+## The "Turn off this PC's main screen" switch (off = dark).
+signal screen_off_toggled(off: bool)
 signal haptics_toggled(enabled: bool)
 signal screen_link_changed(monitor_id: int, linked: bool)
 signal snap_toggled(enabled: bool)
@@ -95,6 +97,8 @@ var _fps_value := 0
 var _pin_digits := ""
 var _host_view_only := false
 var _host_virtual := false
+var _host_screen_off := false
+var _screen_off := false
 var _control_enabled := true
 var _haptics_enabled := true
 var _pointer_hand := "right"
@@ -135,6 +139,8 @@ var _lbl_connected: Label
 var _details_grid: GridContainer
 var _chk_control: CheckButton
 var _lbl_control_note: Label
+var _chk_screen_off: CheckButton
+var _lbl_screen_off_note: Label
 var _btn_disconnect: Button
 var _manual_box: Control
 var _pin_box: Control
@@ -297,10 +303,12 @@ func set_connection_details(rows: Array) -> void:
 		_details_grid.add_child(_label(r[1], 19, UiTheme.INK))
 
 ## What the connected PC allows: view_only = it takes no input
-## (--view-only); virtual = it can make extra, virtual screens.
-func set_host_capabilities(view_only: bool, virtual: bool) -> void:
+## (--view-only); virtual = it can make extra, virtual screens; screen_off =
+## it can turn its main screen off.
+func set_host_capabilities(view_only: bool, virtual: bool, screen_off := false) -> void:
 	_host_view_only = view_only
 	_host_virtual = virtual
+	_host_screen_off = screen_off
 	_refresh_control()
 	_rebuild_monitor_list()
 
@@ -330,6 +338,14 @@ func _refresh_control() -> void:
 	_lbl_control_note.text = "This PC shares its screens but takes no input (started with --view-only)." \
 		if _host_view_only else "Off: you can look and move screens, but nothing is clicked or typed on the PC."
 	_lbl_control_note.visible = _host_view_only or not _control_enabled
+	_chk_screen_off.visible = _host_screen_off and not _host_view_only
+	_chk_screen_off.set_pressed_no_signal(_screen_off)
+	_lbl_screen_off_note.visible = _chk_screen_off.visible and _screen_off
+
+## Whether the PC's main screen is dark (what the host last said).
+func set_screen_off(off: bool) -> void:
+	_screen_off = off
+	_refresh_control()
 
 ## A one-line message under the header ("" hides it).
 func set_notice(text: String) -> void:
@@ -900,6 +916,17 @@ func _build_connect_tab(body: VBoxContainer) -> void:
 	_lbl_control_note = _label("", 17, UiTheme.INK_3)
 	_lbl_control_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_connected_box.add_child(_lbl_control_note)
+	_chk_screen_off = CheckButton.new()
+	_chk_screen_off.text = "Turn off this PC's main screen"
+	_chk_screen_off.focus_mode = Control.FOCUS_NONE
+	_chk_screen_off.toggled.connect(func(on):
+		_screen_off = on
+		_refresh_control()
+		screen_off_toggled.emit(on))
+	_connected_box.add_child(_chk_screen_off)
+	_lbl_screen_off_note = _label("Dark on the desk, still here in the headset. It comes back on when you switch this off, take the headset off or disconnect.", 17, UiTheme.INK_3)
+	_lbl_screen_off_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_connected_box.add_child(_lbl_screen_off_note)
 	var crow := _hbox(10)
 	_connected_box.add_child(crow)
 	_btn_disconnect = _button("Disconnect")

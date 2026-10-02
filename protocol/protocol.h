@@ -55,6 +55,7 @@ enum class MessageType : uint8_t {
     VIRTUAL_DISPLAY_CREATE = 0x22, ///< Client → host: add a virtual monitor
     VIRTUAL_DISPLAY_REMOVE = 0x23, ///< Client → host: remove a virtual monitor this host made
     VIRTUAL_DISPLAY_RESULT = 0x24, ///< Host → client: outcome of CREATE / REMOVE
+    SCREEN_OFF           = 0x25, ///< Both ways: the PC's main screen dark / lit (ScreenOff)
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
@@ -95,6 +96,7 @@ struct HelloAck {
 /// HelloAck.flags bits.
 constexpr uint8_t HOST_FLAG_VIEW_ONLY        = 0x01;  ///< --view-only: input is ignored
 constexpr uint8_t HOST_FLAG_VIRTUAL_DISPLAYS = 0x02;  ///< VIRTUAL_DISPLAY_CREATE works here
+constexpr uint8_t HOST_FLAG_SCREEN_OFF       = 0x04;  ///< SCREEN_OFF works here
 
 /// HelloReject.reason values.
 constexpr uint8_t REJECT_PIN_REQUIRED = 1;  ///< Host needs a PIN and none was sent
@@ -177,6 +179,19 @@ struct VirtualDisplayResult {
     uint8_t removed;     ///< 1 = answer to REMOVE, 0 = answer to CREATE
     uint8_t monitor_id;  ///< the monitor created / removed; 0xFF on failure
 };
+
+/// Client → host: off = 1 darkens the PC's main (primary) monitor, which
+/// keeps streaming; 0 lights it again. off = 1 is a lease the client re-sends
+/// every 2 s while it wants the screen dark: the host lights it again
+/// SCREEN_OFF_LEASE_MS after the last one, when that client leaves, when the
+/// host turns view-only and when it exits, so a PC never stays dark with no
+/// headset on it. Host → client: the screen's state after it changed (or
+/// off = 0 when it could not darken it).
+struct ScreenOff {
+    uint8_t off;
+};
+
+constexpr uint32_t SCREEN_OFF_LEASE_MS = 10000;
 
 struct MonitorSelect {
     uint8_t monitor_id;

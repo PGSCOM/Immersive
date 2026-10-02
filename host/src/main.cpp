@@ -195,6 +195,11 @@ int main(int argc, char* argv[]) {
     // Register signal handlers for graceful shutdown
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+#ifdef SIGHUP
+    // Its terminal closed: still exit through the cleanup (which lights the
+    // main screen again if a headset had turned it off).
+    std::signal(SIGHUP, signal_handler);
+#endif
 #ifdef SIGPIPE
     // A client that vanishes (Wi-Fi drop, headset sleep) can be written to
     // before its handler thread notices. Without this the default SIGPIPE
@@ -1123,11 +1128,58 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // --- Main screen off ---
+    // A headset can darken the PC's main monitor while it works on it in VR
+    // (it keeps streaming). Never without a headset: the client that turned
+    // it off holds a lease it renews every 2 s (protocol::ScreenOff), and the
+    // screen is lit again when that lease runs out, when that client leaves,
+    // in view-only and on exit. Each connection starts with it lit.
+    // screen_off_client (0 = lit) changes under ops_mutex.
+    std::atomic<uint32_t> screen_off_client{0};
+    std::atomic<int64_t>  screen_off_until_ms{0};
+    auto steady_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    auto send_screen_off = [&](uint32_t client_id, bool off) {
+        immersive::protocol::ScreenOff msg{static_cast<uint8_t>(off ? 1 : 0)};
+        server->send_control_message(client_id, immersive::protocol::MessageType::SCREEN_OFF,
+                                     &msg, sizeof(msg));
+    };
+    auto light_screen_locked = [&](const char* why) {
+        const uint32_t owner = screen_off_client.exchange(0);
+        if (!owner) return;
+        vdm->set_primary_off(false);
+        std::cout << "[Host] Main screen on (" << why << ")\n";
+        send_screen_off(owner, false);
+    };
+    server->set_on_screen_off([&](uint32_t client_id, bool off) {
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        const uint32_t owner = screen_off_client;
+        if (!off) {
+            if (owner) light_screen_locked("asked by the headset");
+            if (owner != client_id) send_screen_off(client_id, false);
+            return;
+        }
+        if (!owner) {
+            if (view_only || !vdm->set_primary_off(true)) {
+                send_screen_off(client_id, false);  // no: its switch goes back
+                return;
+            }
+            std::cout << "[Host] Main screen off: client " << client_id
+                      << " works on it in the headset\n";
+        }
+        screen_off_until_ms = steady_ms() + immersive::protocol::SCREEN_OFF_LEASE_MS;
+        screen_off_client = client_id;
+        if (owner != client_id) send_screen_off(client_id, true);
+    });
+
     server->set_on_client_disconnected([&](uint32_t client_id) {
         std::cout << "[Host] Client " << client_id << " disconnected\n";
         // Check and stop under one lock: another client taking over in
         // between must not have its fresh streams killed.
         std::lock_guard<std::mutex> ops(ops_mutex);
+        if (client_id == screen_off_client) light_screen_locked("its headset left");
         if (client_id != streams_client_id) return;
         stop_all_locked(false);
         input_client_id = 0;
@@ -1385,8 +1437,10 @@ int main(int argc, char* argv[]) {
     srv_config.udp_port    = udp_port;
     srv_config.max_clients = max_clients;
     srv_config.monitor_count = static_cast<uint8_t>(std::min<size_t>(displays.size(), 255));
+    const bool screen_off_ok = vdm->can_turn_off_primary();
     srv_config.host_flags = (view_only ? immersive::protocol::HOST_FLAG_VIEW_ONLY : 0) |
-                            (vdm_ok ? immersive::protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0);
+                            (vdm_ok ? immersive::protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0) |
+                            (screen_off_ok ? immersive::protocol::HOST_FLAG_SCREEN_OFF : 0);
     // With --no-pin an existing PIN is kept for when the panel turns it back on.
     settings.pin = pin_arg > 0 ? static_cast<uint32_t>(pin_arg)
                  : pin_arg < 0 ? load_or_create_pin()
@@ -1527,6 +1581,7 @@ int main(int argc, char* argv[]) {
         opts.audio_port = audio_port;
         opts.audio_available = audio_enable;
         opts.virtual_supported = vdm_ok;
+        opts.screen_off_supported = screen_off_ok;
         opts.stub = stub;
         ui = immersive::ui::start(settings, *server, std::move(hooks), std::move(opts));
     }
@@ -1548,6 +1603,11 @@ int main(int argc, char* argv[]) {
     };
     while (g_running) {
         reap_graveyard(false);
+        if (screen_off_client && (view_only || steady_ms() > screen_off_until_ms)) {
+            std::lock_guard<std::mutex> ops(ops_mutex);
+            if (view_only) light_screen_locked("view-only");
+            else if (steady_ms() > screen_off_until_ms) light_screen_locked("the headset went quiet");
+        }
         if (ui) ui->pump(std::chrono::milliseconds(100));  // runs the macOS menu bar
         else std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -1561,6 +1621,10 @@ int main(int argc, char* argv[]) {
     // workers joinable in active_streams, and destroying a joinable
     // std::thread at return is std::terminate.
     server->stop();
+    {
+        std::lock_guard<std::mutex> ops(ops_mutex);
+        light_screen_locked("quitting");
+    }
     stop_all_streams(false);
     reap_graveyard(true);  // they reference this frame's locals
     if (audio_thread.joinable()) audio_thread.join();

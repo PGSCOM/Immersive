@@ -46,6 +46,15 @@ public:
 
     /// Get the list of active virtual display IDs
     virtual std::vector<uint8_t> get_active_displays() const { return {}; }
+
+    /// True when set_primary_off() can darken the main monitor here.
+    virtual bool can_turn_off_primary() const { return false; }
+
+    /// Darken (off) or light again the main (primary) monitor. Only its
+    /// picture goes black: it stays in the desktop and keeps being captured,
+    /// so it still streams. Implementations light it again when destroyed.
+    /// Returns false when it could not be darkened.
+    virtual bool set_primary_off(bool /*off*/) { return false; }
 };
 
 /// The virtual-display manager for this OS and session (never nullptr; the

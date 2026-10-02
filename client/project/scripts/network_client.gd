@@ -38,6 +38,8 @@ signal handshake_accepted(host_name: String, host_flags: int)
 ## Answer to a virtual screen request (VDISPLAY_* status; removed = answer to
 ## a removal; monitor_id = the screen made or removed, 0xFF on failure).
 signal virtual_display_result(status: int, removed: bool, monitor_id: int)
+## The PC's main screen went dark (off) or lit again (SCREEN_OFF from the host).
+signal screen_off_changed(off: bool)
 
 # --- Constants (matching protocol.h) ---
 
@@ -58,6 +60,7 @@ const MSG_STREAM_CONFIG: int         = 0x21
 const MSG_VIRTUAL_DISPLAY_CREATE: int = 0x22
 const MSG_VIRTUAL_DISPLAY_REMOVE: int = 0x23
 const MSG_VIRTUAL_DISPLAY_RESULT: int = 0x24
+const MSG_SCREEN_OFF: int            = 0x25
 const MSG_FRAME_ACK: int             = 0x30
 const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
@@ -76,6 +79,7 @@ const REJECT_SERVER_FULL: int = 3
 const REJECT_LOCKED_OUT: int = 4
 const HOST_FLAG_VIEW_ONLY: int = 0x01
 const HOST_FLAG_VIRTUAL_DISPLAYS: int = 0x02
+const HOST_FLAG_SCREEN_OFF: int = 0x04
 const MONITOR_FLAG_VIRTUAL: int = 0x01
 const MONITOR_FLAG_PRIMARY: int = 0x02
 ## A whole encoded frame arrives as one VIDEO_FRAME message in TCP media mode;
@@ -411,6 +415,11 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 					[payload[0], payload[1], payload[2]])
 				virtual_display_result.emit(payload[0], payload[1] != 0, payload[2])
 
+		MSG_SCREEN_OFF:
+			if payload.size() >= 1:
+				print("[Network] SCREEN_OFF: %d" % payload[0])
+				screen_off_changed.emit(payload[0] != 0)
+
 		MSG_STREAM_START:
 			if payload.size() >= 6:
 				var monitor_id: int = payload[0]
@@ -667,6 +676,11 @@ func send_virtual_display_create(width: int, height: int, refresh_rate: int = 60
 ## Remove a virtual screen the host made.
 func send_virtual_display_remove(monitor_id: int) -> void:
 	_send_control_message(MSG_VIRTUAL_DISPLAY_REMOVE, PackedByteArray([monitor_id]))
+
+## Darken (or light again) the PC's main screen. The host only keeps it dark
+## while this is re-sent: main.gd repeats it every 2 s (protocol.h ScreenOff).
+func send_screen_off(off: bool) -> void:
+	_send_control_message(MSG_SCREEN_OFF, PackedByteArray([1 if off else 0]))
 
 ## Send a frame acknowledgement.
 func send_frame_ack(monitor_id: int, frame_number: int) -> void:

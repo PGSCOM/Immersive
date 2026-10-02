@@ -144,7 +144,7 @@ Response to HELLO.
 | udp_port | uint16 LE | UDP port for video stream |
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
 | host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
-| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`, or "Let headsets control this PC" off in the host's settings window). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC |
+| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`, or "Let headsets control this PC" off in the host's settings window). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC. Bit 2 `HOST_FLAG_SCREEN_OFF`: SCREEN_OFF works on this PC |
 
 When the flags change while clients are connected (the settings window turns
 remote control on or off), the host sends every paired client a fresh
@@ -399,6 +399,27 @@ VIRTUAL_DISPLAY_RESULT, then a new MONITOR_LIST to every client.
 | status | uint8 | 0 `VDISPLAY_OK`, 1 `VDISPLAY_UNSUPPORTED` (this desktop cannot make them), 2 `VDISPLAY_FAILED` (see the host log), 3 `VDISPLAY_LIMIT` (4 already exist) |
 | removed | uint8 | 1 = answer to REMOVE, 0 = answer to CREATE |
 | monitor_id | uint8 | The monitor created / removed; 0xFF on failure |
+
+### `0x25` SCREEN_OFF — Both ways
+
+Only sent when HELLO_ACK set `HOST_FLAG_SCREEN_OFF`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| off | uint8 | 1 = the PC's main (primary) monitor is dark, 0 = lit |
+
+Client → host: 1 darkens the main monitor, 0 lights it again. Only its picture
+goes black: it stays in the desktop and keeps streaming (X11: zero CRTC gamma;
+macOS: zero display transfer formula; Windows 10 2004+: a black click-through
+window left out of capture). `off = 1` is a lease: the client re-sends it every
+2 s while it wants the screen dark, and the host lights it again 10 s
+(`SCREEN_OFF_LEASE_MS`) after the last one, when that client disconnects, when
+the host turns view-only and when it exits. So the screen is never dark without
+a headset on it, and every connection starts with it lit.
+
+Host → client: the screen's state each time it changes for that client, and
+`off = 0` right after a request it could not honour (view-only, the backend
+failed). The client's switch follows these.
 
 ---
 
