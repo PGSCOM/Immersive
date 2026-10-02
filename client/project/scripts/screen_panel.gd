@@ -633,14 +633,24 @@ func _create_placeholder_texture() -> void:
 	add_child(_placeholder_label)
 	_place_decorations()
 
-## Keep the label on the surface and the grab bar under the bottom edge.
+## The grab bar sits over the top edge instead (another screen is right
+## under this one, where the bar would be hidden). main.gd decides.
+var bar_on_top := false
+
+func set_bar_on_top(on: bool) -> void:
+	if on != bar_on_top:
+		bar_on_top = on
+		_place_decorations()
+
+## Keep the label on the surface and the grab bar under the bottom edge (or over the top one).
 func _place_decorations() -> void:
 	if _placeholder_label:
 		# The text is flat and ~0.4 m wide: lift it clear of the curve's bulge.
 		var bulge := local_point(0.5 + 0.22 / panel_width, 0.5).z
 		_placeholder_label.position = Vector3(0.0, 0.0, bulge + 0.004)
 	if grab_bar:
-		grab_bar.position = local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
+		grab_bar.position = local_point(0.5, 0.0) + Vector3(0.0, 0.06, 0.0) if bar_on_top \
+			else local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
 	for h in resize_handles:
 		var u := 0.5 + 0.5 * h.corner.x
 		# Tilted with the surface, so the bracket lies in the screen's plane.

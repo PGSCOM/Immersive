@@ -200,6 +200,10 @@ var _workspace_monitor_ids: Array = []
 var _layouts_from_disk: bool = false
 ## Monitor ids of the screens that move together (saved with the workspace).
 var _linked: Dictionary = {}
+## Screens dropped in the white frame beside another follow it: monitor id ->
+## the monitor id it was snapped to (saved with the workspace). Pulled out and
+## dropped anywhere else, a screen is free again.
+var _snapped_to: Dictionary = {}
 var _save_timer: Timer
 
 # ---------------------------------------------------------------------------
@@ -580,7 +584,9 @@ func _head() -> Array:
 	return [pos, fwd]
 
 ## Place every screen, ordered by monitor id, on an arc in front of the head.
+## Each one stands on its own there: none follows another any more.
 func arrange_panels() -> void:
+	_snapped_to.clear()
 	var panels := _live_panels()
 	panels.sort_custom(func(a, b): return int(a.get_meta("monitor_id", 0)) < int(b.get_meta("monitor_id", 0)))
 	if panels.is_empty():
@@ -603,6 +609,7 @@ func arrange_panels() -> void:
 		panels[i].place_facing(at, pos)
 		panels[i].set_meta("auto_placed", true)
 		a += angles[i] + ARC_GAP_M / ARC_RADIUS
+	_place_bars()
 	_remember_layouts()
 	_schedule_save()
 
@@ -673,11 +680,76 @@ var _snap_frame: SnapFrame = null
 func _is_linked(panel: Node3D) -> bool:
 	return _linked.get(int(panel.get_meta("monitor_id", -1)), false)
 
-## The OTHER screens that move rigidly with `panel` (empty: it moves alone).
+## The OTHER screens that move rigidly with `panel` (empty: it moves alone):
+## the ones snapped to it (and to those, and so on) and, for a "Move together"
+## screen, the other linked ones. The screen it is snapped to stays behind.
 func drag_group_for(panel: Node3D) -> Array:
-	if not _is_linked(panel):
-		return []
-	return _live_panels().filter(func(p): return p != panel and _is_linked(p))
+	var ids := [int(panel.get_meta("monitor_id", -1))]
+	if _is_linked(panel):
+		ids.append_array(_linked.keys().filter(func(k): return _linked[k]))
+	ids = _with_snapped(ids)
+	return _live_panels().filter(func(p): return p != panel and ids.has(int(p.get_meta("monitor_id", -1))))
+
+## `ids` plus every monitor id snapped to one of them, to those, and so on.
+func _with_snapped(ids: Array) -> Array:
+	var out := ids.duplicate()
+	var i := 0
+	while i < out.size():
+		for c in _snapped_to:
+			if _snapped_to[c] == out[i] and not out.has(c):
+				out.append(c)
+		i += 1
+	return out
+
+## Screens snapped to `panel` go back flush against it, on the side they are
+## nearest (it changed size), with whatever is snapped to them.
+func _reseat_snapped(panel: Node3D) -> void:
+	var pid := int(panel.get_meta("monitor_id", -1))
+	for c in _live_panels():
+		var cid := int(c.get_meta("monitor_id", -1))
+		if c == panel or _snapped_to.get(cid, -1) != pid:
+			continue
+		var best: Transform3D = c.global_transform
+		var best_d := INF
+		for side in 4:
+			var x: Transform3D = panel.landing_beside(side, c.panel_width, c.panel_height, SNAP_GAP_M)
+			if x.origin.distance_to(c.global_position) < best_d:
+				best_d = x.origin.distance_to(c.global_position)
+				best = x
+		var moved: Transform3D = best * c.global_transform.affine_inverse()
+		var ids := _with_snapped([cid])
+		for p in _live_panels():
+			if p != panel and ids.has(int(p.get_meta("monitor_id", -1))):
+				p.global_transform = moved * p.global_transform
+
+## A screen with another right under it (one snapped below, or it snapped on
+## top) has its grab bar over its top edge: under it the bar would sit on the
+## other screen, whose pixels win the pointer.
+func _place_bars() -> void:
+	var panels := _live_panels()
+	for p in panels:
+		var spot: Vector3 = p.to_global(p.local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0))
+		var n: Vector3 = p.global_basis.z
+		p.set_bar_on_top(panels.any(func(q):
+			var h: Dictionary = q.ray_to_screen_hit(spot + n * 0.3, -n) if q != p else {}
+			return h.get("valid", false) and h.distance < 0.6))
+
+## A virtual screen is gone for good (its id comes back for the next one):
+## free it and whatever was snapped to it.
+func _unsnap(id: int) -> void:
+	_snapped_to.erase(id)
+	for c in _snapped_to.keys():
+		if _snapped_to[c] == id:
+			_snapped_to.erase(c)
+
+## A replaced virtual screen keeps its snaps under its new id.
+func _rename_snaps(old_id: int, new_id: int) -> void:
+	if old_id == new_id:
+		return
+	var renamed := {}
+	for c in _snapped_to:
+		renamed[new_id if c == old_id else c] = new_id if _snapped_to[c] == old_id else _snapped_to[c]
+	_snapped_to = renamed
 
 ## False while the layout is locked (the menu and keyboard still move).
 func can_move_panel(_panel: Node3D) -> bool:
@@ -726,27 +798,33 @@ func _update_snap_preview() -> void:
 		add_child(_snap_frame)
 	_snap_frame.show_at(_snap_pick.xform, dragged.panel_width, dragged.panel_height, dragged.get_arc())
 
-## A screen grab ended: it lands in the frame that was showing, and its linked
-## block moves with it. Snapping does not link screens: "Move together" stays
-## the user's choice. Called before on_layout_changed().
+## A screen grab ended: it lands in the frame that was showing and from now on
+## follows that neighbour (moving the neighbour moves it); dropped anywhere
+## else it follows nobody. What follows it moves with it. "Move together" is
+## not touched. Called before on_layout_changed().
 func on_panel_drag_ended(panel: Node3D) -> void:
 	var target := snap_target_for(panel)
 	_snap_pick = {}
 	if _snap_frame:
 		_snap_frame.clear()
+	var mid := int(panel.get_meta("monitor_id", -1))
 	if target.is_empty():
+		_snapped_to.erase(mid)
 		return
 	var old := panel.global_transform
 	panel.global_transform = target.xform
 	var moved := panel.global_transform * old.affine_inverse()
 	for g in drag_group_for(panel):
 		g.global_transform = moved * g.global_transform
+	_snapped_to[mid] = int(target.panel.get_meta("monitor_id", -1))
 
 ## Called by vr_input.gd when a grab ends: the layout is now the user's, so
 ## new screens no longer re-arrange the others.
 func on_layout_changed() -> void:
 	for p in _live_panels():
 		p.set_meta("auto_placed", false)
+		_reseat_snapped(p)  # a resized screen keeps what is snapped to it flush
+	_place_bars()
 	_remember_layouts()
 	_schedule_save()
 
@@ -1195,6 +1273,12 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 			panel.set_panel_width(VirtualSize.default_width_m(float(width) / height))
 		if not layout.is_empty():
 			panel.apply_layout_state(layout)
+			# Back at another size (a replaced virtual screen): what is snapped
+			# to it, and it against the one it is snapped to, stay flush.
+			_reseat_snapped(panel)
+			var under := _find_panel_for_monitor(_snapped_to.get(monitor_id, -1))
+			if under:
+				_reseat_snapped(under)
 		elif _live_panels().all(func(p): return p == panel or p.get_meta("auto_placed", false)):
 			# Nothing placed by hand yet (e.g. the first connection, where the
 			# streams start in any order): lay them all out, in monitor order.
@@ -1204,6 +1288,7 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 			_place_new_panel(panel)
 			_remember_layouts()
 			_schedule_save()
+		_place_bars()
 
 ## The remembered spot for a monitor's screen. Layouts read from disk are
 ## checked once against where the user now looks: a workspace saved facing
@@ -1538,6 +1623,7 @@ func _on_virtual_display_result(status: int, removed: bool, monitor_id: int) -> 
 		ui_overlay.set_notice("")
 	if removed:
 		_layouts.erase(monitor_id)  # a later screen with this id starts afresh
+		_unsnap(monitor_id)
 		return
 	# Show it: at once if the new MONITOR_LIST is already here, else when it comes.
 	_pending_virtual_id = monitor_id
@@ -1588,10 +1674,13 @@ func _match_step(status: int, monitor_id: int) -> bool:
 		return true
 	var layout: Dictionary = _match["layout"]
 	var done: String = _match["done"]
+	var old_id: int = _match["old"]
 	_match.clear()
 	if status != 0:
+		_unsnap(old_id)
 		return false  # normal error notice; the old screen is gone
 	_layouts[monitor_id] = layout
+	_rename_snaps(old_id, monitor_id)
 	ui_overlay.set_notice(done % [size.x, size.y])
 	_pending_virtual_id = monitor_id
 	for m in available_monitors:
@@ -1755,7 +1844,11 @@ func save_workspace_layout() -> void:
 	for mid in _layouts:
 		panels[str(mid)] = _layouts[mid]
 	var linked: Array = _linked.keys().filter(func(k): return _linked[k])
-	var payload := {"version": 3, "monitor_ids": active_monitor_ids, "panels": panels, "linked": linked}
+	var snapped := {}
+	for c in _snapped_to:
+		snapped[str(c)] = _snapped_to[c]
+	var payload := {"version": 4, "monitor_ids": active_monitor_ids, "panels": panels,
+		"linked": linked, "snapped": snapped}
 	var file := FileAccess.open(WORKSPACE_PATH, FileAccess.WRITE)
 	if not file:
 		push_error("[Immersive-2] Failed to open workspace file for writing")
@@ -1771,6 +1864,7 @@ func _load_workspace() -> void:
 	_layouts.clear()
 	_workspace_monitor_ids.clear()
 	_linked.clear()
+	_snapped_to.clear()
 	if not FileAccess.file_exists(WORKSPACE_PATH):
 		return
 	var parsed = JSON.parse_string(FileAccess.get_file_as_string(WORKSPACE_PATH))
@@ -1781,6 +1875,11 @@ func _load_workspace() -> void:
 		_workspace_monitor_ids.append(int(id))
 	for id in parsed.get("linked", []):  # version 3
 		_linked[int(id)] = true
+	var snapped = parsed.get("snapped", {})
+	if typeof(snapped) == TYPE_DICTIONARY:  # version 4
+		for key in snapped:
+			if int(key) != int(snapped[key]):
+				_snapped_to[int(key)] = int(snapped[key])
 	var panels = parsed.get("panels", {})
 	if typeof(panels) == TYPE_DICTIONARY:  # version 2
 		for key in panels:

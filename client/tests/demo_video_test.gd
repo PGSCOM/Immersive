@@ -2,7 +2,9 @@ extends SceneTree
 ## The real client scene streaming from a host, driven by a scripted pointer
 ## through the same calls the controllers use (main.gd::pick(), LaserDrag
 ## grab/drop): move a screen, pull it closer, resize it by a corner, snap
-## another one above it, open the menu and move it. Meant to be recorded:
+## another one above it, move the middle one (the snapped one comes along),
+## move the snapped one away alone, open the menu and move it. Meant to be
+## recorded:
 ##
 ##   ./host/build/immersive2_host --stub --no-ui --no-usb --no-audio --pin 246810 &
 ##   xvfb-run -a -s "-screen 0 1280x720x24" godot --rendering-driver opengl3 \
@@ -176,6 +178,33 @@ func _run() -> void:
 	_drop(right)
 	await _frames(5)
 	check(right.global_position.distance_to(land.origin) < 0.05, "releasing lands it in the frame")
+	await _frames(20)
+
+	# --- Moving the middle screen brings the one snapped onto it -------------
+	var rel: Transform3D = centre.global_transform.affine_inverse() * right.global_transform
+	var c_start: Vector3 = centre.global_position
+	bar_at = centre.grab_bar.global_position
+	grabbed = await _grab_at(bar_at)
+	check(grabbed == centre, "the middle screen is grabbed again")
+	await _swing(bar_at, bar_at + cam.global_basis * Vector3(0.35, -0.1, 0), 45)
+	await _frames(10)
+	_drop(centre)
+	await _frames(5)
+	check(centre.global_position.distance_to(c_start) > 0.25
+		and (centre.global_transform.affine_inverse() * right.global_transform).is_equal_approx(rel),
+		"the screen snapped onto it came along, still flush")
+	await _frames(15)
+	# The snapped one moved by itself goes alone; dropped away it follows nobody.
+	c_start = centre.global_position
+	rbar = right.grab_bar.global_position
+	grabbed = await _grab_at(rbar)
+	check(grabbed == right, "the snapped screen is grabbed by itself")
+	await _swing(rbar, rbar + cam.global_basis * Vector3(0.7, 0.15, 0), 45)
+	await _frames(10)
+	_drop(right)
+	await _frames(5)
+	check(centre.global_position.distance_to(c_start) < 0.001, "moving it leaves the middle screen alone")
+	check(not main._snapped_to.has(int(right.get_meta("monitor_id"))), "dropped away from it, it follows nobody")
 	await _frames(20)
 
 	# --- Open the menu and move it --------------------------------------------
