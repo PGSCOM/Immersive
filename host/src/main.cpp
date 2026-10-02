@@ -1101,33 +1101,6 @@ int main(int argc, char* argv[]) {
         stop_all_locked(notify_client);
     };
 
-    // Set up server callbacks
-    server->set_on_client_connected([&](uint32_t client_id) {
-        std::cout << "[Host] Client " << client_id << " connected, sending monitor list\n";
-        std::vector<immersive::protocol::MonitorInfo> monitors;
-        std::vector<uint8_t> flags;
-        {
-            std::lock_guard<std::mutex> lock(displays_mutex);
-            monitors = proto_monitors;
-            flags = monitor_flags;
-        }
-        server->send_monitor_list(client_id, monitors, flags);
-
-        // Notify about audio stream if enabled
-        if (audio_enable && settings.audio) {
-            immersive::protocol::AudioStart astart;
-            astart.sample_rate = 48000;
-            astart.channels    = 2;
-            astart.audio_port  = audio_port;
-            server->send_control_message(
-                client_id,
-                immersive::protocol::MessageType::AUDIO_START,
-                &astart,
-                sizeof(astart));
-            std::cout << "[Host] Audio stream available on UDP:" << audio_port << "\n";
-        }
-    });
-
     // --- Main screen off ---
     // A headset can darken the PC's main monitor while it works on it in VR
     // (it keeps streaming). Never without a headset: the client that turned
@@ -1174,6 +1147,39 @@ int main(int argc, char* argv[]) {
         screen_off_until_ms = steady_ms() + immersive::protocol::SCREEN_OFF_LEASE_MS;
         screen_off_client = client_id;
         if (owner != client_id) send_screen_off(client_id, true);
+    });
+
+    // Set up server callbacks
+    server->set_on_client_connected([&](uint32_t client_id) {
+        std::cout << "[Host] Client " << client_id << " connected, sending monitor list\n";
+        {
+            // Every connection starts with the main screen lit, even if
+            // another (or a stale) connection had turned it off.
+            std::lock_guard<std::mutex> ops(ops_mutex);
+            light_screen_locked("a headset connected");
+        }
+        std::vector<immersive::protocol::MonitorInfo> monitors;
+        std::vector<uint8_t> flags;
+        {
+            std::lock_guard<std::mutex> lock(displays_mutex);
+            monitors = proto_monitors;
+            flags = monitor_flags;
+        }
+        server->send_monitor_list(client_id, monitors, flags);
+
+        // Notify about audio stream if enabled
+        if (audio_enable && settings.audio) {
+            immersive::protocol::AudioStart astart;
+            astart.sample_rate = 48000;
+            astart.channels    = 2;
+            astart.audio_port  = audio_port;
+            server->send_control_message(
+                client_id,
+                immersive::protocol::MessageType::AUDIO_START,
+                &astart,
+                sizeof(astart));
+            std::cout << "[Host] Audio stream available on UDP:" << audio_port << "\n";
+        }
     });
 
     server->set_on_client_disconnected([&](uint32_t client_id) {
