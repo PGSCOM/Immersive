@@ -1275,6 +1275,13 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 		var dec: VideoDecoder = _decoders[monitor_id]
 		if _awaiting_idr.get(monitor_id, false):
 			if not _is_keyframe(frame_data, dec._codec):
+				# The stream's first IDR can reach us before its STREAM_START
+				# was handled (UDP overtakes TCP) and the host sends no
+				# periodic IDR any more: ask for one, or the screen stays
+				# black until some rate change re-opens the encoder. A still
+				# screen sends one P-frame a second, so the ask is a second
+				# apart at most.
+				_request_keyframe(monitor_id, 1000)
 				return
 			_awaiting_idr.erase(monitor_id)
 		if not dec.submit(frame_data):
