@@ -10,8 +10,12 @@ extends SceneTree
 ##     it is let go; a locked layout refuses the grab;
 ##   - the ray tilt follows main.gd's ray_angle_deg live;
 ##   - the other controller's trigger takes the pointer over;
-##   - bare hands (the hand interaction profile, or a tracked hand) take the
-##     pointer and hide that side's model; the controller gets it back.
+##   - hand joints reported (source unknown, as on the Pico) never take the
+##     pointer from a controller in use;
+##   - a controller without a tracked pose counts as put down at once (no
+##     laser, no model, no clicks, not in use) and is back when tracked again;
+##   - a trigger press wakes a put-down controller at once, without moving it,
+##     and a controller held still with the trigger down stays in use.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/controller_idle_test.gd"
@@ -53,6 +57,8 @@ var fails := 0
 var main: Node3D
 var right: XRController3D
 var left: XRController3D
+## What OpenXR reports for each /user/hand/* (tracked, so the controllers are in use).
+var pads := {}
 
 func _initialize() -> void:
 	var script := GDScript.new()
@@ -70,10 +76,15 @@ func _initialize() -> void:
 	_run()
 
 func _controller(parent: Node, n: String, tracker: StringName, pos: Vector3) -> XRController3D:
+	var pad := XRControllerTracker.new()
+	pad.name = tracker
+	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
+	pad.set_pose(&"default", Transform3D(Basis(), pos), Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	XRServer.add_tracker(pad)
+	pads[tracker] = pad
 	var c := XRController3D.new()
 	c.name = n
 	c.tracker = tracker
-	c.position = pos
 	var input := Node.new()
 	input.set_script(load("res://scripts/vr_input.gd"))
 	input.name = "VRInput"
@@ -209,37 +220,42 @@ func _run() -> void:
 	r._set_trigger_state(false)
 	await _frames(2)
 
-	# --- Bare hands take the pointer, a controller gets it back -------------
-	var pad := XRControllerTracker.new()  # what OpenXR reports for /user/hand/right
-	pad.name = &"right_hand"
-	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
-	XRServer.add_tracker(pad)
+	# --- Hand joints never take the pointer from a controller in use ---------
+	var VRInput := load("res://scripts/vr_input.gd")
+	var hand := XRHandTracker.new()
+	hand.name = &"/user/hand_tracker/right"
+	hand.has_tracking_data = true  # source UNKNOWN, as the Pico reports it with controllers held
+	XRServer.add_tracker(hand)
 	_aim(right, Vector3(0, 1.25, -1.5))
 	await _frames(3)
-	check(laser.visible and model.visible, "a controller in use has the pointer")
-	pad.profile = "/interaction_profiles/ext/hand_interaction_ext"
-	await _frames(2)
-	check(not laser.visible and not model.visible,
-		"the runtime switched the right side to a bare hand: no laser, no controller model")
+	check(laser.visible and model.visible and VRInput.any_in_use(),
+		"hand joints reported: the controller in use keeps the pointer")
 	mark = main.sent.size()
 	r._set_trigger_state(true)
 	await _frames(2)
 	r._set_trigger_state(false)
 	await _frames(1)
-	check(main.sent.slice(mark).all(func(e): return e[2] == 0), "meanwhile a trigger event does not click")
-	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
+	check(main.sent.slice(mark).any(func(e): return e[2] == 1) and _last()[2] == 0, "and its trigger clicks")
+
+	# --- No tracked pose: put down at once, back when tracked -----------------
+	pads[&"right_hand"].invalidate_pose(&"default")
+	await _frames(1)
+	check(not laser.visible and not model.visible and not r.in_use(),
+		"a controller that loses tracking is put down at once: no laser, no model")
+	mark = main.sent.size()
+	r._set_trigger_state(true)
 	await _frames(2)
-	check(laser.visible and model.visible, "the controller again: it drives the pointer at once")
-	XRServer.remove_tracker(pad)
-	var hand := XRHandTracker.new()
-	hand.name = &"/user/hand_tracker/left"
-	hand.has_tracking_data = true  # source UNKNOWN, as on the Pico (no data-source extension)
-	XRServer.add_tracker(hand)
-	await _frames(2)
-	check(not laser.visible, "a camera-tracked hand takes the pointer")
-	hand.has_tracking_data = false
-	await _frames(2)
-	check(laser.visible, "the hand gone, the controller has it back")
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(main.sent.slice(mark).all(func(e): return e[2] == 0) and not r.in_use(),
+		"and its trigger clicks nothing (no ray to aim with)")
+	pads[&"left_hand"].invalidate_pose(&"default")
+	await _frames(1)
+	check(not VRInput.any_in_use(), "both untracked: no controller in use (the hands may point)")
+	pads[&"right_hand"].set_pose(&"default", Transform3D(right.basis, right.position + Vector3(0, 0.03, 0)),
+		Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	await _frames(1)
+	check(laser.visible and model.visible and VRInput.any_in_use(), "tracked again in the hand: the pointer is back at once")
 	XRServer.remove_tracker(hand)
 
 	# --- Put down: disappears, and comes back when moved -------------------
@@ -249,6 +265,16 @@ func _run() -> void:
 	check(model.visible and laser.visible, "visible while in use")
 	await _frames(72 * 3)
 	check(not model.visible and not laser.visible, "hidden after 3 s still")
+	mark = main.sent.size()
+	r._set_trigger_state(true)  # picked up by the trigger, not moved
+	await _frames(1)
+	check(model.visible and laser.visible and main.sent.slice(mark).any(func(e): return e[2] == 1),
+		"a trigger press wakes it at once and clicks")
+	await _frames(72 * 4)
+	check(laser.visible and _last()[2] == 1, "held perfectly still with the trigger down for 4 s: still in use, still clicking")
+	r._set_trigger_state(false)
+	await _frames(72 * 3 + 5)
+	check(not model.visible, "put down again")
 	right.position.x += 0.05
 	await _frames(2)
 	check(model.visible, "back as soon as it moves")

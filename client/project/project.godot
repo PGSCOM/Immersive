@@ -36,5 +36,4 @@ textures/default_filters/anisotropic_filtering_level=4
 
 openxr/enabled=true
 openxr/extensions/hand_tracking=true
-openxr/extensions/hand_interaction_profile=true
 shaders/enabled=true

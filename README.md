@@ -284,7 +284,8 @@ the headset types straight into the PC.
 ## VR Controls
 
 Both controllers work the same way; the one whose trigger you pressed last
-holds the pointer.
+holds the pointer. Put them down (3 s still) and your bare hands take over;
+pick one up and it has the pointer again.
 
 | Action | Function |
 |--------|----------|
@@ -297,7 +298,7 @@ holds the pointer.
 | Thumbstick click | Middle click |
 | A / X | Show / hide the VR keyboard |
 | B / Y | Show / hide the menu |
-| Right hand pinch (no controller) | Pointer click/drag via hand tracking |
+| Right hand pinch (controllers down) | Pointer click/drag via hand tracking |
 | Left palm to your face, then pinch | Toggle the menu (its Keyboard button opens the keyboard) |
 
 The VR keyboard is a full US layout (Esc, Tab, symbols, arrows, Ctrl, Alt,

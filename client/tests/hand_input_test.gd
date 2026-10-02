@@ -1,15 +1,22 @@
 extends SceneTree
 ## Feeds hand_input.gd fake trackers and checks:
-##   - the fallback ray (shoulder -> index knuckle): a pinch clicks exactly
-##     where the hand was pointing, without drifting or dragging, and turning
-##     or tilting the head does not move it;
-##   - the runtime's hand ray (hand interaction profile aim pose) wins over the
-##     fallback, and its pinch value clicks when the finger joints are gone;
+##   - the ray (shoulder -> index knuckle): a pinch clicks exactly where the
+##     hand was pointing, without drifting or dragging, and turning or tilting
+##     the head does not move it; the beam starts at the knuckle and ends on
+##     the cursor, also when it points sideways or the click slop holds it;
+##   - how far the One Euro filter trails a steady sweep (ms) and how much
+##     jitter it keeps (printed as "measure" lines, and bounded);
+##   - a hand that comes back already pinched does not click until it opens;
 ##   - a hand tracker replaced by a new one (session restart) still works;
 ##   - a pinch on the grab bar under the screen moves it (no click reaches the
 ##     PC) while a long pinch on the screen stays a click; pinches click the menu;
 ##   - the other hand's palm turned to the face shows the menu mark and a short
-##     pinch toggles the menu (a long one or a palm turned away does not).
+##     pinch toggles the menu (a long one or a palm turned away does not);
+##   - the Pico case, with real vr_input.gd controllers: hand joints reported
+##     (source unknown) while a controller is held and moving do nothing, and
+##     the controller clicks; controllers put down (still, or untracked) give
+##     the hand the pointer; picking one up (moving it, or its trigger) takes
+##     it back at once; over and over.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/hand_input_test.gd"
@@ -58,7 +65,6 @@ func get_drag_distance() -> float: return drag.distance if drag else 0.0
 func toggle_ui_overlay(): toggles += 1
 """
 
-const HAND_PROFILE := "/interaction_profiles/ext/hand_interaction_ext"
 ## Eyes at 1.6 m; the neck pivot and right shoulder that hand_input.gd guesses
 ## from them (NECK_OFFSET, SHOULDER_OFFSET).
 const EYES := Vector3(0, 1.6, 0)
@@ -70,6 +76,10 @@ const KNUCKLE := Vector3(0.16, 1.38, -0.45)
 const BAR_KNUCKLE := Vector3(0.16, 1.0775, -0.45)
 ## Further left: the ray lands on the menu zone (x -1.5 at z -1.5).
 const MENU_KNUCKLE := Vector3(-0.41, 1.38, -0.45)
+## Where the controller in the Pico section points: about pixel (400, 540),
+## well left of the hand's (1113, 553).
+const CTRL_TARGET := Vector3(-0.6, 1.4, -1.5)
+const CTRL_AT := Vector3(0.25, 1.2, -0.3)
 
 var main: Node3D
 var head: Camera3D
@@ -150,11 +160,80 @@ func _last() -> Array:
 func _near(a: Array, b: Array) -> bool:
 	return absi(a[0] - b[0]) <= 3 and absi(a[1] - b[1]) <= 3
 
+## [start, tip] of the hand's beam (a 1 m box along -Z, stretched).
+func _beam() -> Array:
+	var t: Transform3D = input._laser.global_transform
+	return [t * Vector3(0, 0, 0.5), t * Vector3(0, 0, -0.5)]
+
+## The beam starts at `knuckle` and its tip is the cursor dot (1 mm).
+func _beam_on(knuckle: Vector3) -> bool:
+	var b := _beam()
+	return input._laser.visible and b[0].distance_to(knuckle) < 0.001 \
+		and b[1].distance_to(input._cursor.global_position) < 0.001
+
+## Point a controller's laser (40° tilted ray) at `at` by turning it.
+func _aim(c: XRController3D, at: Vector3) -> void:
+	var ray: Node3D = c.get_node("RaycastOrigin")
+	var q := Quaternion((-ray.global_basis.z).normalized(), (at - ray.global_position).normalized())
+	c.global_basis = Basis(q) * c.global_basis
+
+## A controller in a hand: it moves a little all the time (1.2 cm steps).
+func _hold(c: XRController3D, n: int) -> void:
+	for i in n:
+		if i % 6 == 0:
+			c.position.y += 0.012 if (i / 6) % 2 == 0 else -0.012
+		await process_frame
+
+## The real filter (72 Hz) on a steady sweep at `deg_s`: ms it trails once settled.
+func _lag_ms(deg_s: float) -> float:
+	input._dir_filtered = Vector3.ZERO
+	var raw := Vector3.FORWARD
+	var out := raw
+	for i in 216:  # 3 s
+		raw = Vector3.FORWARD.rotated(Vector3.UP, deg_to_rad(deg_s) * i / 72.0)
+		out = input._filter_direction(raw, 1.0 / 72.0)
+	return rad_to_deg(out.angle_to(raw)) / deg_s * 1000.0
+
+## A still hand whose knuckle the tracker reports with `sigma` m of noise per
+## axis, 60 times a second (the Pico's high-frequency hand tracking), seen at
+## 72 Hz for a minute: [raw, filtered] RMS ray error in mrad.
+func _jitter_mrad(sigma: float) -> Array:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	var shoulder := NECK + Vector3(0.16, -0.14, 0.0)
+	var truth := (KNUCKLE - shoulder).normalized()
+	input._dir_filtered = Vector3.ZERO
+	var noise := Vector3.ZERO
+	var sums := [0.0, 0.0]
+	for i in 4392:  # 61 s, the first second not counted
+		if floori(i * 60.0 / 72.0) != floori((i - 1) * 60.0 / 72.0):
+			noise = Vector3(rng.randfn(0, sigma), rng.randfn(0, sigma), rng.randfn(0, sigma))
+		var raw := (KNUCKLE + noise - shoulder).normalized()
+		var out: Vector3 = input._filter_direction(raw, 1.0 / 72.0)
+		if i >= 72:
+			sums[0] += raw.angle_to(truth) ** 2
+			sums[1] += out.angle_to(truth) ** 2
+	return [sqrt(sums[0] / 4320.0) * 1000.0, sqrt(sums[1] / 4320.0) * 1000.0]
+
 func _run() -> void:
+	# --- How much the ray filter lags and shakes ----------------------------
+	var lags := {}
+	for s in [5, 10, 30, 60, 120]:
+		lags[s] = _lag_ms(s)
+		print("measure  filter lag at %3d°/s: %5.1f ms" % [s, lags[s]])
+	var jit := _jitter_mrad(0.0015)
+	print("measure  jitter, still hand with 1.5 mm noise: raw %.2f mrad -> %.2f mrad (%d %%)" % [
+		jit[0], jit[1], roundi(jit[1] / jit[0] * 100.0)])
+	input._dir_filtered = Vector3.ZERO
+	check(lags[5] < 45.0 and lags[10] < 32.0, "slow aim: the ray trails by %.0f ms at 5°/s, %.0f ms at 10°/s" % [lags[5], lags[10]])
+	check(lags[60] < 12.0, "steady sweep: %.1f ms behind at 60°/s" % lags[60])
+	check(jit[1] < jit[0] * 0.3, "a still hand: the filter keeps under 30 %% of the jitter")
+
 	_pose(KNUCKLE, 0.08)
 	await _frames(40)
 	var aim := _last()
 	check(aim[2] == 0 and _near(aim, [1113, 553]), "open hand points straight ahead -> %s" % [aim])
+	check(_beam_on(KNUCKLE), "the beam runs from the index knuckle to the cursor")
 
 	# --- Looking around does not move the ray ------------------------------
 	for turn in [[0.4, 0.0, 0.0], [-0.35, -0.3, 0.0], [0.2, 0.25, 0.15]]:
@@ -170,6 +249,11 @@ func _run() -> void:
 	var press: Array = main.sent.slice(mark).filter(func(e): return e[2] == 1)
 	check(not press.is_empty() and press[0][0] == aim[0] and press[0][1] == aim[1],
 		"pinch clicks where the hand pointed -> %s" % [press.slice(0, 1)])
+	var nudged := KNUCKLE + Vector3(0.008, 0.0, 0.0)  # ~0.8°, inside the click slop
+	_pose(nudged, 0.005)
+	await _frames(3)
+	check(_last() == [aim[0], aim[1], 1] and _beam_on(nudged),
+		"the click slop holds the aim, and the beam still starts at the knuckle")
 
 	mark = main.sent.size()
 	for i in 20:
@@ -256,45 +340,12 @@ func _run() -> void:
 	# --- Pinch on the menu -------------------------------------------------
 	_pose(MENU_KNUCKLE, 0.08)
 	await _frames(30)
+	check(_beam_on(MENU_KNUCKLE), "pointing 45° to the side, the beam still starts at the knuckle and ends on the cursor")
 	_pose(MENU_KNUCKLE, 0.005)
 	await _frames(5)
 	_pose(MENU_KNUCKLE, 0.08)
 	await _frames(15)
 	check(main.ui == [true, false], "a pinch on the menu presses and releases its button -> %s" % [main.ui])
-
-	# --- The runtime's hand ray (XR_EXT_hand_interaction) ---------------------
-	var ctrl := XRControllerTracker.new()
-	ctrl.name = &"right_hand"
-	ctrl.profile = HAND_PROFILE
-	var from := Vector3(0.2, 1.3, -0.4)
-	var at := Vector3(-0.5, 1.8, -1.5)  # pixel (480, 270)
-	ctrl.set_pose(&"aim", Transform3D(Basis.looking_at(at - from), from), Vector3.ZERO, Vector3.ZERO,
-		XRPose.XR_TRACKING_CONFIDENCE_HIGH)
-	XRServer.add_tracker(ctrl)
-	_pose(KNUCKLE, 0.08)
-	await _frames(5)
-	check(_near(_last(), [480, 270]) and _last()[2] == 0,
-		"with the hand profile the runtime's aim pose is the ray -> %s" % [_last()])
-	_pose(KNUCKLE, 0.005)
-	await _frames(3)
-	check(_near(_last(), [480, 270]) and _last()[2] == 1, "and the finger pinch clicks there -> %s" % [_last()])
-	_pose(KNUCKLE, 0.08)
-	await _frames(15)
-	check(_last()[2] == 0, "and lets go")
-	hand.has_tracking_data = false  # joints gone, the runtime still sees a hand
-	ctrl.set_input(&"pinch", 0.9)
-	await _frames(3)
-	check(_near(_last(), [480, 270]) and _last()[2] == 1, "no joints: the runtime's pinch value clicks -> %s" % [_last()])
-	ctrl.set_input(&"pinch", 0.6)
-	await _frames(15)
-	check(_last()[2] == 1, "a half-open runtime pinch (0.6) still holds")
-	ctrl.set_input(&"pinch", 0.1)
-	await _frames(15)
-	check(_last()[2] == 0, "an open runtime pinch lets go")
-	ctrl.profile = "/interaction_profiles/bytedance/pico4_controller"
-	await _frames(3)
-	check(not input._point_tracked, "a controller again: the hand pointer stops")
-	XRServer.remove_tracker(ctrl)
 
 	# --- A new hand tracker (the session restarted) is picked up ------------
 	XRServer.remove_tracker(hand)
@@ -365,6 +416,130 @@ func _run() -> void:
 	await _frames(3)
 	check(_last()[2] == 0, "losing the hand releases the click")
 
+	# --- A hand that comes back already pinched does not click ---------------
+	mark = main.sent.size()
+	_pose(KNUCKLE, 0.018)
+	hand.has_tracking_data = true
+	await _frames(30)
+	check(not main.sent.slice(mark).is_empty() and main.sent.slice(mark).all(func(e): return e[2] == 0),
+		"a hand back in view already pinched (18 mm) points but does not click")
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
+	_pose(KNUCKLE, 0.005)
+	await _frames(3)
+	check(_near(_last(), aim) and _last()[2] == 1, "once it has opened, its pinch clicks")
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
+
+	# --- The Pico: hand joints while the controllers are in use ---------------
+	# Its runtime reports both hands' joints, source unknown, even while the
+	# controllers are held or lying on the desk. Real vr_input.gd controllers.
+	hand.hand_tracking_source = XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
+	left = _new_hand(&"/user/hand_tracker/left")
+	left.hand_tracking_source = XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN
+	var xr_origin := XROrigin3D.new()
+	xr_origin.name = "XROrigin3D"
+	main.add_child(xr_origin)
+	main.move_child(xr_origin, 0)  # processed before HandInput, as in main.tscn
+	var pad := XRControllerTracker.new()
+	pad.name = &"right_hand"
+	pad.profile = "/interaction_profiles/bytedance/pico4_controller"
+	pad.set_pose(&"default", Transform3D(Basis(), CTRL_AT), Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	XRServer.add_tracker(pad)
+	var ctrl := XRController3D.new()
+	ctrl.tracker = &"right_hand"
+	var vr := Node.new()
+	vr.set_script(load("res://scripts/vr_input.gd"))
+	ctrl.add_child(vr)
+	xr_origin.add_child(ctrl)
+	await _frames(3)  # vr_input builds its laser deferred
+	_aim(ctrl, CTRL_TARGET)
+	await _hold(ctrl, 6)
+	check(_last()[0] < 800 and not input._owns,
+		"a held controller has the pointer although hand joints are reported -> %s" % [_last()])
+
+	for round in 3:
+		# Held and moving: a hand pinch and a palm tap do nothing.
+		_pose(KNUCKLE, 0.08)
+		mark = main.sent.size()
+		var toggles: int = main.toggles
+		await _hold(ctrl, 12)
+		_pose(KNUCKLE, 0.005)
+		_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.005)
+		await _hold(ctrl, 12)
+		_pose(KNUCKLE, 0.08)
+		_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.08)
+		await _hold(ctrl, 24)
+		check(not input._owns and not input._laser.visible and main.sent.slice(mark).all(func(e): return e[0] < 800),
+			"round %d: controller held: the hand's pinch sends nothing, no hand beam" % round)
+		check(main.toggles == toggles and not input._palm_mark.visible,
+			"round %d: and the palm menu neither shows nor opens" % round)
+		vr._set_trigger_state(true)
+		await _hold(ctrl, 2)
+		check(_last()[2] == 1 and _last()[0] < 800, "round %d: the controller's trigger clicks where it points -> %s" % [round, _last()])
+		vr._set_trigger_state(false)
+		await _hold(ctrl, 2)
+		check(_last()[2] == 0, "round %d: and lets go" % round)
+
+		# Put down (still for 3 s, or no longer tracked), both hands looking
+		# pinched as the Pico reports them on the desk: the pointing hand gets
+		# the pointer and points but clicks only once it has opened, and the
+		# palm's pinch is no menu tap.
+		_pose(KNUCKLE, 0.018)
+		_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.005)
+		mark = main.sent.size()
+		if round == 2:
+			pad.invalidate_pose(&"default")
+			await _frames(2)
+			check(input._owns and not vr.raycast_origin.visible,
+				"round 2: a controller that loses tracking is put down at once")
+		else:
+			await _frames(72 * 3 - 30)
+			check(not input._owns, "round %d: 2.6 s still: still the controller's" % round)
+			await _frames(36)
+			check(input._owns and not vr.raycast_origin.visible,
+				"round %d: still for 3 s: the controller hides, the hand has the pointer" % round)
+		check(main.sent.slice(mark).all(func(e): return e[2] == 0), "round %d: the already-pinched hand does not click" % round)
+		_pose(KNUCKLE, 0.08)
+		_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.08)
+		await _frames(20)
+		check(main.toggles == toggles, "round %d: nor does the palm's pinch, opening, toggle the menu" % round)
+		check(_near(_last(), aim) and _last()[2] == 0 and input._laser.visible, "round %d: the hand points -> %s" % [round, _last()])
+		_pose(KNUCKLE, 0.005)
+		await _frames(3)
+		check(_near(_last(), aim) and _last()[2] == 1, "round %d: and its pinch clicks" % round)
+		if round == 0:
+			_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.005)
+			await _frames(5)
+			_palm(left, true, palm_at, palm_at.direction_to(EYES), 0.08)
+			await _frames(15)
+			check(main.toggles == toggles + 1, "round 0: the palm menu works again")
+
+		# Picked up while the hand still pinches: the controller has it in
+		# the very next frame and the hand's click is let go on the PC.
+		mark = main.sent.size()
+		var how: String = ["moved", "trigger pressed, not moved", "tracked again"][round]
+		match round:
+			0:
+				ctrl.position += Vector3(0.0, 0.05, 0.0)
+			1:
+				vr._set_trigger_state(true)
+			2:
+				pad.set_pose(&"default", Transform3D(ctrl.basis, CTRL_AT + Vector3(0.0, 0.05, 0.0)),
+					Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+		await _frames(1)
+		var after: Array = main.sent.slice(mark)
+		check(not input._owns and vr.raycast_origin.visible and not input._laser.visible,
+			"round %d: picked up (%s): the controller has the pointer at once" % [round, how])
+		check(after.any(func(e): return _near(e, aim) and e[2] == 0) and not after.any(func(e): return e[0] > 800 and e[2] == 1),
+			"round %d: the hand's click is let go -> %s" % [round, after])
+		if round == 1:
+			check(after.any(func(e): return e[0] < 800 and e[2] == 1), "round 1: and the trigger clicks there and then")
+			vr._set_trigger_state(false)
+		_pose(KNUCKLE, 0.08)
+
+	XRServer.remove_tracker(pad)
+	XRServer.remove_tracker(left)
 	XRServer.remove_tracker(hand)
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)

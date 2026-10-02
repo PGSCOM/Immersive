@@ -259,8 +259,8 @@ func _init_world() -> void:
 	add_child(world)
 	world.set_look(look)
 
-## Bare-hand (controller-free) pointer + pinch input. Inert until the OpenXR
-## runtime reports a bare hand, so it's harmless on controller setups.
+## Bare-hand (controller-free) pointer + pinch input. Inert while a controller
+## is in use (vr_input.gd) or no hand is tracked.
 ## See scripts/hand_input.gd for the gesture mapping (Pico 4 / Quest / SteamVR).
 func _init_hand_input() -> void:
 	var hand_input := preload("res://scripts/hand_input.gd").new()

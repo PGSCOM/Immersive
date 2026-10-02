@@ -58,15 +58,10 @@ localized_name = "Haptic"
 action_type = 4
 toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
 
-[sub_resource type="OpenXRAction" id="OpenXRAction_pinch"]
-resource_name = "pinch"
-localized_name = "Pinch"
-toplevel_paths = PackedStringArray("/user/hand/left", "/user/hand/right")
-
 [sub_resource type="OpenXRActionSet" id="OpenXRActionSet_mainset"]
 resource_name = "mainset"
 localized_name = "Main action set"
-actions = [SubResource("OpenXRAction_default_pose"), SubResource("OpenXRAction_trigger_value"), SubResource("OpenXRAction_grip_value"), SubResource("OpenXRAction_primary_click"), SubResource("OpenXRAction_ax_button"), SubResource("OpenXRAction_by_button"), SubResource("OpenXRAction_aim_pose"), SubResource("OpenXRAction_grip_pose"), SubResource("OpenXRAction_primary"), SubResource("OpenXRAction_haptic"), SubResource("OpenXRAction_pinch")]
+actions = [SubResource("OpenXRAction_default_pose"), SubResource("OpenXRAction_trigger_value"), SubResource("OpenXRAction_grip_value"), SubResource("OpenXRAction_primary_click"), SubResource("OpenXRAction_ax_button"), SubResource("OpenXRAction_by_button"), SubResource("OpenXRAction_aim_pose"), SubResource("OpenXRAction_grip_pose"), SubResource("OpenXRAction_primary"), SubResource("OpenXRAction_haptic")]
 
 [sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_default_pose_left"]
 action = SubResource("OpenXRAction_default_pose")
@@ -268,18 +263,6 @@ bindings = [SubResource("OpenXRIPBinding_index_default_pose_left"), SubResource(
 interaction_profile_path = "/interaction_profiles/bytedance/pico4_controller"
 bindings = [SubResource("OpenXRIPBinding_default_pose_left"), SubResource("OpenXRIPBinding_default_pose_right"), SubResource("OpenXRIPBinding_aim_pose_left"), SubResource("OpenXRIPBinding_aim_pose_right"), SubResource("OpenXRIPBinding_grip_pose_left"), SubResource("OpenXRIPBinding_grip_pose_right"), SubResource("OpenXRIPBinding_trigger_value_left"), SubResource("OpenXRIPBinding_trigger_value_right"), SubResource("OpenXRIPBinding_grip_value_left"), SubResource("OpenXRIPBinding_grip_value_right"), SubResource("OpenXRIPBinding_primary_click_left"), SubResource("OpenXRIPBinding_primary_click_right"), SubResource("OpenXRIPBinding_primary_left"), SubResource("OpenXRIPBinding_primary_right"), SubResource("OpenXRIPBinding_ax_button_left"), SubResource("OpenXRIPBinding_ax_button_right"), SubResource("OpenXRIPBinding_by_button_left"), SubResource("OpenXRIPBinding_by_button_right"), SubResource("OpenXRIPBinding_haptic_left"), SubResource("OpenXRIPBinding_haptic_right")]
 
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_hand_pinch_left"]
-action = SubResource("OpenXRAction_pinch")
-binding_path = "/user/hand/left/input/pinch_ext/value"
-
-[sub_resource type="OpenXRIPBinding" id="OpenXRIPBinding_hand_pinch_right"]
-action = SubResource("OpenXRAction_pinch")
-binding_path = "/user/hand/right/input/pinch_ext/value"
-
-[sub_resource type="OpenXRInteractionProfile" id="OpenXRInteractionProfile_hand"]
-interaction_profile_path = "/interaction_profiles/ext/hand_interaction_ext"
-bindings = [SubResource("OpenXRIPBinding_aim_pose_left"), SubResource("OpenXRIPBinding_aim_pose_right"), SubResource("OpenXRIPBinding_grip_pose_left"), SubResource("OpenXRIPBinding_grip_pose_right"), SubResource("OpenXRIPBinding_hand_pinch_left"), SubResource("OpenXRIPBinding_hand_pinch_right")]
-
 [resource]
 action_sets = [SubResource("OpenXRActionSet_mainset")]
-interaction_profiles = [SubResource("OpenXRInteractionProfile_touch"), SubResource("OpenXRInteractionProfile_simple"), SubResource("OpenXRInteractionProfile_index"), SubResource("OpenXRInteractionProfile_pico4"), SubResource("OpenXRInteractionProfile_hand")]
+interaction_profiles = [SubResource("OpenXRInteractionProfile_touch"), SubResource("OpenXRInteractionProfile_simple"), SubResource("OpenXRInteractionProfile_index"), SubResource("OpenXRInteractionProfile_pico4")]

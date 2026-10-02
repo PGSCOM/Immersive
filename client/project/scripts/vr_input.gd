@@ -19,10 +19,12 @@ extends Node
 ## Builds its own laser, cursor dot and controller model (the runtime's model
 ## when it offers one through OpenXRRenderModelManager, a plain one otherwise).
 ##
-## Bare hands win: while the runtime reports a hand (HandInput.any_hand(), the
-## hand interaction profile or a camera-tracked hand) every controller hides
-## its laser and leaves the pointer to hand_input.gd, and a side that is a
-## hand hides its model too (its tracker then follows the hand's aim pose).
+## A controller in use always has the pointer, whatever the runtime says about
+## hands (the Pico reports hand joints even while the controllers are held).
+## One left still for IDLE_HIDE_S (put down) or without a tracked pose gives
+## it up and hides; once every controller has, bare hands get the pointer
+## (hand_input.gd asks any_in_use()). Moving it or pressing a trigger, grip or
+## button takes it back at once.
 
 const TRIGGER_PRESS_THRESHOLD := 0.55
 const TRIGGER_RELEASE_THRESHOLD := 0.35
@@ -54,10 +56,10 @@ const POINTER_COLOR := Color(0.93, 0.92, 0.88)
 
 enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
 
-const HandInput := preload("res://scripts/hand_input.gd")
-
 ## The instance whose controller drives the pointer.
 static var active: Node = null
+## Every instance, for any_in_use().
+static var _all: Array[Node] = []
 
 @onready var controller: XRController3D = get_parent() as XRController3D
 @onready var main_scene: Node = get_node_or_null("/root/Main")
@@ -95,7 +97,7 @@ var _ui_scroll_s := 0.0
 
 var _idle_ref := Transform3D()
 var _idle_s := 0.0
-## Who drives this side right now, for the log ("pointer", "hands", ...).
+## What this controller does right now, for the log ("pointer", "put down", ...).
 var _role := ""
 ## Strength of the last vibration asked for (tests read it).
 var last_buzz := 0.0
@@ -122,11 +124,21 @@ func _setup() -> void:
 	controller.input_vector2_changed.connect(_on_input_vector2_changed)
 	if active == null and _is_right():
 		active = self
+	_all.append(self)
 	print("[VRInput] Ready tracker=%s" % String(controller.tracker))
 
 func _exit_tree() -> void:
+	_all.erase(self)
 	if active == self:
 		active = null
+
+## True while some controller is in use: bare hands keep off the pointer.
+static func any_in_use() -> bool:
+	return _all.any(func(v: Node) -> bool: return v.in_use())
+
+## Tracked and not put down (a press resets the idle time, like moving it).
+func in_use() -> bool:
+	return controller != null and controller.get_has_tracking_data() and _idle_s < IDLE_HIDE_S
 
 func _is_right() -> bool:
 	return String(controller.tracker).contains("right")
@@ -237,21 +249,21 @@ func _build_visual() -> void:
 func _process(delta: float) -> void:
 	if not controller:
 		return
-	var idle := _update_idle(delta)
-	var hands := HandInput.any_hand()
-	var shown := not idle and not HandInput.is_hand(not _is_right())
+	_update_idle(delta)
+	var shown := in_use()
 	var has_model := is_instance_valid(_render_models) and _render_models.get_child_count() > 0
 	_visual.visible = shown and not has_model
 	if is_instance_valid(_render_models):
 		_render_models.visible = shown
 
-	# Bare hands own the pointer (hand_input.gd); a put-down controller gives it up.
-	if hands or idle:
+	# Put down or untracked: let go of everything and leave the pointer to the
+	# other controller, or to bare hands once both are down.
+	if not shown:
 		_release_all()
 		raycast_origin.visible = false
-		if active == self and idle:
+		if active == self:
 			active = null
-		_set_role("hands" if hands else "put down")
+		_set_role("put down" if controller.get_has_tracking_data() else "untracked")
 		return
 	if active == null:
 		active = self
@@ -487,9 +499,10 @@ func _set_trigger_state(pressed: bool) -> void:
 	if _trigger_pressed == pressed:
 		return
 	_trigger_pressed = pressed
-	# Runtimes may map a hand pinch onto the trigger; hand_input.gd clicks for it.
-	if not main_scene or HandInput.any_hand():
-		return
+	if pressed:
+		_idle_s = 0.0  # picked up: it has the pointer again at once
+	if not main_scene or not in_use():
+		return  # untracked: nothing to aim with
 	if pressed:
 		_take_over()
 		if is_instance_valid(_dragging):
@@ -521,7 +534,9 @@ func _set_grip_state(pressed: bool) -> void:
 	if _grip_pressed == pressed:
 		return
 	_grip_pressed = pressed
-	if HandInput.any_hand() or not main_scene:
+	if pressed:
+		_idle_s = 0.0
+	if not main_scene or not in_use():
 		return
 	if pressed:
 		_take_over()
@@ -551,16 +566,16 @@ func _set_grip_state(pressed: bool) -> void:
 # Helpers
 # ---------------------------------------------------------------------------
 
-## Counts how long the controller has sat still; true once it counts as put down.
-func _update_idle(delta: float) -> bool:
+## Counts how long the controller has sat still (put down after IDLE_HIDE_S).
+## A held trigger or grip means it is in a hand, however still.
+func _update_idle(delta: float) -> void:
 	var now := controller.global_transform
-	if now.origin.distance_to(_idle_ref.origin) > IDLE_MOVE_M or \
+	if _trigger_pressed or _grip_pressed or now.origin.distance_to(_idle_ref.origin) > IDLE_MOVE_M or \
 			now.basis.get_rotation_quaternion().angle_to(_idle_ref.basis.get_rotation_quaternion()) > IDLE_TURN_RAD:
 		_idle_ref = now
 		_idle_s = 0.0
 	else:
 		_idle_s += delta
-	return _idle_s >= IDLE_HIDE_S
 
 func _set_role(role: String) -> void:
 	if role != _role:
