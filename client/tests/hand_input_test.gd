@@ -517,11 +517,16 @@ func _run() -> void:
 
 		# Picked up while the hand still pinches: the controller has it in
 		# the very next frame and the hand's click is let go on the PC.
-		mark = main.sent.size()
 		var how: String = ["moved", "trigger pressed, not moved", "tracked again"][round]
+		if round == 0:  # lifted by a hand, 1.5 cm a frame: 3 cm is not a pick-up yet
+			for i in 2:
+				ctrl.position += Vector3(0.0, 0.015, 0.0)
+				await process_frame
+			check(input._owns, "round 0: lifted 3 cm: still the hand's")
+		mark = main.sent.size()
 		match round:
 			0:
-				ctrl.position += Vector3(0.0, 0.05, 0.0)
+				ctrl.position += Vector3(0.0, 0.015, 0.0)
 			1:
 				vr._set_trigger_state(true)
 			2:

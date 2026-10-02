@@ -43,6 +43,16 @@ const RESIZE_SPEED := 0.9      ## metres of width per second
 const IDLE_HIDE_S := 3.0
 const IDLE_MOVE_M := 0.01
 const IDLE_TURN_RAD := 0.05
+## A put-down controller wakes when picked up: moved WAKE_MOVE_M or turned
+## WAKE_TURN_RAD away from where it lies, measured against its pose smoothed
+## over WAKE_SMOOTH_S, so a slow drift of the tracking never wakes it. One
+## frame jumping more than JUMP_M / JUMP_TURN_RAD is the tracking finding it
+## again (it lies on the desk), not a hand: it moves the rest pose instead.
+const WAKE_MOVE_M := 0.03
+const WAKE_TURN_RAD := 0.35
+const WAKE_SMOOTH_S := 0.3
+const JUMP_M := 0.04
+const JUMP_TURN_RAD := 0.26
 ## Short ray shown when the pointer is on nothing.
 const IDLE_RAY_M := 0.35
 const MAX_RAY_M := 8.0
@@ -97,6 +107,10 @@ var _ui_scroll_s := 0.0
 
 var _idle_ref := Transform3D()
 var _idle_s := 0.0
+var _rest := Transform3D()      ## where a put-down controller lies (smoothed)
+var _last_pose := Transform3D()
+var _was_tracked := false
+var _jump_logged_ms := -10000
 ## What this controller does right now, for the log ("pointer", "put down", ...).
 var _role := ""
 ## Strength of the last vibration asked for (tests read it).
@@ -567,21 +581,48 @@ func _set_grip_state(pressed: bool) -> void:
 # ---------------------------------------------------------------------------
 
 ## Counts how long the controller has sat still (put down after IDLE_HIDE_S).
-## A held trigger or grip means it is in a hand, however still.
+## A held trigger or grip means it is in a hand, however still. Put down, only
+## a real pick-up wakes it (see WAKE_MOVE_M), or its tracking coming back.
 func _update_idle(delta: float) -> void:
 	var now := controller.global_transform
-	if _trigger_pressed or _grip_pressed or now.origin.distance_to(_idle_ref.origin) > IDLE_MOVE_M or \
-			now.basis.get_rotation_quaternion().angle_to(_idle_ref.basis.get_rotation_quaternion()) > IDLE_TURN_RAD:
+	var tracked := controller.get_has_tracking_data()
+	var woke := tracked and not _was_tracked
+	_was_tracked = tracked
+	if _idle_s < IDLE_HIDE_S:
+		woke = woke or _moved(now, _idle_ref) > IDLE_MOVE_M or _turned(now, _idle_ref) > IDLE_TURN_RAD
+		_rest = now
+	elif _moved(now, _last_pose) > JUMP_M or _turned(now, _last_pose) > JUMP_TURN_RAD:
+		if Time.get_ticks_msec() - _jump_logged_ms > 2000:
+			_jump_logged_ms = Time.get_ticks_msec()
+			print("[VRInput] %s controller: its pose jumped %.1f cm / %.0f° while put down, ignored" % [
+				_side(), _moved(now, _last_pose) * 100.0, rad_to_deg(_turned(now, _last_pose))])
+		_rest = now
+	elif _moved(now, _rest) > WAKE_MOVE_M or _turned(now, _rest) > WAKE_TURN_RAD:
+		print("[VRInput] %s controller: picked up (moved %.1f cm, turned %.0f°)" % [
+			_side(), _moved(now, _rest) * 100.0, rad_to_deg(_turned(now, _rest))])
+		woke = true
+	else:
+		_rest = _rest.interpolate_with(now, 1.0 - exp(-delta / WAKE_SMOOTH_S))
+	_last_pose = now
+	if _trigger_pressed or _grip_pressed or woke:
 		_idle_ref = now
 		_idle_s = 0.0
 	else:
 		_idle_s += delta
 
+static func _moved(a: Transform3D, b: Transform3D) -> float:
+	return a.origin.distance_to(b.origin)
+
+static func _turned(a: Transform3D, b: Transform3D) -> float:
+	return a.basis.get_rotation_quaternion().angle_to(b.basis.get_rotation_quaternion())
+
+func _side() -> String:
+	return "right" if _is_right() else "left"
+
 func _set_role(role: String) -> void:
 	if role != _role:
 		_role = role
-		print("[VRInput] %s controller: %s (profile %s)" % [
-			"right" if _is_right() else "left", role, _profile()])
+		print("[VRInput] %s controller: %s (profile %s)" % [_side(), role, _profile()])
 
 func _profile() -> String:
 	var t := XRServer.get_tracker(controller.tracker) as XRPositionalTracker

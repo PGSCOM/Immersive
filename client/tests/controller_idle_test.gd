@@ -15,7 +15,9 @@ extends SceneTree
 ##   - a controller without a tracked pose counts as put down at once (no
 ##     laser, no model, no clicks, not in use) and is back when tracked again;
 ##   - a trigger press wakes a put-down controller at once, without moving it,
-##     and a controller held still with the trigger down stays in use.
+##     and a controller held still with the trigger down stays in use;
+##   - put down, a slow drift of its tracking or a one-frame jump (the cameras
+##     finding it again) does not wake it, a hand lifting it does.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/controller_idle_test.gd"
@@ -275,8 +277,21 @@ func _run() -> void:
 	r._set_trigger_state(false)
 	await _frames(72 * 3 + 5)
 	check(not model.visible, "put down again")
-	right.position.x += 0.05
-	await _frames(2)
-	check(model.visible, "back as soon as it moves")
+	# Lying on the desk the tracking drifts, and jumps when it finds the
+	# controller again: neither is a hand picking it up.
+	for i in 72 * 5:
+		right.position.x += 0.04 / (72 * 5)
+		await process_frame
+	check(not model.visible, "a 4 cm drift over 5 s does not wake it")
+	right.position.y += 0.06
+	await _frames(3)
+	check(not model.visible, "a 6 cm jump in one frame does not wake it")
+	right.rotate_y(0.4)
+	await _frames(3)
+	check(not model.visible, "nor does a 23° turn in one frame")
+	for i in 4:  # a hand lifting it: 5 cm in 4 frames
+		right.position.y += 0.012
+		await process_frame
+	check(model.visible, "picked up: back at once")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
