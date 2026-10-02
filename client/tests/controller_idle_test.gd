@@ -17,7 +17,9 @@ extends SceneTree
 ##   - a trigger press wakes a put-down controller at once, without moving it,
 ##     and a controller held still with the trigger down stays in use;
 ##   - put down, a slow drift of its tracking or a one-frame jump (the cameras
-##     finding it again) does not wake it, a hand lifting it does.
+##     finding it again) does not wake it, a hand lifting it does;
+##   - with a grip pose the model sits on it and the ray starts at the model's
+##     tip, still at the ray angle.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/controller_idle_test.gd"
@@ -293,5 +295,15 @@ func _run() -> void:
 		right.position.y += 0.012
 		await process_frame
 	check(model.visible, "picked up: back at once")
+
+	# --- Model on the grip pose, ray from its tip ---------------------------
+	var pad: XRControllerTracker = pads[&"right_hand"]
+	var grip := Transform3D(Basis(Vector3.RIGHT, 0.5), Vector3(0, -0.02, 0.05))
+	pad.set_pose(&"aim", Transform3D(), Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	pad.set_pose(&"grip", grip, Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	await _frames(2)
+	check(model.transform.is_equal_approx(grip * r.MODEL_IN_GRIP), "the model sits on the grip pose")
+	check(laser.position.is_equal_approx(grip * r.MODEL_IN_GRIP * r.MODEL_TIP)
+		and laser.basis.is_equal_approx(r.RAY_ORIGIN.basis), "the ray starts at its tip, still tilted 40°")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
