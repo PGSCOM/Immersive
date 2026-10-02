@@ -9,7 +9,8 @@ for mid-stream (REQUEST_KEYFRAME) arrives within a few frames, carries its
 parameter sets and decodes on its own — what a headset joining late or
 recovering from Wi-Fi loss relies on — to the right grey on every monitor.
 A still screen gets P-frames after that keyframe (refining it), and then no
-keyframe arrives that nobody asked for (no periodic or keepalive IDR).
+keyframe arrives that nobody asked for (no periodic or keepalive IDR). Last,
+a 7680x2160 virtual screen: H.264 carries it at 4096x1152, HEVC whole.
 host/tools/x11_test.py reuses check_codecs() on real red/blue X11 content.
 """
 import os
@@ -22,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from smoke_client import (CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg,  # noqa: E402
-                          send_multi_select, send_stream_config)
+                          send_multi_select, send_stream_config, vdisplay)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -173,6 +174,33 @@ def check_codecs(s, udp, want_rgb, sizes):
         print(f"[codec] {label}: still screens refined, then kept alive without IDRs")
 
 
+def check_big_virtual(s, udp):
+    """A 7680x2160 virtual screen (--stub: grey 208) streamed at its own size:
+    H.264 scaled into Level 5.2 (4096x1152; VAAPI and the Pico's decoder stop
+    at 4096), HEVC whole where the host has it, else that H.264 fallback."""
+    status, _, vid, _ = vdisplay(s, create=(7680, 2160))
+    if status != 0:
+        fail(f"could not make a 7680x2160 virtual screen: status {status}")
+    send_multi_select(s, [vid])
+    for req, label in ((0, "H.264"), (1, "HEVC")):
+        drain(s)
+        send_stream_config(s, req, 1000, 0, 0, 30)
+        w, h, codec = wait_stream_starts(s, [vid]).get(vid, (0, 0, None))
+        if codec not in (req, 0) or (w, h) != ((4096, 1152) if codec == 0 else (7680, 2160)):
+            fail(f"{label}: 7680x2160 virtual screen started as {w}x{h} codec {codec}")
+        collect(udp, 0.5)
+        s.sendall(struct.pack("<BIB", 0x31, 1, vid))  # REQUEST_KEYFRAME
+        frames = collect(udp, 1.5).get(vid, {})
+        keys = [n for n in sorted(frames) if is_keyframe(codec, frames[n])]
+        if not keys:
+            fail(f"{label}: no keyframe from the 7680x2160 virtual screen")
+        pix, n = decode_last_pixel(codec, frames[keys[0]], w, h)
+        print(f"[codec] {label} -> codec {codec}: 7680x2160 virtual screen as {w}x{h}, pixel {pix}")
+        if n != 1 or any(abs(a - 208) > 12 for a in pix):
+            fail(f"{label}: the big virtual screen decoded to {pix}, expected grey 208")
+    vdisplay(s, remove=vid)
+
+
 def main():
     if not shutil.which("ffmpeg"):
         print("[codec] SKIP: ffmpeg not installed")
@@ -194,6 +222,7 @@ def main():
         # The --stub monitors: 1920x1080, 1920x1200, 1280x720, grey 64 + 48*i.
         grey = {i: (64 + 48 * i,) * 3 for i in range(3)}
         check_codecs(s, udp, grey, {0: (640, 360), 1: (640, 400), 2: (640, 360)})
+        check_big_virtual(s, udp)
         s.close()
         print("[codec] OK: every codec decodes from a mid-stream keyframe, colours intact")
     finally:

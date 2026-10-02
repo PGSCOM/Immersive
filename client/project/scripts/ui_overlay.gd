@@ -32,8 +32,11 @@ signal stream_settings_changed(codec: int, bitrate_kbps: int, jpeg_quality: int,
 signal auto_quality_requested
 signal virtual_screen_requested(width: int, height: int)
 signal virtual_screen_remove_requested(monitor_id: int)
-## A virtual screen's "1:1" button: resize it to what the headset resolves.
-signal virtual_screen_match_requested(monitor_id: int)
+## Replace a virtual screen by one of this many pixels, in the same place.
+signal virtual_screen_match_requested(monitor_id: int, width: int, height: int)
+## The size page for a virtual screen (-1: a new one); main.gd answers with
+## open_virtual_page().
+signal virtual_page_requested(monitor_id: int)
 ## Pointer and keyboards drive the PC (off = look only).
 signal control_toggled(enabled: bool)
 signal haptics_toggled(enabled: bool)
@@ -57,7 +60,6 @@ var panel_height: float = panel_width * VIEW_SIZE.y / VIEW_SIZE.x
 const AUTO_APPLY_DELAY := 0.45
 const TAB_NAMES := ["Connect", "Screens", "Space", "Quality", "Input"]
 const LOOKS := [["Night", "night"], ["Dusk", "dusk"], ["Void", "void"], ["Passthrough", "passthrough"]]
-const VIRTUAL_SIZES := [[1920, 1080], [2560, 1440], [3840, 2160]]
 
 enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, STREAMING }
 
@@ -147,10 +149,36 @@ var _btn_recenter: Button
 var _btn_keyboard: Button
 var _chk_snap: CheckButton
 var _chk_lock: CheckButton
-var _virtual_row: HBoxContainer
-var _btn_sharp: Button
+var _btn_add_virtual: Button
 var _slider_curvature: HSlider
 var _lbl_curvature_value: Label
+
+# Virtual screen page (over the Screens tab)
+var _vs_scroll: ScrollContainer
+var _lbl_vs_title: Label
+var _vs_shape_buttons: Dictionary = {}
+var _vs_orient_buttons: Dictionary = {}
+var _vs_size_buttons: Dictionary = {}
+var _vs_cells: Array = []
+var _btn_vs_less: Button
+var _btn_vs_more: Button
+var _vs_preview: Control
+var _vs_rect: Panel
+var _vs_old_rect: Panel
+var _lbl_vs_caption: Label
+var _lbl_vs_sharp: Label
+var _btn_vs_go: Button
+var _vs_id := -1             ## the virtual screen changed; -1: a new one
+var _vs_text := ["", ""]     ## width and height as typed
+var _vs_field := 0           ## the cell the keypad types into
+var _vs_fresh := true        ## the next digit replaces that cell
+var _vs_shape := 0           ## shape of the sizes offered (VirtualSize.SHAPES)
+var _vs_aspect := 16.0 / 9.0 ## last valid width / height
+var _vs_from := Vector2i.ZERO ## the changed screen's pixels now
+var _vs_width_m := 0.0       ## and its width in metres
+var _vs_distance := 1.25
+var _vs_ppd := 20.0
+var _vs_tween: Tween
 
 # Space tab
 var _look_buttons: Dictionary = {}
@@ -771,6 +799,16 @@ func _build_ui() -> void:
 		page.add_child(body)
 		builder.call(body)
 		_tab_pages.append(page)
+	# The virtual screen size page shows over the Screens tab.
+	_vs_scroll = ScrollContainer.new()
+	_vs_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_vs_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_vs_scroll.hide()
+	pages.add_child(_vs_scroll)
+	var vs_body := _vbox(12)
+	vs_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vs_scroll.add_child(vs_body)
+	_build_virtual_page(vs_body)
 
 	_apply_debounce = Timer.new()
 	_apply_debounce.one_shot = true
@@ -807,6 +845,8 @@ func _build_ui() -> void:
 
 func _select_tab(i: int) -> void:
 	_tab = i
+	if _vs_scroll:
+		_vs_scroll.hide()
 	for j in _tab_pages.size():
 		_tab_pages[j].visible = j == i
 		var b: Button = _tab_buttons[j]
@@ -1101,24 +1141,10 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	_btn_keyboard = _button("Keyboard")
 	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
 	actions.add_child(_btn_keyboard)
-
-	# Extra screens that exist only in the headset (the PC makes them).
-	_virtual_row = _hbox(10)
-	body.add_child(_virtual_row)
-	var vlabel := _label("Add a virtual screen", 20, UiTheme.INK_2)
-	vlabel.custom_minimum_size.x = 210
-	_virtual_row.add_child(vlabel)
-	_btn_sharp = _button("Sharp")
-	_btn_sharp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_btn_sharp.visible = false
-	_virtual_row.add_child(_btn_sharp)
-	for size in VIRTUAL_SIZES:
-		var b := _button("%d × %d" % size)
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var w: int = size[0]
-		var h: int = size[1]
-		b.pressed.connect(func(): virtual_screen_requested.emit(w, h))
-		_virtual_row.add_child(b)
+	# An extra screen that exists only in the headset (the PC makes it).
+	_btn_add_virtual = _button("New virtual screen")
+	_btn_add_virtual.pressed.connect(func(): virtual_page_requested.emit(-1))
+	actions.add_child(_btn_add_virtual)
 
 	var tip := _label("Move a screen by the bar under it, or hold the grip on it. While held, the stick sets its distance and size.", 17, UiTheme.INK_3)
 	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1130,18 +1156,6 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	var r := _slider_row(body, "Curvature", 0, 100, 1, _on_curvature_changed)
 	_slider_curvature = r[0]
 	_lbl_curvature_value = r[1]
-
-## The size that is 1:1 for a new screen at the default spot (0 = unknown).
-func set_sharp_size(w: int, h: int) -> void:
-	if not _btn_sharp:
-		return
-	for c in _btn_sharp.pressed.get_connections():
-		_btn_sharp.pressed.disconnect(c.callable)
-	_btn_sharp.visible = w > 0
-	# Room for it: the biggest fixed size makes way.
-	_virtual_row.get_child(_virtual_row.get_child_count() - 1).visible = w <= 0
-	_btn_sharp.text = "Sharp (%d × %d)" % [w, h]
-	_btn_sharp.pressed.connect(func(): virtual_screen_requested.emit(w, h))
 
 func _curve_text() -> String:
 	var amount := _curvature_amount if _curved_enabled else 0.0
@@ -1155,7 +1169,10 @@ func _rebuild_monitor_list() -> void:
 	var connected := _state == ConnectionState.CONNECTED or _state == ConnectionState.STREAMING
 	for b in [_btn_arrange, _btn_recenter]:
 		b.disabled = not connected
-	_virtual_row.visible = connected and _host_virtual
+	_btn_add_virtual.visible = connected and _host_virtual
+	if _vs_scroll.visible and (not _btn_add_virtual.visible or (_vs_id >= 0
+			and not _available_monitors.any(func(m): return m.get("id", -1) == _vs_id))):
+		_show_virtual_page(false)
 	if not connected or _available_monitors.is_empty():
 		var l := _label("Connect to a PC to see its screens." if not connected \
 			else "This PC reported no screens.", 19, UiTheme.INK_3)
@@ -1198,18 +1215,19 @@ func _rebuild_monitor_list() -> void:
 		if not any_virtual:
 			continue
 		# Every row keeps the same trailing slot, so the switches line up;
-		# a virtual screen fills it with its Remove button.
+		# a virtual screen fills it with its Size and Remove buttons.
 		var slot := Control.new()
-		slot.custom_minimum_size = Vector2(190, 0)
+		slot.custom_minimum_size = Vector2(204, 0)
 		line.add_child(slot)
 		if mon.get("virtual", false):
 			var btns := _hbox(6)
 			btns.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 			slot.add_child(btns)
-			var match_btn := _button("1:1")
-			match_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			match_btn.pressed.connect(func(): virtual_screen_match_requested.emit(mid))
-			btns.add_child(match_btn)
+			var size_btn := _button("Size")
+			size_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			size_btn.disabled = not on  # its spot and width set the 1:1 size
+			size_btn.pressed.connect(func(): virtual_page_requested.emit(mid))
+			btns.add_child(size_btn)
 			var remove := _button("Remove")
 			remove.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			remove.pressed.connect(func(): virtual_screen_remove_requested.emit(mid))
@@ -1220,6 +1238,319 @@ func _on_curvature_changed(value: float) -> void:
 	_curved_enabled = value > 0.0
 	_lbl_curvature_value.text = _curve_text()
 	screen_curvature_changed.emit(_curved_enabled, maxf(_curvature_amount, 0.0))
+
+# ---------------------------------------------------------------------------
+# Virtual screen size page
+# ---------------------------------------------------------------------------
+
+## Open the size page. monitor_id -1: a new screen, `size` the last one
+## chosen; else that virtual screen, `size` its pixels now and `width_m` its
+## width. distance_m: how far it hangs; ppd: what the headset resolves.
+func open_virtual_page(monitor_id: int, size: Vector2i, width_m: float,
+		distance_m: float, ppd: float) -> void:
+	_vs_id = monitor_id
+	_vs_from = size
+	_vs_width_m = width_m
+	_vs_distance = distance_m
+	_vs_ppd = maxf(ppd, 1.0)
+	_vs_aspect = float(size.x) / maxf(size.y, 1)
+	_vs_shape = maxi(VirtualSize.shape_of(size.x, size.y), 0)
+	var title := "New virtual screen"
+	for m in _available_monitors:
+		if m.get("id", -1) == monitor_id:
+			title = m.get("name", "Virtual screen")
+	_lbl_vs_title.text = title
+	_vs_field = 0
+	_vs_set(size)
+	_show_virtual_page(true)
+
+func _show_virtual_page(on: bool) -> void:
+	_vs_scroll.visible = on
+	_tab_pages[1].visible = not on and _tab == 1
+
+func _build_virtual_page(body: VBoxContainer) -> void:
+	var top := _hbox(18)
+	body.add_child(top)
+	var back := _button("Back")
+	back.pressed.connect(func(): _show_virtual_page(false))
+	top.add_child(back)
+	_lbl_vs_title = _label("", 28, UiTheme.INK, true)
+	_lbl_vs_title.clip_text = true
+	_lbl_vs_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(_lbl_vs_title)
+
+	var shape_row := _vs_row(body, "Shape")
+	var shapes := []
+	for i in VirtualSize.SHAPES.size():
+		shapes.append([VirtualSize.SHAPES[i][0], i])
+	_vs_shape_buttons = _segmented(shape_row, shapes, _on_vs_shape)
+	shape_row.get_child(1).size_flags_stretch_ratio = 2.6
+	_vs_orient_buttons = _segmented(shape_row, [["Landscape", false], ["Portrait", true]], func(portrait):
+		var d := _vs_dims()
+		if (d.y > d.x) != portrait:
+			_vs_text = [_vs_text[1], _vs_text[0]]
+			_vs_fresh = true
+		_vs_refresh())
+	_vs_size_buttons = _segmented(_vs_row(body, "Size"), [["", 0], ["", 1], ["", 2], ["", 3]],
+		func(i): _vs_set(_vs_offers()[i]))
+
+	var cols := _hbox(26)
+	cols.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(cols)
+	# Left: the screen to scale, how sharp it will be, the action.
+	var left := _vbox(12)
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.add_child(left)
+	var well := PanelContainer.new()
+	well.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.WELL, 14, 16, 12))
+	well.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left.add_child(well)
+	var stage := _vbox(8)
+	well.add_child(stage)
+	_vs_preview = Control.new()
+	_vs_preview.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_vs_preview.custom_minimum_size.y = 96
+	stage.add_child(_vs_preview)
+	# The screen as it hangs now (when changing one), then as it will be.
+	_vs_old_rect = Panel.new()
+	var old_st := UiTheme.box(Color(0, 0, 0, 0), 4, 0, 0, Color(UiTheme.INK_3, 0.8))
+	old_st.set_border_width_all(2)
+	_vs_old_rect.add_theme_stylebox_override("panel", old_st)
+	_vs_preview.add_child(_vs_old_rect)
+	_vs_rect = Panel.new()
+	_vs_rect.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.SURFACE_HOVER, 4, 0, 0, UiTheme.EDGE_HI))
+	_vs_preview.add_child(_vs_rect)
+	_vs_preview.resized.connect(_vs_place_preview)
+	_lbl_vs_caption = _label("", 17, UiTheme.INK_3)
+	_lbl_vs_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	stage.add_child(_lbl_vs_caption)
+	_lbl_vs_sharp = _label("", 18, UiTheme.INK_2)
+	_lbl_vs_sharp.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	left.add_child(_lbl_vs_sharp)
+	_btn_vs_go = _button("", true)
+	_btn_vs_go.pressed.connect(_on_vs_go)
+	left.add_child(_btn_vs_go)
+
+	# Right: the pixels, a step finer or coarser, a keypad for any size.
+	var right := _vbox(10)
+	right.custom_minimum_size.x = 340
+	cols.add_child(right)
+	var readout := _hbox(8)
+	right.add_child(readout)
+	_btn_vs_less = _button("−")
+	_btn_vs_less.pressed.connect(func(): _vs_set(_vs_stepped(-1)))
+	readout.add_child(_btn_vs_less)
+	for i in 2:
+		if i == 1:
+			var x := _label("×", 24, UiTheme.INK_3)
+			x.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			readout.add_child(x)
+		var cell := Button.new()
+		cell.focus_mode = Control.FOCUS_NONE
+		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		cell.add_theme_font_size_override("font_size", 26)
+		for k in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color"]:
+			cell.add_theme_color_override(k, UiTheme.INK)
+		cell.add_theme_stylebox_override("focus", UiTheme.empty())
+		cell.pressed.connect(_vs_pick_cell.bind(i))
+		readout.add_child(cell)
+		_vs_cells.append(cell)
+	_btn_vs_more = _button("+")
+	_btn_vs_more.pressed.connect(func(): _vs_set(_vs_stepped(1)))
+	readout.add_child(_btn_vs_more)
+	for b: Button in [_btn_vs_less, _btn_vs_more]:
+		b.custom_minimum_size.x = 52
+		b.add_theme_font_size_override("font_size", 26)
+	var pad := _keypad(["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "×"], _on_vs_key)
+	pad.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	for key: Control in pad.get_children():
+		key.size_flags_vertical = Control.SIZE_EXPAND_FILL  # ends level with the action
+	right.add_child(pad)
+
+## A titled row like the Quality tab's, with a narrower title.
+func _vs_row(body: VBoxContainer, title: String) -> HBoxContainer:
+	var row := _quality_row(body, title)
+	row.get_child(0).custom_minimum_size.x = 96
+	return row
+
+func _vs_dims() -> Vector2i:
+	return Vector2i(int(_vs_text[0]), int(_vs_text[1]))
+
+func _vs_valid(d: Vector2i) -> bool:
+	return d.x >= VirtualSize.MIN.x and d.x <= VirtualSize.MAX.x \
+		and d.y >= VirtualSize.MIN.y and d.y <= VirtualSize.MAX.y
+
+func _vs_set(d: Vector2i) -> void:
+	_vs_text = [str(d.x), str(d.y)]
+	_vs_fresh = true
+	_vs_refresh()
+
+## Metres wide the screen hangs at this aspect: a new one's default, or the
+## changed one's width, rescaled for a new shape (main.gd does the same).
+func _vs_width_for(aspect: float) -> float:
+	if _vs_id < 0 or _vs_from.y <= 0:
+		return VirtualSize.default_width_m(aspect)
+	return VirtualSize.replaced_width_m(_vs_width_m, float(_vs_from.x) / _vs_from.y, aspect)
+
+## The four sizes offered: the shape's three common ones, then the 1:1 one
+## for the proportions on screen, either way up.
+func _vs_offers() -> Array:
+	var portrait := _vs_aspect < 1.0
+	var out := []
+	for p: Vector2i in VirtualSize.SHAPES[_vs_shape][2]:
+		out.append(Vector2i(p.y, p.x) if portrait else p)
+	out.append(VirtualSize.one_to_one(_vs_width_for(_vs_aspect), _vs_distance, _vs_aspect, _vs_ppd))
+	return out
+
+## What the action sends: even sizes, as the host makes them.
+func _vs_go_size() -> Vector2i:
+	var d := _vs_dims()
+	return Vector2i(d.x & ~1, d.y & ~1)
+
+func _on_vs_shape(i: int) -> void:
+	var at := _vs_offers().find(_vs_dims())
+	_vs_shape = i
+	var a: float = VirtualSize.SHAPES[i][1]
+	_vs_aspect = a if _vs_aspect >= 1.0 else 1.0 / a
+	# The same place in the row for the new shape: big stays big, 1:1 stays 1:1.
+	_vs_set(_vs_offers()[at if at >= 0 else 1])
+
+## A step finer or coarser, the proportions kept: 128 px on the long side
+## (ZERO past what the host makes).
+func _vs_stepped(dir: int) -> Vector2i:
+	var d := _vs_dims()
+	if not _vs_valid(d):
+		return Vector2i.ZERO
+	var i := VirtualSize.shape_of(d.x, d.y)
+	var a: float = VirtualSize.SHAPES[i][1] if i >= 0 else float(maxi(d.x, d.y)) / mini(d.x, d.y)
+	var long := maxi(d.x, d.y) + dir * 128
+	var short := roundi(long / a / 2.0) * 2
+	var n := Vector2i(long, short) if d.x >= d.y else Vector2i(short, long)
+	return n if _vs_valid(n) else Vector2i.ZERO
+
+func _vs_pick_cell(i: int) -> void:
+	_vs_field = i
+	_vs_fresh = true
+	_vs_refresh()
+
+func _on_vs_key(k: String) -> void:
+	if k == "×":
+		_vs_pick_cell(1 - _vs_field)
+		return
+	var t: String = _vs_text[_vs_field]
+	if k == "⌫":
+		t = t.left(-1)
+	elif _vs_fresh:
+		t = k
+	elif t.length() < 4:
+		t += k
+	_vs_text[_vs_field] = t
+	_vs_fresh = false
+	_vs_refresh()
+
+func _on_vs_go() -> void:
+	var d := _vs_go_size()
+	if _vs_id < 0:
+		virtual_screen_requested.emit(d.x, d.y)
+	else:
+		virtual_screen_match_requested.emit(_vs_id, d.x, d.y)
+	_show_virtual_page(false)
+
+func _vs_refresh() -> void:
+	var d := _vs_dims()
+	var ok := _vs_valid(d)
+	var shape := VirtualSize.shape_of(d.x, d.y) if ok else -1
+	if ok:
+		_vs_aspect = float(d.x) / d.y
+		_vs_shape = shape if shape >= 0 else _vs_shape
+	_refresh_segmented(_vs_shape_buttons, shape)
+	_refresh_segmented(_vs_orient_buttons, _vs_aspect < 1.0)
+	var offers := _vs_offers()
+	for i in offers.size():
+		var b: Button = _vs_size_buttons[i]
+		b.text = ("Sharp · %d × %d" if i == 3 else "%d × %d") % [offers[i].x, offers[i].y]
+		b.set_pressed_no_signal(offers[i] == d)
+	for i in 2:
+		var cell: Button = _vs_cells[i]
+		cell.text = _vs_text[i]
+		var st := UiTheme.box(UiTheme.WELL, 10, 8, 6)
+		if i == _vs_field:
+			st.border_color = Color(UiTheme.INK, 0.55)
+			st.set_border_width_all(2)
+		for k in ["normal", "hover", "pressed", "hover_pressed"]:
+			cell.add_theme_stylebox_override(k, st)
+	_btn_vs_less.disabled = _vs_stepped(-1) == Vector2i.ZERO
+	_btn_vs_more.disabled = _vs_stepped(1) == Vector2i.ZERO
+
+	var go := _vs_go_size()
+	var verb := "Add" if _vs_id < 0 else "Change to"
+	_btn_vs_go.disabled = not ok or (_vs_id >= 0 and go == _vs_from)
+	if not ok:
+		_btn_vs_go.text = verb
+	elif _btn_vs_go.disabled:
+		_btn_vs_go.text = "Already %d × %d" % [go.x, go.y]
+	else:
+		_btn_vs_go.text = "%s %d × %d" % [verb, go.x, go.y]
+	_lbl_vs_caption.visible = ok
+	# Room for two lines always, so the action never moves.
+	_lbl_vs_sharp.custom_minimum_size.y = _lbl_vs_sharp.get_line_height() * 2 \
+		+ _lbl_vs_sharp.get_theme_constant("line_spacing")
+	_lbl_vs_sharp.add_theme_color_override("font_color", UiTheme.INK_2 if ok else UiTheme.CLAY)
+	_vs_place_preview(_vs_scroll.visible and _visible_overlay)
+	if not ok:
+		_lbl_vs_sharp.text = "Width %d to %d, height %d to %d." % [VirtualSize.MIN.x,
+			VirtualSize.MAX.x, VirtualSize.MIN.y, VirtualSize.MAX.y]
+		return
+	var w_m := _vs_width_for(_vs_aspect)
+	_lbl_vs_caption.text = "%.2f × %.2f m, %.2f m away" % [w_m, w_m / _vs_aspect, _vs_distance]
+	# What the headset gets: H.264 carries at most Level 5.2 (the host scales).
+	var sent := VirtualSize.h264_size(go.x, go.y) if _stream_codec == 0 else go
+	var ppd := roundi(sent.x / VirtualSize.angle_deg(w_m, _vs_distance))
+	var eye := roundi(_vs_ppd)
+	var lines := []
+	if sent != go:
+		lines.append("H.264 sends it as %d × %d, HEVC whole." % [sent.x, sent.y])
+	if ppd < 0.8 * eye:
+		lines.append("%d px per degree, the headset resolves %d: pixels will show." % [ppd, eye])
+	elif ppd <= 1.25 * eye:
+		lines.append("%d px per degree, as sharp as the headset resolves." % ppd)
+	else:
+		lines.append("%d px per degree, the headset resolves %d: fine text will blur." % [ppd, eye])
+	_lbl_vs_sharp.text = "\n".join(lines)
+
+## The screen to scale in the well: one scale (px per metre) for every shape,
+## so a 32:9 screen shows wider and a portrait one taller. `morph`: glide to
+## the new shape, as the tab bar slides.
+func _vs_place_preview(morph := false) -> void:
+	var d := _vs_dims()
+	var ok := _vs_valid(d)
+	var area := _vs_preview.size
+	if _vs_tween:
+		_vs_tween.kill()
+	morph = morph and _vs_rect.visible and is_inside_tree()
+	_vs_rect.visible = ok
+	_vs_old_rect.visible = false
+	if not ok or area.x < 10.0:
+		return
+	var w_m := _vs_width_for(_vs_aspect)
+	var size_m := Vector2(w_m, w_m / _vs_aspect)
+	var old_m := Vector2.ZERO
+	if _vs_id >= 0 and _vs_from.x > 0:
+		old_m = Vector2(_vs_width_m, _vs_width_m * _vs_from.y / _vs_from.x)
+	var span := Vector2(VirtualSize.MAX_W_M, VirtualSize.MAX_H_M).max(size_m).max(old_m)
+	var px_per_m := minf(area.x / span.x, (area.y - 16.0) / span.y)  # air above and below
+	var rect_size := (size_m * px_per_m).round()
+	var rect_pos := ((area - rect_size) / 2.0).round()
+	if morph:
+		_vs_tween = create_tween().set_parallel().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+		_vs_tween.tween_property(_vs_rect, "size", rect_size, 0.18)
+		_vs_tween.tween_property(_vs_rect, "position", rect_pos, 0.18)
+	else:
+		_vs_rect.size = rect_size
+		_vs_rect.position = rect_pos
+	_vs_old_rect.visible = old_m != Vector2.ZERO and not old_m.is_equal_approx(size_m)
+	_vs_old_rect.size = (old_m * px_per_m).round()
+	_vs_old_rect.position = ((area - _vs_old_rect.size) / 2.0).round()
 
 # ---------------------------------------------------------------------------
 # Space tab

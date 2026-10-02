@@ -24,6 +24,7 @@
 #include <set>
 #include <csignal>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -577,8 +578,25 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<immersive::IVideoEncoder> stream_encoder;
         uint8_t actual_codec = 2;
 
+        // H.264 stops at Level 5.2 in practice: 4096 px a side (VAAPI refuses
+        // more) and 36864 macroblocks a frame, 4096x2304 (Qualcomm decoders,
+        // the Pico 4's too). A bigger screen (a 5120x1440 virtual one, say)
+        // streams scaled down to fit; HEVC and AV1 carry the whole 7680x4320.
+        // The client mirrors this in virtual_size.gd (h264_size).
+        auto fit_h264 = [](uint32_t& w, uint32_t& h) {
+            const double mbs = ((w + 15) / 16) * ((h + 15) / 16);
+            const double s = std::min({1.0, 4096.0 / w, 4096.0 / h, std::sqrt(36864.0 / mbs)});
+            if (s < 1.0) {
+                w = static_cast<uint32_t>(w * s + 0.5) & ~15u;
+                h = static_cast<uint32_t>(h * s + 0.5) & ~15u;
+            }
+        };
+
         auto try_mf_codec = [&](immersive::VideoCodec vc, uint8_t proto_value) -> bool {
-            enc_config.codec = vc;
+            enc_config.codec  = vc;
+            enc_config.width  = out_w;
+            enc_config.height = out_h;
+            if (vc == immersive::VideoCodec::H264) fit_h264(enc_config.width, enc_config.height);
             auto enc = immersive::create_hw_encoder();
             if (enc && enc->initialize(enc_config)) {
                 stream_encoder = std::move(enc);
@@ -613,11 +631,20 @@ int main(int argc, char* argv[]) {
             }
             stream_encoder = immersive::create_encoder(immersive::EncoderBackend::SOFTWARE);
             actual_codec   = 2;
+            enc_config.width  = out_w;
+            enc_config.height = out_h;
             if (!stream_encoder->initialize(enc_config)) {
                 std::cerr << "[Host] Software encoder failed too, aborting stream\n";
                 stream_capture->stop_capture();
                 return;
             }
+        }
+        if (enc_config.width != out_w || enc_config.height != out_h) {
+            std::cout << "[Host] Monitor " << (int)monitor_id << ": " << out_w << "x" << out_h
+                      << " streams at " << enc_config.width << "x" << enc_config.height
+                      << " (H.264 Level 5.2)\n";
+            out_w = enc_config.width;
+            out_h = enc_config.height;
         }
 
         const bool is_mjpeg = (actual_codec == 2);

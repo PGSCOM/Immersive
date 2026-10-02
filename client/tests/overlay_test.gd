@@ -28,7 +28,8 @@ func _initialize() -> void:
 	ov.stream_settings_changed.connect(func(c, _b, _j, _r, _f): events.append(["stream", c]))
 	ov.virtual_screen_requested.connect(func(w, h): events.append(["virtual", w, h]))
 	ov.virtual_screen_remove_requested.connect(func(id): events.append(["unvirtual", id]))
-	ov.virtual_screen_match_requested.connect(func(id): events.append(["match", id]))
+	ov.virtual_screen_match_requested.connect(func(id, w, h): events.append(["match", id, w, h]))
+	ov.virtual_page_requested.connect(func(id): events.append(["vpage", id]))
 	ov.control_toggled.connect(func(on): events.append(["control", on]))
 	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
 	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
@@ -78,16 +79,120 @@ func _type(s: String) -> void:
 	for ch in s:
 		await _click(_btn(ch, ov._manual_box))
 
-## Layout check (the open tab fits without scrolling) plus optional PNG.
+## Layout check (the open tab, or the virtual screen page over the Screens
+## tab, fits without scrolling or spilling sideways) plus optional PNG.
 func _step(name: String) -> void:
-	await _frames(4)
-	var page: ScrollContainer = ov._tab_pages[ov._tab]
-	var need: float = page.get_child(0).get_combined_minimum_size().y
-	check(need <= page.size.y and ov._canvas.get_child(0).get_combined_minimum_size().y <= ov._viewport.size.y,
-		"%s: fits the panel without scrolling (%d of %d px)" % [name, need, page.size.y])
+	await create_timer(0.25).timeout  # the tab bar and the size preview glide 0.18 s
+	var page: ScrollContainer = ov._vs_scroll if ov._vs_scroll.visible else ov._tab_pages[ov._tab]
+	var need: Vector2 = page.get_child(0).get_combined_minimum_size()
+	check(need.y <= page.size.y and need.x <= page.size.x
+		and ov._canvas.get_child(0).get_combined_minimum_size().y <= ov._viewport.size.y,
+		"%s: fits the panel without scrolling (%d x %d of %d x %d px)" % [name, need.x, need.y, page.size.x, page.size.y])
 	if out != "":
 		await RenderingServer.frame_post_draw
 		ov._viewport.get_texture().get_image().save_png("%s_%s.png" % [out, name])
+
+## The virtual screen size page: a new screen, then changing one.
+func _virtual_page() -> void:
+	await _click(ov._btn_add_virtual)
+	check(events.back() == ["vpage", -1], "New virtual screen asks for the page -> %s" % [events.back()])
+	ov.set_stream_settings(0, 20000, 70, 100, 0)  # H.264, as on a Pico
+	ov.open_virtual_page(-1, Vector2i(1920, 1080), 0.0, 1.25, 20.0)  # as main.gd answers
+	await _frames(2)
+	check(ov._vs_scroll.visible and not ov._tab_pages[1].visible and ov._tab == 1,
+		"the page shows over the Screens tab")
+	check(_btn("16:9").button_pressed and _btn("Landscape").button_pressed
+		and _btn("1920 × 1080").button_pressed and _btn("Add 1920 × 1080") != null,
+		"starts at the last size: 16:9, 1920 × 1080, one action")
+	check(ov._lbl_vs_sharp.text == "29 px per degree, the headset resolves 20: fine text will blur.",
+		"says how sharp, in real numbers -> '%s'" % ov._lbl_vs_sharp.text)
+	var rect: Panel = ov._vs_rect
+	var area: Vector2 = ov._vs_preview.size
+	check(absf(rect.position.x * 2.0 + rect.size.x - area.x) <= 1.0
+		and absf(rect.position.y * 2.0 + rect.size.y - area.y) <= 1.0
+		and absf(rect.size.x / rect.size.y - 16.0 / 9.0) < 0.02, "the preview is 16:9 and centred")
+	var wide_16_9: float = rect.size.x
+	await _step("vpage")
+
+	await _click(_btn("Sharp · 1304 × 736"))
+	check(ov._vs_dims() == Vector2i(1304, 736) and ov._lbl_vs_sharp.text.contains("as sharp as the headset"),
+		"Sharp picks the 1:1 size -> %s '%s'" % [ov._vs_dims(), ov._lbl_vs_sharp.text])
+	await _click(_btn("2560 × 1440"))
+	await _click(_btn("32:9"))
+	check(_btn("32:9").button_pressed and ov._vs_dims() == Vector2i(5120, 1440),
+		"a shape keeps the place in the row: 2560 × 1440 -> 5120 × 1440 (%s)" % [ov._vs_dims()])
+	check(ov._lbl_vs_sharp.text.begins_with("H.264 sends it as 4096 × 1152, HEVC whole.\n49 px per degree"),
+		"says what H.264 carries -> '%s'" % ov._lbl_vs_sharp.text)
+	check(rect.size.x < wide_16_9 * 1.3, "the preview glides to the new shape")
+	await create_timer(0.3).timeout
+	check(rect.size.x > wide_16_9 and rect.size.x / rect.size.y > 3.4, "the preview grows to scale for 32:9")
+	await _step("vpage_ultrawide")
+	await _click(_btn("+"))
+	check(ov._vs_dims() == Vector2i(5248, 1476), "+ is one step finer, 32:9 kept -> %s" % [ov._vs_dims()])
+	await _click(_btn("−"))
+	check(ov._vs_dims() == Vector2i(5120, 1440), "− steps back -> %s" % [ov._vs_dims()])
+	await _click(_btn("7680 × 2160"))
+	check(_btn("+").disabled and not _btn("−").disabled, "+ stops at 7680")
+
+	await _click(_btn("16:10"))
+	await _click(_btn("Portrait"))
+	check(ov._vs_dims() == Vector2i(2400, 3840) and _btn("1200 × 1920") != null and _btn("Portrait").button_pressed,
+		"Portrait stands the size and the offers up -> %s" % [ov._vs_dims()])
+	await create_timer(0.3).timeout
+	check(rect.size.y > rect.size.x and rect.size.y <= area.y, "the preview stands up, inside its well")
+	await _step("vpage_portrait")
+	await _click(_btn("Landscape"))
+	check(ov._vs_dims() == Vector2i(3840, 2400), "Landscape lays it back down")
+
+	# Any size: tap a cell, type; × (or the other cell) moves on.
+	await _click(ov._vs_cells[0])
+	for k in "3000":
+		await _click(_btn(k))
+	await _click(_btn("×", ov._vs_scroll))
+	for k in "1250":
+		await _click(_btn(k))
+	check(ov._vs_dims() == Vector2i(3000, 1250) and ov._vs_field == 1, "the keypad types 3000 × 1250")
+	check(ov._vs_shape_buttons.values().all(func(b): return not b.button_pressed),
+		"a size of no listed shape lights no shape")
+	await _step("vpage_custom")
+	await _click(_btn("Add 3000 × 1250"))
+	check(events.back() == ["virtual", 3000, 1250] and not ov._vs_scroll.visible and ov._tab_pages[1].visible,
+		"Add asks for it and goes back to the list -> %s" % [events.back()])
+
+	ov.open_virtual_page(-1, Vector2i(1920, 1080), 0.0, 1.25, 20.0)
+	await _frames(2)
+	await _click(ov._vs_cells[0])
+	for k in "300":
+		await _click(_btn(k))
+	check(_btn("Add").disabled and ov._lbl_vs_sharp.text == "Width 640 to 7680, height 480 to 4320."
+		and ov._vs_shape_buttons.values().all(func(b): return not b.button_pressed),
+		"a size the PC can't make: no action, no shape, the range said")
+	await _step("vpage_invalid")
+	await _click(_btn("⌫", ov._vs_scroll))
+	check(ov._vs_text[0] == "30", "⌫ deletes a digit -> '%s'" % ov._vs_text[0])
+	await _click(_btn("Back"))
+	check(not ov._vs_scroll.visible and ov._tab_pages[1].visible, "Back returns to the Screens list")
+
+	# Changing virtual screen 100, which hangs 1.6 m wide 1.4 m away.
+	ov.open_virtual_page(100, Vector2i(1920, 1080), 1.6, 1.4, 20.0)
+	await _frames(2)
+	check(ov._lbl_vs_title.text == "Virtual 1" and _btn("Already 1920 × 1080") != null
+		and _btn("Already 1920 × 1080").disabled, "change mode: its name, its size, nothing to do yet")
+	await _click(_btn("2560 × 1440"))
+	check(_btn("Change to 2560 × 1440") != null and not ov._vs_old_rect.visible,
+		"same shape: same width, one action")
+	await _click(_btn("21:9"))
+	await create_timer(0.3).timeout
+	check(ov._vs_old_rect.visible and ov._vs_rect.size.x > ov._vs_old_rect.size.x,
+		"a new shape shows the screen now against the new one")
+	await _step("vpage_change")
+	await _click(_btn("16:9"))
+	await _click(_btn("Change to 2560 × 1440"))
+	check(events.back() == ["match", 100, 2560, 1440], "Change asks to replace it in place -> %s" % [events.back()])
+	ov.open_virtual_page(-1, Vector2i(1920, 1080), 0.0, 1.25, 20.0)
+	await _frames(2)
+	await _click(ov._tab_buttons[1])
+	check(not ov._vs_scroll.visible and ov._tab_pages[1].visible, "the Screens tab closes the page")
 
 func _run() -> void:
 	await _frames(2)
@@ -177,6 +282,10 @@ func _run() -> void:
 	check(text_w <= st.size.x, "status line fits (%d <= %d px) -> '%s'" % [text_w, st.size.x, st.text])
 	ov.set_host_label("desk-pc")
 	ov.set_link("USB")
+	var slots: Array = ov._monitor_list.find_children("*", "Button", true, false).filter(
+		func(b): return b.text == "Remove")
+	check(slots.size() == 1 and slots[0].get_global_rect().end.x <= ov._monitor_list.get_global_rect().end.x + 0.5,
+		"the virtual screen's buttons fit their row")
 	var rows: Array = ov._monitor_list.find_children("*", "CheckButton", true, false).filter(
 		func(b): return b.text != "Move together")
 	check(rows.size() == 3 and rows[0].button_pressed and not rows[1].button_pressed,
@@ -185,20 +294,15 @@ func _run() -> void:
 	check(events.back() == ["monitor", 1], "a switch toggles that monitor")
 	await _click(ov._btn_arrange)
 	check(events.back() == ["arrange"], "Arrange around me")
-	check(ov._virtual_row.visible, "a PC that can make virtual screens offers them")
-	await _click(_btn("2560 × 1440", ov._virtual_row))
-	check(events.back() == ["virtual", 2560, 1440], "asks for a 2560x1440 virtual screen -> %s" % [events.back()])
-	ov.set_sharp_size(2112, 1188)
-	await _frames(2)
-	await _click(_btn("Sharp (2112 × 1188)", ov._virtual_row))
-	check(events.back() == ["virtual", 2112, 1188], "Sharp asks for the 1:1 size -> %s" % [events.back()])
-	await _click(_btn("1:1", ov._monitor_list))
-	check(events.back() == ["match", 100], "1:1 on the virtual screen -> %s" % [events.back()])
+	check(ov._btn_add_virtual.visible, "a PC that can make virtual screens offers them")
+	await _click(_btn("Size", ov._monitor_list))
+	check(events.back() == ["vpage", 100], "Size on the virtual screen asks for its page -> %s" % [events.back()])
 	await _click(_btn("Remove", ov._monitor_list))
 	check(events.back() == ["unvirtual", 100], "Remove on the virtual screen -> %s" % [events.back()])
 	await _step("screens")
+	await _virtual_page()
 	ov.set_host_capabilities(false, false)
-	check(not ov._virtual_row.visible, "no virtual screens offered when the PC can't make them")
+	check(not ov._btn_add_virtual.visible, "no virtual screens offered when the PC can't make them")
 
 	await _click(ov._tab_buttons[0])
 	check(ov._connected_box.visible and not ov._input_ip.editable, "connected: address locked")

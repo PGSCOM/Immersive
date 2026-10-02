@@ -73,6 +73,8 @@ var ray_angle_deg: float = 40.0
 ## Grabbed screens turn to face the head (LaserDrag.face_me); off = they follow
 ## the controller's position and rotation rigidly.
 var screens_face_me: bool = false
+## Pixels of the last virtual screen added or changed: the size page starts there.
+var virtual_size := Vector2i(1920, 1080)
 
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
@@ -777,6 +779,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.virtual_screen_requested.connect(request_virtual_screen)
 	ui_overlay.virtual_screen_remove_requested.connect(remove_virtual_screen)
 	ui_overlay.virtual_screen_match_requested.connect(match_virtual_screen)
+	ui_overlay.virtual_page_requested.connect(_open_virtual_page)
 	ui_overlay.control_toggled.connect(func(on: bool):
 		control_enabled = on
 		_last_mouse_state.clear()
@@ -829,8 +832,6 @@ func _update_overlay_state() -> void:
 func _update_overlay_monitors() -> void:
 	if ui_overlay:
 		ui_overlay.set_active_monitors(active_monitor_ids)
-		var sharp := one_to_one_size(1.6, ARC_RADIUS, 16.0 / 9.0, _headset_ppd())
-		ui_overlay.set_sharp_size(sharp.x, sharp.y)
 
 # ---------------------------------------------------------------------------
 # Stream quality
@@ -865,14 +866,6 @@ func _headset_ppd() -> float:
 			if proj.x.x > 0.01:
 				return maxf(8.0, size.x / rad_to_deg(2.0 * atan(1.0 / proj.x.x)))
 	return maxf(8.0, float(get_viewport().size.x) / 95.0)
-
-## Pixels that make a screen `width_m` wide, `distance_m` away, 1:1 with a
-## headset resolving `ppd`: multiples of 8, within 640..3840 x 480..2160.
-static func one_to_one_size(width_m: float, distance_m: float, aspect: float, ppd: float) -> Vector2i:
-	var angle := rad_to_deg(2.0 * atan(width_m / (2.0 * maxf(0.3, distance_m))))
-	var w := clampi(roundi(ppd * angle / 8.0) * 8, 640, 3840)
-	var h := clampi(roundi(w / maxf(aspect, 0.1) / 8.0) * 8, 480, 2160)
-	return Vector2i(w, h)
 
 ## Native size of the monitor shown on the pointed panel (or first available
 ## monitor) — reference for percentage-based downscaling.
@@ -1198,6 +1191,8 @@ func _on_stream_started(monitor_id: int, width: int, height: int, codec: int = 2
 	_apply_panel_visual_settings(panel)
 	if is_new:
 		var layout := _layout_for(monitor_id)
+		if layout.is_empty() and _is_virtual(monitor_id):
+			panel.set_panel_width(VirtualSize.default_width_m(float(width) / height))
 		if not layout.is_empty():
 			panel.apply_layout_state(layout)
 		elif _live_panels().all(func(p): return p == panel or p.get_meta("auto_placed", false)):
@@ -1493,7 +1488,34 @@ func _on_latency_response(probe_id: int, _client_ts: int) -> void:
 func request_virtual_screen(width: int, height: int) -> void:
 	if current_state != State.CONNECTED and current_state != State.STREAMING:
 		return
+	_remember_virtual_size(width, height)
 	network_client.send_virtual_display_create(width, height, 60)
+
+func _remember_virtual_size(width: int, height: int) -> void:
+	virtual_size = Vector2i(width, height)
+	_save_config()
+
+func _is_virtual(monitor_id: int) -> bool:
+	return available_monitors.any(func(m): return int(m.id) == monitor_id and m.get("virtual", false))
+
+## The menu's size page: for a new screen (-1) at the default spot, or for
+## that virtual screen where it hangs now (it must be on: its spot and width
+## decide the 1:1 size).
+func _open_virtual_page(monitor_id: int) -> void:
+	var size := virtual_size
+	var width_m := 0.0
+	var distance := ARC_RADIUS
+	if monitor_id >= 0:
+		var panel := _find_panel_for_monitor(monitor_id)
+		if panel == null:
+			ui_overlay.set_notice("Turn that screen on first.")
+			return
+		for m in available_monitors:
+			if int(m.id) == monitor_id:
+				size = Vector2i(m.width, m.height)
+		width_m = panel.panel_width
+		distance = (panel.global_position - _head()[0]).length()
+	ui_overlay.open_virtual_page(monitor_id, size, width_m, distance, _headset_ppd())
 
 func remove_virtual_screen(monitor_id: int) -> void:
 	if current_state != State.CONNECTED and current_state != State.STREAMING:
@@ -1515,6 +1537,7 @@ func _on_virtual_display_result(status: int, removed: bool, monitor_id: int) -> 
 	if ui_overlay:
 		ui_overlay.set_notice("")
 	if removed:
+		_layouts.erase(monitor_id)  # a later screen with this id starts afresh
 		return
 	# Show it: at once if the new MONITOR_LIST is already here, else when it comes.
 	_pending_virtual_id = monitor_id
@@ -1523,22 +1546,32 @@ func _on_virtual_display_result(status: int, removed: bool, monitor_id: int) -> 
 			_show_new_virtual_screen()
 			return
 
-## Replace a virtual screen by one sized 1:1 for where it hangs now. The new
-## one takes the old one's place and width when its stream starts.
-func match_virtual_screen(monitor_id: int) -> void:
+## Replace a virtual screen by one of width x height pixels (0 x 0: sized
+## 1:1 for where it hangs now). The new one takes the old one's place and
+## width (rescaled for a new shape) when its stream starts.
+func match_virtual_screen(monitor_id: int, width: int = 0, height: int = 0) -> void:
 	if not _match.is_empty() or not ui_overlay:
 		return
 	var panel := _find_panel_for_monitor(monitor_id)
 	if panel == null:
 		ui_overlay.set_notice("Turn that screen on first.")
 		return
-	var head: Vector3 = _head()[0]
-	var size := one_to_one_size(panel.panel_width, (panel.global_position - head).length(),
-		float(panel.screen_width) / float(panel.screen_height), _headset_ppd())
-	if absf(panel.screen_width - size.x) <= 0.03 * size.x:
-		ui_overlay.set_notice("Already sharp at %d × %d for this distance." % [panel.screen_width, panel.screen_height])
-		return
-	_match = {"old": monitor_id, "size": size, "layout": panel.get_layout_state(), "creating": false}
+	var aspect := float(panel.screen_width) / float(panel.screen_height)
+	var size := Vector2i(width, height)
+	var done := "Screen set to %d × %d."
+	if width <= 0 or height <= 0:
+		var head: Vector3 = _head()[0]
+		size = VirtualSize.one_to_one(panel.panel_width, (panel.global_position - head).length(),
+			aspect, _headset_ppd())
+		done = "Screen set to %d × %d for this distance."
+		if absf(panel.screen_width - size.x) <= 0.03 * size.x:
+			ui_overlay.set_notice("Already sharp at %d × %d for this distance." % [panel.screen_width, panel.screen_height])
+			return
+	else:
+		_remember_virtual_size(width, height)
+	var layout: Dictionary = panel.get_layout_state()
+	layout["panel_width"] = VirtualSize.replaced_width_m(panel.panel_width, aspect, float(size.x) / size.y)
+	_match = {"old": monitor_id, "size": size, "layout": layout, "creating": false, "done": done}
 	remove_virtual_screen(monitor_id)
 
 ## Next step of match_virtual_screen; true when the result was consumed.
@@ -1554,11 +1587,12 @@ func _match_step(status: int, monitor_id: int) -> bool:
 		network_client.send_virtual_display_create(size.x, size.y, 60)
 		return true
 	var layout: Dictionary = _match["layout"]
+	var done: String = _match["done"]
 	_match.clear()
 	if status != 0:
 		return false  # normal error notice; the old screen is gone
 	_layouts[monitor_id] = layout
-	ui_overlay.set_notice("Screen set to %d × %d for this distance." % [size.x, size.y])
+	ui_overlay.set_notice(done % [size.x, size.y])
 	_pending_virtual_id = monitor_id
 	for m in available_monitors:
 		if int(m.id) == monitor_id:
@@ -1824,6 +1858,8 @@ func _save_config() -> void:
 	cfg.set_value("stream", "jpeg_quality", stream_jpeg_quality)
 	cfg.set_value("stream", "res_percent", stream_res_percent)
 	cfg.set_value("stream", "fps", stream_fps)
+	cfg.set_value("virtual", "width", virtual_size.x)
+	cfg.set_value("virtual", "height", virtual_size.y)
 	cfg.save(CONFIG_PATH)
 
 ## Best codec this device can actually decode, preferring hardware.
@@ -1880,6 +1916,7 @@ func _load_config() -> void:
 		stream_jpeg_quality = cfg.get_value("stream", "jpeg_quality", 70)
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
+		virtual_size = Vector2i(cfg.get_value("virtual", "width", 1920), cfg.get_value("virtual", "height", 1080))
 		# Test harness (see _autoconnect_on_start docs). Writable over adb run-as.
 		_autoconnect_on_start = cfg.get_value("test", "autoconnect", false)
 		_debug_capture = cfg.get_value("test", "debug_capture", false)
