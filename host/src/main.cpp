@@ -1168,6 +1168,8 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "[Host] Main screen off: client " << client_id
                       << " works on it in the headset\n";
+        } else {
+            vdm->set_primary_off(true);  // again: GNOME restores its ramp on monitor changes
         }
         screen_off_until_ms = steady_ms() + immersive::protocol::SCREEN_OFF_LEASE_MS;
         screen_off_client = client_id;

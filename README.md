@@ -324,9 +324,10 @@ while you keep working on it in the headset (it still streams). It is never
 saved: every connection starts with the screen on, and it comes back on by
 itself when you switch it off, disconnect, take the headset off (the headset
 stops renewing it and the PC waits 10 s) or quit the host. Works on X11 (gamma),
+GNOME Wayland (gamma, and a laptop panel's backlight down to its minimum),
 macOS (gamma, not yet tried on a real Mac) and Windows 10 2004+ (a black window
 left out of the capture; the pointer and the Start menu still show over it).
-Wayland desktops and view-only hosts don't offer it.
+Other Wayland desktops and view-only hosts don't offer it.
 
 ### Sharper text
 

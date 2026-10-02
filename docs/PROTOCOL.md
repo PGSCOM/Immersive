@@ -410,7 +410,9 @@ Only sent when HELLO_ACK set `HOST_FLAG_SCREEN_OFF`.
 
 Client → host: 1 darkens the main monitor, 0 lights it again. Only its picture
 goes black: it stays in the desktop and keeps streaming (X11: zero CRTC gamma;
-macOS: zero display transfer formula; Windows 10 2004+: a black click-through
+GNOME Wayland: zero CRTC gamma through Mutter's DisplayConfig, plus a laptop
+panel's backlight at its minimum, re-applied on each renewal since Mutter puts
+its own ramp back when the monitors change; macOS: zero display transfer formula; Windows 10 2004+: a black click-through
 window left out of capture). `off = 1` is a lease: the client re-sends it every
 2 s while it wants the screen dark, and the host lights it again 10 s
 (`SCREEN_OFF_LEASE_MS`) after the last one, when that client disconnects, when

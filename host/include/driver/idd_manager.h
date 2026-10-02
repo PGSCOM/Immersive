@@ -53,7 +53,8 @@ public:
     /// Darken (off) or light again the main (primary) monitor. Only its
     /// picture goes black: it stays in the desktop and keeps being captured,
     /// so it still streams. Implementations light it again when destroyed.
-    /// Returns false when it could not be darkened.
+    /// Called again with true on every lease renewal while off (cheap where
+    /// nothing can undo it). Returns false when it could not be darkened.
     virtual bool set_primary_off(bool /*off*/) { return false; }
 };
 
