@@ -58,11 +58,21 @@ const IDLE_RAY_M := 0.35
 const MAX_RAY_M := 8.0
 ## Where the ray starts relative to the aim pose: tilted 40° down, as tuned on
 ## the Pico 4 whose aim pose points above where the controller looks. The tilt
-## follows main.gd's ray_angle_deg (the menu's "Ray angle") live.
+## follows main.gd's ray_angle_deg (the menu's "Ray angle") live; once the
+## grip pose places the model, the ray starts at its tip (MODEL_TIP) instead.
 const RAY_ORIGIN := Transform3D(
 	Basis(Vector3(1, 0, 0), Vector3(0, 0.76604444, -0.6427876), Vector3(0, 0.6427876, 0.76604444)),
 	Vector3(0, 0, 0.1))
 const POINTER_COLOR := Color(0.93, 0.92, 0.88)
+## The controller model's frame in the grip pose (the controller as the
+## runtime tracks it in the hand): turned 10° down about the handle's middle,
+## as tuned on the Pico 4, so its front end and ring land on the real one's head.
+const MODEL_IN_GRIP := Transform3D(
+	Basis(Vector3(1, 0, 0), Vector3(0, 0.98480775, -0.17364818), Vector3(0, 0.17364818, 0.98480775)),
+	Vector3(0, -0.0034, -0.0113))
+## The front end of the model's grip, where the ray starts once the grip pose
+## places the model.
+const MODEL_TIP := Vector3(0, -0.01, -0.03)
 
 enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
 
@@ -217,6 +227,8 @@ func _beam_mesh() -> ArrayMesh:
 
 ## The runtime's own controller model when it provides one; otherwise a
 ## simple dark grip with a light ring, hidden once a real model shows up.
+## _process() keeps it on the grip pose (MODEL_IN_GRIP); it hangs under the
+## aim-posed controller only to show and hide with it.
 func _build_visual() -> void:
 	_visual = controller.get_node_or_null("ControllerVisual")
 	if _visual == null:
@@ -267,6 +279,12 @@ func _process(delta: float) -> void:
 	var shown := in_use()
 	var has_model := is_instance_valid(_render_models) and _render_models.get_child_count() > 0
 	_visual.visible = shown and not has_model
+	var tracker := XRServer.get_tracker(controller.tracker) as XRPositionalTracker
+	var aim: XRPose = tracker.get_pose(&"aim") if tracker else null
+	var grip: XRPose = tracker.get_pose(&"grip") if tracker else null
+	if aim and grip and grip.has_tracking_data:
+		_visual.transform = aim.get_adjusted_transform().affine_inverse() * grip.get_adjusted_transform() * MODEL_IN_GRIP
+		raycast_origin.position = _visual.transform * MODEL_TIP
 	if is_instance_valid(_render_models):
 		_render_models.visible = shown
 
@@ -302,7 +320,7 @@ func _apply_ray_angle() -> void:
 	if angle == null or is_equal_approx(angle, _ray_angle):
 		return
 	_ray_angle = angle
-	raycast_origin.transform = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-_ray_angle)), RAY_ORIGIN.origin)
+	raycast_origin.basis = Basis(Vector3.RIGHT, deg_to_rad(-_ray_angle))
 
 func _ray() -> Array:
 	return [raycast_origin.global_position, (-raycast_origin.global_basis.z).normalized()]
