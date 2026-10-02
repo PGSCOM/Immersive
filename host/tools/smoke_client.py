@@ -205,11 +205,34 @@ def send_stream_config(s, codec, bitrate_kbps, jpeg_quality, max_width, max_fps)
     print(f"[client] -> STREAM_CONFIG codec={codec} br={bitrate_kbps} "
           f"jq={jpeg_quality} maxw={max_width} fps={max_fps}")
 
+def check_parity(whole, parity):
+    """The host's FEC (protocol.h, VideoParityHeader): parity chunk j of a
+    frame is the XOR of its data chunks j, j+p, j+2p... zero-padded to the
+    first chunk's length, and carries the frame size and p. Returns how many
+    parity chunks of complete frames were checked."""
+    checked = 0
+    for (mon, num, j, cnt, fsize, p, xor) in parity:
+        data = whole.get((mon, num))
+        if data is None:
+            continue
+        if fsize != len(data) or not 0 <= j < p or p != max(1, (cnt * 20 + 99) // 100):
+            fail(f"parity chunk {j} of frame {num} (monitor {mon}): size {fsize} of "
+                 f"{len(data)}, {p} parity chunks for {cnt}")
+        acc = 0
+        for i in range(j, cnt, p):
+            acc ^= int.from_bytes(data[i * 1400:(i + 1) * 1400], "little")
+        if acc.to_bytes(min(len(data), 1400), "little") != xor:
+            fail(f"parity chunk {j} of frame {num} (monitor {mon}) is not the XOR of its group")
+        checked += 1
+    return checked
+
 def receive_frames(udp, monitors_expected, seconds, min_frames):
-    """Reassemble chunked video frames; returns {monitor_id: count}."""
+    """Reassemble chunked video frames; returns {monitor_id: count}. Also
+    checks the FEC parity chunks that came with them."""
     frames = {}
     complete = {}
     first = {}
+    whole, parity = {}, []
     end = time.time() + seconds
     while time.time() < end:
         if all(complete.get(m, 0) >= min_frames for m in monitors_expected):
@@ -221,6 +244,10 @@ def receive_frames(udp, monitors_expected, seconds, min_frames):
         if len(pkt) < 9:
             continue
         fmon, fnum, cidx, ccnt = struct.unpack_from("<BIHH", pkt, 0)
+        if cidx >= ccnt:
+            fsize, p = struct.unpack_from("<IH", pkt, 9)
+            parity.append((fmon, fnum, cidx - ccnt, ccnt, fsize, p, pkt[15:]))
+            continue
         chunks = frames.setdefault((fmon, fnum), {})
         chunks[cidx] = pkt[9:]
         if len(chunks) == ccnt:
@@ -228,10 +255,16 @@ def receive_frames(udp, monitors_expected, seconds, min_frames):
             if fmon not in first:
                 first[fmon] = data[:4]
             complete[fmon] = complete.get(fmon, 0) + 1
+            whole[(fmon, fnum)] = data
             del frames[(fmon, fnum)]
     for mon, cnt in sorted(complete.items()):
         print(f"[client] monitor {mon}: {cnt} complete frames, "
               f"first bytes {first[mon].hex()}")
+    if complete:
+        checked = check_parity(whole, parity)
+        if not checked:
+            fail("no FEC parity chunk came with the frames")
+        print(f"[client] FEC: {checked} parity chunks, each the XOR of its group")
     return complete
 
 def measure(udp, s, mon, seconds, ack):
@@ -252,6 +285,8 @@ def measure(udp, s, mon, seconds, ack):
         if len(pkt) < 9:
             continue
         fmon, fnum, cidx, ccnt = struct.unpack_from("<BIHH", pkt, 0)
+        if cidx >= ccnt:
+            continue  # FEC parity
         chunks = frames.setdefault((fmon, fnum), {})
         chunks[cidx] = len(pkt) - 9
         if len(chunks) < ccnt:

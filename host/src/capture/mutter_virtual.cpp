@@ -223,7 +223,9 @@ public:
         if (!sc_session.empty()) {
             DBusMessage* m = dbus_message_new_method_call(kScBus, sc_session.c_str(), kScSession,
                                                           "RecordVirtual");
-            append_options(m, nullptr, nullptr, "cursor-mode", 1);  // cursor drawn in the frames
+            // Metadata: pipewire_capture.cpp draws it. Embedded, Mutter sent
+            // nothing for a cursor-only move on an idle virtual screen.
+            append_options(m, nullptr, nullptr, "cursor-mode", 2);
             sc.stream = call_for_path(m);
         }
         uint32_t node = 0;

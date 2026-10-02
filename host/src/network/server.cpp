@@ -377,22 +377,26 @@ public:
             if (it->second.tcp_media) {
                 // TCP never loses a frame, it queues it (in adb, the kernels,
                 // the headset), and a queue is latency. The client ACKs each
-                // frame as it reads it: with more than kMaxTcpInFlight of
-                // them unacknowledged, drop whole frames until it catches up.
+                // frame as it reads it: once the oldest unacknowledged one has
+                // waited kMaxTcpQueue, drop whole frames until it catches up.
                 // It sees the gap in frame numbers and asks for a keyframe.
-                // (A client that never ACKs, or has not yet on this stream,
-                // is not limited.)
-                constexpr size_t kMaxTcpInFlight = 4;
+                // By age, not count: 4 frames (66 ms at 60 fps) already
+                // tripped at stream start, and a sharp IDR (up to 1 MB, ~40 ms
+                // on the cable) must not make the frames behind it a gap and
+                // so another IDR. (A client that never ACKs, or has not yet on
+                // this stream, is not limited.)
+                constexpr auto kMaxTcpQueue = std::chrono::milliseconds(150);
                 auto& flow = it->second.flow_state[monitor_id];
                 auto& unacked = it->second.tcp_unacked[monitor_id];
                 if (!flow.ack_seen) unacked.clear();
                 while (!unacked.empty() && unacked.front() <= flow.last_ack) unacked.pop_front();
-                if (unacked.size() >= kMaxTcpInFlight) {
-                    auto now = std::chrono::steady_clock::now();
+                if (!unacked.empty() &&
+                    now - flow.sent_at[unacked.front() % flow.sent_at.size()] > kMaxTcpQueue) {
                     if (now - flow.last_log > std::chrono::seconds(2)) {
                         std::cout << "[Server] Client " << client_id << " monitor "
                                   << static_cast<int>(monitor_id) << ": " << unacked.size()
-                                  << " frames unacknowledged on TCP, dropping frames\n";
+                                  << " frames unacknowledged on TCP for over "
+                                  << kMaxTcpQueue.count() << " ms, dropping frames\n";
                         flow.last_log = now;
                     }
                     return;
@@ -410,16 +414,36 @@ public:
 
         const uint16_t chunk_count = protocol::compute_chunk_count(size);
 
+        // FEC (protocol.h, VideoParityHeader): Wi-Fi drops packets here and
+        // there, and without it one lost chunk out of a frame's dozens cost
+        // the whole frame and then an IDR. Parity j covers data chunks j,
+        // j + p, j + 2p..., sent after them.
+        // ponytail: XOR parity rebuilds one loss per group; Reed-Solomon
+        // (Sunshine) rebuilds any p, worth it if the loss gets past ~2 %.
+        const uint16_t parity_count = chunk_count == 0 ? 0 : static_cast<uint16_t>(std::min<uint32_t>(
+            65535u - chunk_count,
+            std::max<uint32_t>(1, (chunk_count * protocol::FEC_PERCENT + 99) / 100)));
+        const uint32_t parity_len = std::min<uint32_t>(size, protocol::MAX_UDP_PAYLOAD);
+        thread_local std::vector<uint8_t> parity;
+        parity.assign(static_cast<size_t>(parity_count) * parity_len, 0);
+
         // One reusable packet buffer per sending thread (each monitor has its
         // own worker), instead of a heap allocation per chunk — ~150 malloc/free
         // pairs per frame, per monitor, at up to 60 fps.
         thread_local std::vector<uint8_t> packet;
-        packet.resize(sizeof(protocol::VideoPacketHeader) + protocol::MAX_UDP_PAYLOAD);
+        packet.resize(sizeof(protocol::VideoPacketHeader) + sizeof(protocol::VideoParityHeader) +
+                      protocol::MAX_UDP_PAYLOAD);
 
         protocol::VideoPacketHeader vph;
         vph.monitor_id   = monitor_id;
         vph.frame_number = frame_number;
         vph.chunk_count  = chunk_count;
+
+        auto send_packet = [&](size_t len) {
+            sendto(udp_socket_, reinterpret_cast<const char*>(packet.data()),
+                   static_cast<int>(len), 0, reinterpret_cast<struct sockaddr*>(&dest),
+                   sizeof(dest));
+        };
 
         for (uint16_t i = 0; i < chunk_count; ++i) {
             const uint32_t offset = static_cast<uint32_t>(i) * protocol::MAX_UDP_PAYLOAD;
@@ -430,12 +454,23 @@ public:
             vph.chunk_index = i;
             std::memcpy(packet.data(), &vph, sizeof(vph));
             std::memcpy(packet.data() + sizeof(vph), data + offset, chunk_size);
+            send_packet(sizeof(vph) + chunk_size);
 
-            sendto(udp_socket_,
-                   reinterpret_cast<const char*>(packet.data()),
-                   static_cast<int>(sizeof(vph) + chunk_size), 0,
-                   reinterpret_cast<struct sockaddr*>(&dest),
-                   sizeof(dest));
+            if (parity_count) {
+                uint8_t* p = parity.data() + static_cast<size_t>(i % parity_count) * parity_len;
+                for (uint32_t b = 0; b < chunk_size; ++b) p[b] ^= data[offset + b];
+            }
+        }
+
+        const protocol::VideoParityHeader ph{size, parity_count};
+        for (uint16_t j = 0; j < parity_count; ++j) {
+            vph.chunk_index = static_cast<uint16_t>(chunk_count + j);
+            uint8_t* out = packet.data();
+            std::memcpy(out, &vph, sizeof(vph));
+            std::memcpy(out + sizeof(vph), &ph, sizeof(ph));
+            std::memcpy(out + sizeof(vph) + sizeof(ph),
+                        parity.data() + static_cast<size_t>(j) * parity_len, parity_len);
+            send_packet(sizeof(vph) + sizeof(ph) + parity_len);
         }
     }
 
@@ -804,7 +839,13 @@ private:
                                    reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
                         std::lock_guard<std::mutex> lock(clients_mutex_);
                         auto it = clients_.find(client_id);
-                        if (it != clients_.end()) it->second.tcp_media = true;
+                        // The cable loses nothing and carries far more than
+                        // Wi-Fi: the full bitrate at once, not half of it for
+                        // the first ~20 s. A queue still cuts it.
+                        if (it != clients_.end()) {
+                            it->second.tcp_media = true;
+                            it->second.rate.scale = 1.0f;
+                        }
                     }
 
                     const protocol::HelloAck ack = make_ack();

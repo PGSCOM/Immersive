@@ -572,6 +572,20 @@ int main(int argc, char* argv[]) {
         };
         enc_config.bitrate_kbps = link_kbps(cfg.bitrate_kbps > 0
             ? std::min<uint32_t>(cfg.bitrate_kbps, 100000) : enc_config.bitrate_kbps);
+        // The rate control's buffer, i.e. the largest frame: an IDR. A whole
+        // desktop needs a big one to be sharp at once (hevc_vaapi, a 1920x1200
+        // page of text: 0.6 Mbit gave 19 dB and ~20 blurred frames after it,
+        // 4 Mbit 34 dB and 43 by the 10th, 8 Mbit 58 dB at once). Over USB
+        // nothing is lost and the cable is fast: 8 Mbit (that IDR is ~30 ms on
+        // it). Over Wi-Fi a frame is a burst of UDP packets: 4 Mbit. Both at
+        // most 400 / 200 ms of the current rate, so a link the rate control
+        // slowed down gets smaller frames too.
+        bool over_usb = false;
+        for (const auto& c : server->clients()) over_usb |= c.id == client_id && c.tcp_media;
+        auto vbv_kbit = [over_usb](uint32_t kbps) {
+            return over_usb ? std::min(8000u, kbps * 2 / 5) : std::min(4000u, kbps / 5);
+        };
+        enc_config.vbv_kbit = vbv_kbit(enc_config.bitrate_kbps);
 
         // Fallback chain: requested codec → H.264 → MJPEG. `actual_codec`
         // (protocol value) is what we announce in STREAM_START.
@@ -689,6 +703,7 @@ int main(int argc, char* argv[]) {
                                                  fps_cap * std::min(1.0f, 2 * share) + 0.5f)));
             } else {
                 c.bitrate_kbps = link_kbps(ceil_kbps);
+                c.vbv_kbit = vbv_kbit(c.bitrate_kbps);
             }
             c.fps = f;
             const bool same = c.fps == enc_config.fps && c.jpeg_quality == enc_config.jpeg_quality;
@@ -768,7 +783,9 @@ int main(int argc, char* argv[]) {
                   << " cap " << fps_cap << " fps, "
                   << (is_mjpeg ? "JPEG quality " + std::to_string(enc_config.jpeg_quality)
                                : std::to_string(enc_config.bitrate_kbps) + " of "
-                                     + std::to_string(ceil_kbps) + " kbps to start")
+                                     + std::to_string(ceil_kbps) + " kbps to start, frames up to "
+                                     + std::to_string(immersive::vbv_bits(enc_config) / 8000) + " KB"
+                                     + (over_usb ? " (USB)" : " (UDP)"))
                   << "\n";
 
         std::vector<uint8_t> scaled;

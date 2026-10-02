@@ -567,6 +567,26 @@ higher `frame_number` arrives: a large IDR can take longer to transmit than the
 next few frames, and dropping it early loses the one frame a recovering decoder
 needs.
 
+### Parity chunks (FEC)
+
+After a frame's `chunk_count` data chunks the host sends
+`p = max(1, ceil(chunk_count × 20 / 100))` parity chunks with the same header,
+`chunk_index` = `chunk_count` … `chunk_count + p − 1`. Clients that do not
+know them drop them (`chunk_index >= chunk_count`). The payload of parity chunk
+`j`:
+
+| Field | Size | Description |
+|-------|------|-------------|
+| frame_size | 4 bytes LE | The whole frame's bytes |
+| parity_count | 2 bytes LE | `p` |
+| xor | min(frame_size, 1400) bytes | XOR of data chunks `j`, `j + p`, `j + 2p`…, each zero-padded to this length |
+
+With one data chunk of a group missing, XOR-ing the parity with the group's
+other chunks gives it back (cut to 1400 bytes, or to
+`frame_size − (chunk_count − 1) × 1400` for the last chunk). So one loss per
+group, and any burst of up to `p` consecutive losses, costs nothing; a frame
+missing two chunks of one group is lost as before (the client asks for an IDR).
+
 ### Video Codecs
 
 | Value | Name | Description |

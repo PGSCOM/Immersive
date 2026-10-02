@@ -5,7 +5,10 @@
 ///
 /// Virtual screens (ids 100+, GNOME only, mutter_virtual.cpp) are not portal
 /// streams: their PipeWire consumer lives as long as the screen does, and a
-/// capture of one just reads frames from it.
+/// capture of one just reads frames from it. Their cursor comes as metadata
+/// and is drawn here: with it embedded, Mutter (50) turns a cursor-only move
+/// on an otherwise idle virtual screen into an empty buffer, so the pointer
+/// froze until something else on that screen redrew.
 
 #include "capture/linux_backends.h"
 #include "capture/mutter_virtual.h"
@@ -27,6 +30,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <vector>
 
 namespace immersive {
 
@@ -152,6 +156,7 @@ private:
         if (gen && fd < 0) return false;
 
         node_ = node;
+        cursor_meta_ = gen == 0;  // mutter_virtual.cpp records with cursor-mode metadata
         loop_ = pw_thread_loop_new("im2-capture", nullptr);
         context_ = loop_ ? pw_context_new(pw_thread_loop_get_loop(loop_), nullptr, 0) : nullptr;
         if (!context_ || pw_thread_loop_start(loop_) < 0) {
@@ -280,7 +285,7 @@ private:
 
         uint8_t buf[1024];
         spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-        const spa_pod* params[3];
+        const spa_pod* params[4];
         params[0] = static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
             SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
             SPA_PARAM_BUFFERS_dataType,
@@ -293,7 +298,15 @@ private:
             SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
             SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
             SPA_PARAM_META_size, SPA_POD_Int(sizeof(spa_meta_region))));
-        pw_stream_update_params(self->stream_, params, 3);
+        auto cursor_size = [](int side) {
+            return static_cast<int>(sizeof(spa_meta_cursor) + sizeof(spa_meta_bitmap) + side * side * 4);
+        };
+        params[3] = static_cast<const spa_pod*>(spa_pod_builder_add_object(&b,
+            SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+            SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
+            SPA_PARAM_META_size, SPA_POD_CHOICE_RANGE_Int(cursor_size(64), cursor_size(1),
+                                                          cursor_size(384))));
+        pw_stream_update_params(self->stream_, params, self->cursor_meta_ ? 4 : 3);
     }
 
     static void on_process(void* data) {
@@ -313,7 +326,97 @@ private:
         self->cv_.notify_all();
     }
 
-    std::unique_ptr<CapturedFrame> convert(const spa_buffer* buf) const {
+    std::unique_ptr<CapturedFrame> convert(spa_buffer* buf) {
+        const bool cursor_moved = cursor_meta_ && read_cursor(buf);
+        auto frame = convert_picture(buf);
+        if (!cursor_meta_) return frame;
+        // The picture comes without the cursor: keep it, and draw the cursor
+        // on a copy whenever either changes.
+        if (frame) {
+            base_ = frame->pixels;
+            base_w_ = frame->width;
+            base_h_ = frame->height;
+        } else if (cursor_moved && !base_.empty()) {
+            frame = std::make_unique<CapturedFrame>();
+            frame->width = base_w_;
+            frame->height = base_h_;
+            frame->pitch = base_w_ * 4;
+            frame->timestamp_us = now_us();
+            frame->pixels = base_;
+        }
+        if (frame && cursor_visible_) draw_cursor(*frame);
+        return frame;
+    }
+
+    /// The cursor metadata of a buffer: position always, the sprite only when
+    /// it changed (a position-only update zeroes the hotspot, so it is kept
+    /// from the sprite). True if what is drawn changed.
+    bool read_cursor(spa_buffer* buf) {
+        const spa_meta* meta = spa_buffer_find_meta(buf, SPA_META_Cursor);
+        if (!meta || meta->size < sizeof(spa_meta_cursor)) return false;
+        const auto* c = static_cast<const spa_meta_cursor*>(meta->data);
+        const bool visible = spa_meta_cursor_is_valid(c);
+        bool changed = visible != cursor_visible_;
+        cursor_visible_ = visible;
+        if (!visible) return changed;
+        if (c->bitmap_offset >= sizeof(spa_meta_cursor) &&
+            c->bitmap_offset + sizeof(spa_meta_bitmap) <= meta->size) {
+            const auto* bm = SPA_PTROFF(c, c->bitmap_offset, const spa_meta_bitmap);
+            const uint32_t w = bm->size.width, h = bm->size.height;
+            const bool bgra = bm->format == SPA_VIDEO_FORMAT_BGRA;
+            cursor_.clear();
+            cursor_w_ = cursor_h_ = 0;
+            const uint32_t stride = bm->stride > 0 ? static_cast<uint32_t>(bm->stride) : 0;
+            if (w && h && (bgra || bm->format == SPA_VIDEO_FORMAT_RGBA) && stride >= w * 4 &&
+                c->bitmap_offset + bm->offset + uint64_t{stride} * h <= meta->size) {
+                const auto* src = SPA_PTROFF(bm, bm->offset, const uint8_t);
+                cursor_.resize(size_t{w} * h * 4);
+                for (uint32_t y = 0; y < h; ++y) {
+                    const uint8_t* s = src + size_t{y} * stride;
+                    uint8_t* d = cursor_.data() + size_t{y} * w * 4;
+                    for (uint32_t x = 0; x < w * 4; x += 4) {  // to BGRA, premultiplied
+                        d[x] = s[x + (bgra ? 0 : 2)];
+                        d[x + 1] = s[x + 1];
+                        d[x + 2] = s[x + (bgra ? 2 : 0)];
+                        d[x + 3] = s[x + 3];
+                    }
+                }
+                cursor_w_ = w;
+                cursor_h_ = h;
+            }
+            hot_x_ = c->hotspot.x;
+            hot_y_ = c->hotspot.y;
+            changed = true;
+        }
+        if (c->position.x != cursor_x_ || c->position.y != cursor_y_) changed = true;
+        cursor_x_ = c->position.x;
+        cursor_y_ = c->position.y;
+        return changed;
+    }
+
+    /// Alpha-blend the (premultiplied) cursor at its position, clipped.
+    void draw_cursor(CapturedFrame& f) const {
+        const int x0 = cursor_x_ - hot_x_, y0 = cursor_y_ - hot_y_;
+        for (int y = std::max(0, -y0); y < static_cast<int>(cursor_h_); ++y) {
+            if (y0 + y >= static_cast<int>(f.height)) break;
+            const uint8_t* s = cursor_.data() + size_t(y) * cursor_w_ * 4;
+            uint8_t* d = f.pixels.data() + size_t(y0 + y) * f.pitch;
+            for (int x = std::max(0, -x0); x < static_cast<int>(cursor_w_); ++x) {
+                if (x0 + x >= static_cast<int>(f.width)) break;
+                const uint8_t* sp = s + x * 4;
+                uint8_t* dp = d + (x0 + x) * 4;
+                const int keep = 255 - sp[3];
+                for (int k = 0; k < 3; ++k) dp[k] = static_cast<uint8_t>(sp[k] + (dp[k] * keep + 127) / 255);
+            }
+        }
+    }
+
+    static uint64_t now_us() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    std::unique_ptr<CapturedFrame> convert_picture(const spa_buffer* buf) const {
         const auto* header = static_cast<const spa_meta_header*>(
             spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(spa_meta_header)));
         if (header && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED)) return nullptr;
@@ -348,9 +451,7 @@ private:
         frame->width  = w;
         frame->height = h;
         frame->pitch  = w * 4;
-        frame->timestamp_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+        frame->timestamp_us = now_us();
         frame->pixels.resize(size_t{frame->pitch} * h);
         const auto* src = static_cast<const uint8_t*>(d.data) + first;
         uint8_t* dst = frame->pixels.data();
@@ -407,6 +508,15 @@ private:
 
     uint64_t fail_gen_ = 0;  // start_capture failure count for this session
     int failures_ = 0;
+
+    // Cursor as metadata (virtual screens), PipeWire thread only.
+    bool cursor_meta_ = false;
+    std::vector<uint8_t> base_;           // the last picture, without the cursor
+    uint32_t base_w_ = 0, base_h_ = 0;
+    std::vector<uint8_t> cursor_;         // BGRA, premultiplied
+    uint32_t cursor_w_ = 0, cursor_h_ = 0;
+    int32_t cursor_x_ = 0, cursor_y_ = 0, hot_x_ = 0, hot_y_ = 0;
+    bool cursor_visible_ = false;
 
     uint8_t virtual_id_ = 0;              // capturing a virtual screen (reads its consumer)
     uint32_t fixed_w_ = 0, fixed_h_ = 0;  // connect_direct(): the size to ask for

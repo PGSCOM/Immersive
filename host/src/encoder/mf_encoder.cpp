@@ -315,7 +315,7 @@ public:
         v.vt = VT_UI4;
         v.ulVal = cfg.bitrate_kbps * 1000;
         if (FAILED(codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v))) return false;
-        v.ulVal = std::min<uint32_t>(cfg.bitrate_kbps * 50u, 600000u);
+        v.ulVal = vbv_bits(cfg);
         codec_api_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);  // best effort, as at init
         config_ = cfg;
         return true;
@@ -596,20 +596,14 @@ private:
         v.ulVal = config_.gop_size;
         codec_api_->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
 
-        // VBV (HRD) buffer size: limits how large a single IDR frame can be.
-        // Each IDR frame must fit in the buffer — with a small buffer, the
-        // encoder compresses the IDR more aggressively, producing fewer UDP
-        // chunks.  Fewer chunks = higher probability of the IDR arriving fully
-        // intact over a lossy WiFi link (every missing chunk => IDR discarded).
-        //
-        // Formula: 50 ms at the configured bitrate, capped at 600 kbits (75 KB
-        // = ~54 UDP chunks).  At 1% WiFi loss: (0.99)^54 ≈ 58% per IDR,
-        // meaning the client receives a usable IDR within ~0.5–1 s.
+        // VBV (HRD) buffer size: how large a single IDR frame can be, so how
+        // sharp a desktop is when its stream (re)starts. main.cpp sizes it
+        // for the link (EncoderConfig::vbv_kbit; UDP chunks carry parity).
         //
         // Note: CODECAPI_AVEncCommonBufferSize is in bits; some MFTs silently
         // ignore it in CBR mode (best-effort, no hard error expected).
         v.vt  = VT_UI4;
-        v.ulVal = std::min<uint32_t>(config_.bitrate_kbps * 50u, 600000u);
+        v.ulVal = vbv_bits(config_);
         codec_api_->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
     }
 

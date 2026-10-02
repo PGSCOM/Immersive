@@ -316,9 +316,9 @@ private:
         return true;
     }
 
-    /// At most config_.bitrate_kbps with ~50 ms of VBV, capped at 600 kbit: an
-    /// IDR must fit, so it stays a few dozen UDP chunks (same reasoning as
-    /// mf_encoder.cpp).
+    /// At most config_.bitrate_kbps, with vbv_bits(config_) of buffer that
+    /// starts full: the IDR may use all of it (hevc_vaapi, a page of text,
+    /// 4 Mbit: the IDR 34 dB with 3/4 of it, 58 dB with 8 Mbit full).
     /// The encoders budget bits per frame from the frame rate they were
     /// opened with (measured: x264 fed 30 fps opened at 60 spends 3.2 of
     /// 8 Mbps), so a lower config_.fps scales the rate they are given up.
@@ -326,8 +326,8 @@ private:
         ctx_->bit_rate       = static_cast<int64_t>(config_.bitrate_kbps) * 1000 *
                                open_fps_ / std::max(1u, config_.fps);
         ctx_->rc_max_rate    = ctx_->bit_rate;
-        ctx_->rc_buffer_size = static_cast<int>(
-            std::min<int64_t>(static_cast<int64_t>(config_.bitrate_kbps) * 50, 600000));
+        ctx_->rc_buffer_size = static_cast<int>(vbv_bits(config_));
+        ctx_->rc_initial_buffer_occupancy = ctx_->rc_buffer_size;
     }
 
     bool init_vaapi() {
