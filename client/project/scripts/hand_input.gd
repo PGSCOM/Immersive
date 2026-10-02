@@ -69,11 +69,9 @@ const PALM_FACING_COS := 0.6
 const PALM_LOOK_COS := 0.75
 const PALM_MARK_OFFSET_M := 0.05
 const MENU_TAP_MAX_S := 0.7
-## Each tracked hand is drawn as a faint skeleton: rods this thick between the
-## joints, in the menu's ink at low opacity (only its front surface shows, so
-## crossing fingers and the joints do not stack up brighter).
-const GHOST_RADIUS_M := 0.0055
-const GHOST_ALPHA := 0.25
+## Each tracked hand is drawn as a see-through hand mesh, skinned to its
+## joints by XRHandModifier3D (models: assets/hands, look: ghost_hand.gdshader).
+const GHOST_HAND_SCENES := ["res://assets/hands/RightHandHumanoid.gltf", "res://assets/hands/LeftHandHumanoid.gltf"]
 
 @onready var main_scene: Node = get_node_or_null("/root/Main")
 @onready var xr_origin: XROrigin3D = get_node_or_null("/root/Main/XROrigin3D")
@@ -113,7 +111,7 @@ var _laser: MeshInstance3D = null
 var _cursor: MeshInstance3D = null
 var _palm_mark: Node3D = null
 var _palm_mark_mat: StandardMaterial3D = null
-var _ghosts: Dictionary = {}  # left (bool) -> {"joints": MultiMesh, "bones": MultiMesh, "node": Node3D}
+var _ghosts: Dictionary = {}  # left (bool) -> XRNode3D carrying that hand's mesh
 
 var _logged: Dictionary = {}  # what was last printed, per key
 
@@ -122,8 +120,8 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	for g in _ghosts.values():
-		if is_instance_valid(g.node):
-			g.node.queue_free()
+		if is_instance_valid(g):
+			g.queue_free()
 	for n in [_laser, _cursor, _ray_node, _palm_mark]:
 		if is_instance_valid(n):
 			n.queue_free()
@@ -422,61 +420,39 @@ func _show_palm_mark(palm: Dictionary, pressed: bool) -> void:
 # Ghost hands
 # ---------------------------------------------------------------------------
 
-## Joint pairs joined by a rod: each finger from the wrist to its tip, and the
-## knuckles across the palm.
-static func _ghost_bones() -> Array[Vector2i]:
-	var bones: Array[Vector2i] = []
-	for first in [2, 6, 11, 16, 21]:  # metacarpal joint, thumb to little finger
-		bones.append(Vector2i(XRHandTracker.HAND_JOINT_WRIST, first))
-		for j in range(first, 5 if first == 2 else first + 4):
-			bones.append(Vector2i(j, j + 1))
-	for j in [7, 12, 17]:  # index to little proximal joints
-		bones.append(Vector2i(j, j + 5))
-	return bones
-
-## Draw (or hide) one hand where its joints are. A joint the runtime does not
-## place this frame gets a zero-size sphere, and so do its rods.
+## Show (or hide) one hand. Made on first sight: the hand mesh under an
+## XRNode3D that follows the hand tracker, its bones posed every frame by an
+## XRHandModifier3D, so it takes the person's own finger lengths.
 func _show_ghost_hand(left: bool, shown: bool) -> void:
-	var g: Dictionary = _ghosts.get(left, {})
-	if not shown:
-		if not g.is_empty():
-			g.node.visible = false
-		return
-	if g.is_empty():
-		if not (main_scene is Node3D):
-			return
+	var g: Node3D = _ghosts.get(left)
+	if g == null and shown and main_scene is Node3D:
 		g = _make_ghost_hand(left)
 		_ghosts[left] = g
+	if g == null:
+		return
+	g.visible = shown
 	var tracker := hand_tracker(left)
-	var hidden := Transform3D(Basis.from_scale(Vector3.ZERO), Vector3.ZERO)
-	var joints: MultiMesh = g.joints
-	for j in joints.instance_count:
-		var at := tracker.get_hand_joint_transform(j + 1).origin
-		joints.set_instance_transform(j, Transform3D(Basis.from_scale(Vector3.ONE * GHOST_RADIUS_M), at)
-			if _joint_has_valid_position(tracker, j + 1) else hidden)
-	var bones: MultiMesh = g.bones
-	var pairs := _ghost_bones()
-	for k in pairs.size():
-		var a := tracker.get_hand_joint_transform(pairs[k].x).origin
-		var b := tracker.get_hand_joint_transform(pairs[k].y).origin
-		var along := b - a
-		if along.length() < 0.001 or not (_joint_has_valid_position(tracker, pairs[k].x)
-				and _joint_has_valid_position(tracker, pairs[k].y)):
-			bones.set_instance_transform(k, hidden)
-			continue
-		var side := along.cross(Vector3.RIGHT if absf(along.normalized().x) < 0.9 else Vector3.UP).normalized()
-		var basis := Basis(side * GHOST_RADIUS_M, along, side.cross(along).normalized() * GHOST_RADIUS_M)
-		bones.set_instance_transform(k, Transform3D(basis, (a + b) * 0.5))
-	# Joints are in tracking space, so the hand hangs off the XR origin.
-	g.node.global_transform = xr_origin.global_transform if xr_origin else Transform3D()
-	g.node.visible = true
+	var wrist := XRHandTracker.HAND_JOINT_WRIST
+	var palm := XRHandTracker.HAND_JOINT_PALM
+	if shown and _joint_has_valid_position(tracker, wrist) and _joint_has_valid_position(tracker, palm):
+		var at := _joint_world_position(tracker, wrist)
+		var look: ShaderMaterial = g.get_meta("look")
+		look.set_shader_parameter("wrist", at)
+		look.set_shader_parameter("forward", at.direction_to(_joint_world_position(tracker, palm)))
 
-## Spheres on the 25 joints past the palm and unit cylinders stretched along
-## each bone, both drawn twice: first invisibly, writing depth, then in colour
-## where that depth is met, so only the hand's front surface is tinted.
-func _make_ghost_hand(left: bool) -> Dictionary:
-	var color := _make_emissive_material(Color(UiTheme.INK, GHOST_ALPHA), true)
-	color.emission_enabled = false
+## The mesh is drawn twice: first invisibly, writing depth, then in colour
+## where that depth is met, so only the hand's front surface is tinted. The
+## colour pass fades out past the wrist (set each frame in _show_ghost_hand).
+func _make_ghost_hand(left: bool) -> Node3D:
+	var tracker := &"/user/hand_tracker/left" if left else &"/user/hand_tracker/right"
+	var node := XRNode3D.new()
+	node.name = "GhostHandLeft" if left else "GhostHandRight"
+	node.tracker = tracker
+	node.pose = &"default"
+	var hand: Node3D = load(GHOST_HAND_SCENES[int(left)]).instantiate()
+	node.add_child(hand)
+	var color := ShaderMaterial.new()
+	color.shader = preload("res://shaders/ghost_hand.gdshader")
 	color.render_priority = 1
 	var depth := StandardMaterial3D.new()
 	depth.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -484,35 +460,15 @@ func _make_ghost_hand(left: bool) -> Dictionary:
 	depth.albedo_color = Color(0, 0, 0, 0)
 	depth.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
 	depth.next_pass = color
-	var sphere := SphereMesh.new()
-	sphere.radius = 1.0
-	sphere.height = 2.0
-	sphere.radial_segments = 12
-	sphere.rings = 6
-	var rod := CylinderMesh.new()
-	rod.top_radius = 1.0
-	rod.bottom_radius = 1.0
-	rod.height = 1.0
-	rod.radial_segments = 12
-	rod.rings = 0
-	rod.cap_top = false
-	rod.cap_bottom = false
-	var node := Node3D.new()
-	node.name = "GhostHandLeft" if left else "GhostHandRight"
-	var made := {"node": node}
-	for part in [["joints", sphere, 25], ["bones", rod, _ghost_bones().size()]]:
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = part[1]
-		mm.instance_count = part[2]
-		var inst := MultiMeshInstance3D.new()
-		inst.multimesh = mm
-		inst.material_override = depth
-		inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		node.add_child(inst)
-		made[part[0]] = mm
-	main_scene.add_child(node)
-	return made
+	node.set_meta("look", color)
+	for mesh: MeshInstance3D in hand.find_children("*", "MeshInstance3D"):
+		mesh.material_override = depth
+		mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var modifier := XRHandModifier3D.new()
+	modifier.hand_tracker = tracker
+	(hand.find_children("*", "Skeleton3D")[0] as Node).add_child(modifier)
+	(xr_origin if xr_origin else main_scene).add_child(node)
+	return node
 
 # ---------------------------------------------------------------------------
 # Ray / pinch math

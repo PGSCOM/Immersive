@@ -10,7 +10,7 @@ extends SceneTree
 ##   - a hand tracker replaced by a new one (session restart) still works;
 ##   - a pinch on the grab bar under the screen moves it (no click reaches the
 ##     PC) while a long pinch on the screen stays a click; pinches click the menu;
-##   - each tracked hand is drawn as a faint skeleton, hidden while a
+##   - each tracked hand is drawn (a see-through mesh), hidden while a
 ##     controller is in use;
 ##   - the other hand's palm turned to the face shows the menu mark and a short
 ##     pinch toggles the menu (a long one or a palm turned away does not);
@@ -236,7 +236,7 @@ func _run() -> void:
 	var aim := _last()
 	check(aim[2] == 0 and _near(aim, [1113, 553]), "open hand points straight ahead -> %s" % [aim])
 	check(_beam_on(KNUCKLE), "the beam runs from the index knuckle to the cursor")
-	check(input._ghosts[false].node.visible, "the tracked hand is drawn")
+	check(input._ghosts[false].visible, "the tracked hand is drawn")
 
 	# --- Looking around does not move the ray ------------------------------
 	for turn in [[0.4, 0.0, 0.0], [-0.35, -0.3, 0.0], [0.2, 0.25, 0.15]]:
@@ -477,7 +477,7 @@ func _run() -> void:
 			"round %d: controller held: the hand's pinch sends nothing, no hand beam" % round)
 		check(main.toggles == toggles and not input._palm_mark.visible,
 			"round %d: and the palm menu neither shows nor opens" % round)
-		check(not input._ghosts[false].node.visible, "round %d: nor is the hand drawn" % round)
+		check(not input._ghosts[false].visible, "round %d: nor is the hand drawn" % round)
 		vr._set_trigger_state(true)
 		await _hold(ctrl, 2)
 		check(_last()[2] == 1 and _last()[0] < 800, "round %d: the controller's trigger clicks where it points -> %s" % [round, _last()])
@@ -501,7 +501,7 @@ func _run() -> void:
 			await _frames(72 * 3 - 30)
 			check(not input._owns, "round %d: 2.6 s still: still the controller's" % round)
 			await _frames(36)
-			check(input._owns and not vr.raycast_origin.visible and input._ghosts[false].node.visible,
+			check(input._owns and not vr.raycast_origin.visible and input._ghosts[false].visible,
 				"round %d: still for 3 s: the controller hides, the hand has the pointer (and shows)" % round)
 		check(main.sent.slice(mark).all(func(e): return e[2] == 0), "round %d: the already-pinched hand does not click" % round)
 		_pose(KNUCKLE, 0.08)
