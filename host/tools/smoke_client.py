@@ -279,7 +279,7 @@ def check_live_config_and_rate(s, udp, selection):
     # Stop acknowledging: to the host the frames pile up unconfirmed. (The
     # stub's flat picture barely shrinks with JPEG quality: this is mostly
     # the frame rate MJPEG also gives up.)
-    measure(udp, s, mon, 5, ack=False)
+    measure(udp, s, mon, 8, ack=False)  # cuts come ~1 per second from 1.5 s in: slow runners need the time
     slow_fps, slow_kbps = measure(udp, s, mon, 2, ack=False)
     print(f"[client] not acknowledging: {slow_fps:.0f} fps, {slow_kbps:.0f} kbit/s")
     if slow_kbps > 0.6 * kbps:
