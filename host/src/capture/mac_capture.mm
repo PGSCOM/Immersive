@@ -7,6 +7,8 @@
 /// late callback after stop_capture()/destruction is harmless.
 
 #include "capture/dxgi_capture.h"
+#include "driver/idd_manager.h"
+#include "protocol.h"
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
@@ -23,6 +25,36 @@
 #include <map>
 #include <mutex>
 #include <string>
+
+// CoreGraphics' private virtual-display classes (declarations only; the
+// classes are fetched with NSClassFromString, never linked by name).
+@interface CGVirtualDisplayDescriptor : NSObject
+@property(retain, nonatomic) dispatch_queue_t queue;
+@property(retain, nonatomic) NSString* name;
+@property(nonatomic) unsigned int maxPixelsHigh;
+@property(nonatomic) unsigned int maxPixelsWide;
+@property(nonatomic) CGSize sizeInMillimeters;
+@property(nonatomic) unsigned int serialNum;
+@property(nonatomic) unsigned int productID;
+@property(nonatomic) unsigned int vendorID;
+@end
+
+@interface CGVirtualDisplayMode : NSObject
+- (instancetype)initWithWidth:(NSUInteger)width
+                       height:(NSUInteger)height
+                  refreshRate:(CGFloat)refreshRate;
+@end
+
+@interface CGVirtualDisplaySettings : NSObject
+@property(retain, nonatomic) NSArray* modes;
+@property(nonatomic) unsigned int hiDPI;
+@end
+
+@interface CGVirtualDisplay : NSObject
+@property(readonly, nonatomic) CGDirectDisplayID displayID;
+- (instancetype)initWithDescriptor:(CGVirtualDisplayDescriptor*)descriptor;
+- (BOOL)applySettings:(CGVirtualDisplaySettings*)settings;
+@end
 
 namespace {
 
@@ -47,6 +79,19 @@ struct FrameMailbox {
 // must not shift which screen an existing id captures.
 std::mutex                     g_registry_mutex;
 std::map<uint8_t, DisplayInfo> g_registry;
+
+// Virtual screens made by MacVirtualDisplayManager: CGDirectDisplayID →
+// monitor id (VIRTUAL_MONITOR_ID_BASE + n). Locked after g_registry_mutex.
+std::mutex                                g_virtual_mutex;
+std::map<CGDirectDisplayID, uint8_t>      g_virtual;
+
+CGDirectDisplayID virtual_native_id(uint8_t monitor_id) {
+    std::lock_guard<std::mutex> lock(g_virtual_mutex);
+    for (const auto& [did, mid] : g_virtual) {
+        if (mid == monitor_id) return did;
+    }
+    return 0;
+}
 
 bool wait_signal(dispatch_semaphore_t sem, int64_t seconds) {
     return dispatch_semaphore_wait(
@@ -87,23 +132,33 @@ std::vector<DisplayInfo> list_displays() {
     uint32_t count = 0;
     if (CGGetActiveDisplayList(16, ids, &count) != kCGErrorSuccess) return {};
 
+    std::map<CGDirectDisplayID, uint8_t> virtuals;
+    {
+        std::lock_guard<std::mutex> lock(g_virtual_mutex);
+        virtuals = g_virtual;
+    }
     std::vector<DisplayInfo> out;
+    uint8_t physical = 0;
     for (uint32_t i = 0; i < count; ++i) {
         size_t w = 0, h = 0;
         double hz = 0;
         if (!display_pixel_size(ids[i], w, h, hz)) continue;
         const CGRect bounds = CGDisplayBounds(ids[i]);
+        const auto v = virtuals.find(ids[i]);
 
         DisplayInfo d;
-        d.id           = static_cast<uint8_t>(out.size());
+        d.id           = v != virtuals.end() ? v->second : physical++;
         d.width        = static_cast<uint16_t>(std::min<size_t>(w, 65535));
         d.height       = static_cast<uint16_t>(std::min<size_t>(h, 65535));
         d.refresh_rate = static_cast<uint8_t>(hz >= 1.0 ? std::min(hz + 0.5, 255.0) : 60);
         d.origin_x     = static_cast<int32_t>(bounds.origin.x);
         d.origin_y     = static_cast<int32_t>(bounds.origin.y);
-        d.name         = CGDisplayIsBuiltin(ids[i])
+        d.name         = v != virtuals.end()
+                             ? "Virtual screen " + std::to_string(
+                                   v->second - immersive::protocol::VIRTUAL_MONITOR_ID_BASE + 1)
+                         : CGDisplayIsBuiltin(ids[i])
                              ? std::string("Built-in Display")
-                             : "Display " + std::to_string(out.size() + 1);
+                             : "Display " + std::to_string(physical);
         d.is_primary   = CGDisplayIsMain(ids[i]);
         d.native_id    = ids[i];
         out.push_back(d);
@@ -214,8 +269,8 @@ public:
         stop_capture();
 
         @autoreleasepool {
-            CGDirectDisplayID did = 0;
-            {
+            CGDirectDisplayID did = virtual_native_id(display_id);
+            if (!did) {
                 std::lock_guard<std::mutex> lock(g_registry_mutex);
                 if (g_registry.empty()) {
                     for (const auto& d : list_displays()) g_registry[d.id] = d;
@@ -365,6 +420,106 @@ private:
 
 std::unique_ptr<IScreenCapture> create_screen_capture() {
     return std::make_unique<MacCapture>();
+}
+
+/// Virtual screens through CoreGraphics' private CGVirtualDisplay (macOS 11+,
+/// what DeskPad and BetterDisplay use). The classes are looked up at run
+/// time, so a macOS without them simply offers no virtual screens. A screen
+/// lives as long as its CGVirtualDisplay object (and dies with the process).
+class MacVirtualDisplayManager : public IVirtualDisplayManager {
+public:
+    ~MacVirtualDisplayManager() override { remove_all_displays(); }
+
+    bool can_create_displays() const override {
+        return NSClassFromString(@"CGVirtualDisplay") &&
+               NSClassFromString(@"CGVirtualDisplayDescriptor") &&
+               NSClassFromString(@"CGVirtualDisplaySettings") &&
+               NSClassFromString(@"CGVirtualDisplayMode");
+    }
+
+    uint8_t create_display(const VirtualDisplayConfig& config) override {
+        if (!can_create_displays()) return 0;
+        int n = 0;
+        while (n < protocol::MAX_VIRTUAL_DISPLAYS && displays_.count(n)) ++n;
+        if (n == protocol::MAX_VIRTUAL_DISPLAYS) return 0;
+
+        @autoreleasepool {
+            CGMainDisplayID();  // connects to the WindowServer, see list_displays()
+            CGVirtualDisplayDescriptor* desc =
+                [[NSClassFromString(@"CGVirtualDisplayDescriptor") alloc] init];
+            desc.queue         = dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0);
+            desc.name          = [NSString stringWithFormat:@"Immersive-2 Virtual %d", n + 1];
+            desc.maxPixelsWide = config.width;
+            desc.maxPixelsHigh = config.height;
+            // About 110 dpi, so macOS picks a sensible default scale.
+            desc.sizeInMillimeters = CGSizeMake(config.width * 25.4 / 110.0,
+                                                config.height * 25.4 / 110.0);
+            desc.vendorID  = 0x1d6b;
+            desc.productID = 0x0100 + n;
+            desc.serialNum = n + 1;
+
+            CGVirtualDisplay* display =
+                [[NSClassFromString(@"CGVirtualDisplay") alloc] initWithDescriptor:desc];
+            CGVirtualDisplayMode* mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc]
+                initWithWidth:config.width
+                       height:config.height
+                  refreshRate:config.refresh_rate];
+            CGVirtualDisplaySettings* settings =
+                [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
+            settings.hiDPI = 0;
+            settings.modes = @[ mode ];
+            if (!display || display.displayID == 0 || ![display applySettings:settings]) {
+                std::cerr << "[MacVirtual] macOS refused a " << config.width << "x"
+                          << config.height << " virtual screen\n";
+                return 0;
+            }
+
+            const uint8_t monitor_id = static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + n);
+            {
+                std::lock_guard<std::mutex> lock(g_virtual_mutex);
+                g_virtual[display.displayID] = monitor_id;
+            }
+            displays_[n] = display;
+            std::cout << "[MacVirtual] Virtual screen " << n + 1 << ": " << config.width << "x"
+                      << config.height << " (display " << display.displayID << ")\n";
+            return monitor_id;
+        }
+    }
+
+    bool remove_display(uint8_t monitor_id) override {
+        const auto it = displays_.find(monitor_id - protocol::VIRTUAL_MONITOR_ID_BASE);
+        if (it == displays_.end()) return false;
+        {
+            std::lock_guard<std::mutex> lock(g_virtual_mutex);
+            g_virtual.erase(it->second.displayID);
+        }
+        displays_.erase(it);  // releasing the object removes the screen
+        std::cout << "[MacVirtual] Removed virtual screen "
+                  << monitor_id - protocol::VIRTUAL_MONITOR_ID_BASE + 1 << "\n";
+        return true;
+    }
+
+    void remove_all_displays() override {
+        while (!displays_.empty()) {
+            remove_display(
+                static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + displays_.begin()->first));
+        }
+    }
+
+    std::vector<uint8_t> get_active_displays() const override {
+        std::vector<uint8_t> ids;
+        for (const auto& entry : displays_) {
+            ids.push_back(static_cast<uint8_t>(protocol::VIRTUAL_MONITOR_ID_BASE + entry.first));
+        }
+        return ids;
+    }
+
+private:
+    std::map<int, CGVirtualDisplay*> displays_;  // n → display (strong, ARC)
+};
+
+std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {
+    return std::make_unique<MacVirtualDisplayManager>();
 }
 
 }  // namespace immersive

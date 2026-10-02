@@ -1,10 +1,16 @@
 /// Wayland input through the xdg-desktop-portal RemoteDesktop session that
 /// the capture opened (portal_session.cpp). Every call is fire-and-forget.
+/// The pointer on a GNOME virtual screen (id 100+) goes through that
+/// screen's own Mutter RemoteDesktop session instead (mutter_virtual.cpp),
+/// and so do buttons, wheel and keys when there is no portal session.
 
 #include "capture/linux_backends.h"
+#include "capture/mutter_virtual.h"
 #include "capture/portal_session.h"
 #include "input/vk_keysym.h"
+#include "protocol.h"
 
+#include <iostream>
 #include <map>
 #include <mutex>
 
@@ -31,10 +37,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         static constexpr std::pair<uint8_t, int32_t> kButtons[] = {
             {0x01, kBtnLeft}, {0x02, kBtnRight}, {0x04, kBtnMiddle}};
+        // Only record a change that was actually sent: a release dropped on
+        // a busy session is then retried by the next event instead of
+        // leaving the button held forever.
         for (const auto& [bit, code] : kButtons) {
-            if ((in.buttons ^ buttons_) & bit) portal::pointer_button(code, in.buttons & bit);
+            if (((in.buttons ^ buttons_) & bit) && button(code, in.buttons & bit))
+                buttons_ ^= bit;
         }
-        buttons_ = in.buttons;
 
         // Windows wheel units (120 = one notch, +vertical = up, +horizontal =
         // right), sent in fractions from a thumbstick. The portal takes
@@ -43,17 +52,21 @@ public:
         scroll_h_ += in.scroll_delta_h;
         if (const int notches = scroll_v_ / 120) {
             scroll_v_ -= notches * 120;
-            portal::pointer_axis_discrete(0, -notches);
+            axis(0, -notches);
         }
         if (const int notches = scroll_h_ / 120) {
             scroll_h_ -= notches * 120;
-            portal::pointer_axis_discrete(1, notches);
+            axis(1, notches);
         }
     }
 
     void inject_keyboard(const protocol::InputKeyboard& in) override {
-        if (const uint32_t keysym = vk_to_keysym(in.scancode))
+        const uint32_t keysym = vk_to_keysym(in.scancode);
+        if (!keysym) return;
+        if (portal::live_generation() || !mutter::has_sessions())
             portal::keyboard_keysym(static_cast<int32_t>(keysym), in.pressed != 0);
+        else
+            mutter::keyboard_keysym(static_cast<int32_t>(keysym), in.pressed != 0);
     }
 
     void move_cursor(uint8_t monitor_id, uint16_t x, uint16_t y) override {
@@ -65,10 +78,24 @@ public:
             w = it->second.first;
             h = it->second.second;
         }
-        portal::pointer_motion(monitor_id, x / w, y / h);
+        if (monitor_id >= protocol::VIRTUAL_MONITOR_ID_BASE)
+            mutter::pointer_motion(monitor_id, x, y);  // its own pixels = its logical size
+        else
+            portal::pointer_motion(monitor_id, x / w, y / h);
     }
 
 private:
+    static bool button(int32_t code, bool pressed) {
+        return portal::pointer_button(code, pressed) || mutter::pointer_button(code, pressed);
+    }
+
+    static void axis(uint32_t a, int32_t steps) {
+        if (portal::live_generation() || !mutter::has_sessions())
+            portal::pointer_axis_discrete(a, steps);
+        else
+            mutter::pointer_axis_discrete(a, steps);
+    }
+
     std::mutex mutex_;
     std::map<uint8_t, std::pair<uint16_t, uint16_t>> sizes_;  // DisplayInfo size per id
     uint8_t buttons_ = 0;
@@ -79,7 +106,9 @@ private:
 
 std::unique_ptr<IInputInjector> create_portal_input_injector() {
     // Called after enumerate_displays(), so this returns the live session.
-    if (!portal::ensure_session().remote_desktop) return nullptr;
+    // Without portal input it is still needed for GNOME virtual screens.
+    if (!portal::ensure_session().remote_desktop)
+        std::cerr << "[Input] No portal input: only GNOME virtual screens take VR input\n";
     return std::make_unique<PortalInputInjector>();
 }
 

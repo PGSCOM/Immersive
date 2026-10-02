@@ -12,7 +12,12 @@ RandR monitors (left painted red, right blue):
   3. A mouse event on monitor 1 lands at monitor 1's origin + (x, y).
   4. Shift+A from the VR keyboard (VK 0x41 + shift bit) types 'A', and two
      wheel notches produce two button-4 clicks.
-  5. H.264 / HEVC / AV1 (needs ffmpeg) on that real red/blue content, via
+  5. Virtual screens: a stale IM2-VIRTUAL-* monitor from a killed host is
+     cleared at start-up; a new one becomes RandR monitor IM2-VIRTUAL-0 in
+     the framebuffer space right of the monitors (the screen is wider than
+     them), streams that region, takes the pointer, and goes away on remove;
+     one too big for Xvfb's fixed framebuffer is refused (FAILED).
+  6. H.264 / HEVC / AV1 (needs ffmpeg) on that real red/blue content, via
      codec_test.check_codecs(): chroma survives the encoder colour pipeline.
 """
 import io
@@ -26,19 +31,27 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from smoke_client import CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg, send_multi_select  # noqa: E402
+from smoke_client import (CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg,  # noqa: E402
+                          send_multi_select, vdisplay, wait_for)
 import codec_test  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HOST_BIN = os.path.join(ROOT, "host", "build", "immersive2_host")
 W, H = 1600, 900
+EXTRA = 800  # framebuffer width no monitor covers: room for a virtual screen
 procs = []
+
+
+host_log = None
 
 
 def fail(msg):
     print(f"[x11] FAIL: {msg}")
     for p in procs:
         p.kill()
+    if host_log:
+        host_log.seek(0)
+        print("[x11] host log (tail):\n" + "".join(host_log.readlines()[-25:]))
     sys.exit(1)
 
 
@@ -47,7 +60,7 @@ def start_xvfb():
     # -noreset: otherwise the server wipes the RandR monitors and the root
     # background as soon as xrandr/xsetroot disconnect.
     p = subprocess.Popen(["Xvfb", "-displayfd", str(w), "-noreset", "-screen", "0",
-                          f"{W}x{H}x24", "-nolisten", "tcp"], pass_fds=[w],
+                          f"{W + EXTRA}x{H}x24", "-nolisten", "tcp"], pass_fds=[w],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     procs.append(p)
     os.close(w)
@@ -84,7 +97,7 @@ def recv_frames(udp, want, seconds):
         mon, num, idx, cnt = struct.unpack_from("<BIHH", pkt, 0)
         c = chunks.setdefault((mon, num), {})
         c[idx] = pkt[9:]
-        if len(c) == cnt and mon not in out:
+        if len(c) == cnt and mon in want and mon not in out:
             out[mon] = b"".join(c[i] for i in range(cnt))
     return out
 
@@ -114,16 +127,21 @@ def run():
     env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
     env["DISPLAY"] = start_xvfb()
     env["XDG_SESSION_TYPE"] = "x11"
+    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="im2-x11-cfg-")  # never the user's host.conf
     x(env, "xrandr", "--setmonitor", "LEFT", f"{W//2}/200x{H}/200+0+0", "screen")
     x(env, "xrandr", "--setmonitor", "RIGHT", f"{W//2}/200x{H}/200+{W//2}+0", "none")
+    # Left behind by a host that was killed: the next host must clear it.
+    x(env, "xrandr", "--setmonitor", "IM2-VIRTUAL-2", f"200/50x200/50+{W}+0", "none")
     paint_halves(env)
     xev = subprocess.Popen(["stdbuf", "-oL", "xev", "-root", "-event", "keyboard",
                             "-event", "button"], env=env, stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL, text=True)
     procs.append(xev)
 
+    global host_log
     host_log = tempfile.TemporaryFile("w+")
-    host = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--no-audio", "--no-usb"], env=env,
+    host = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--no-audio", "--no-usb", "--no-ui", "--no-pin",
+                             "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)], env=env,
                             stdout=host_log, stderr=subprocess.STDOUT)
     procs.append(host)
     time.sleep(1.0)
@@ -180,7 +198,39 @@ def run():
     if log.count("button 4,") != 4:  # press + release per notch
         fail("expected two button-4 clicks for 240 wheel units")
 
-    # 5. Inter-frame codecs, decoded for real
+    # 5. A virtual screen right of the monitors
+    if "IM2-VIRTUAL" in x(env, "xrandr", "--listmonitors"):
+        fail("the stale IM2-VIRTUAL-2 monitor was not cleared at start-up")
+    status, _, vid, mons = vdisplay(s, create=(640, 480))
+    print(f"[x11] virtual screen: status {status} id {vid} list {mons}")
+    if status != 0 or vid != 100 or (100, 640, 480, "Virtual screen 1", 1) not in mons:
+        fail("could not create a 640x480 virtual screen 100")
+    if f"640/" not in x(env, "xrandr", "--listmonitors"):
+        fail("no IM2-VIRTUAL RandR monitor")
+    send_multi_select(s, [vid])
+    frames = recv_frames(udp, [vid], 10)
+    if vid not in frames:
+        fail("no frame from the virtual screen")
+    img = Image.open(io.BytesIO(frames[vid])).convert("RGB")
+    got = img.getpixel((img.width // 2, img.height // 2))
+    # x = W + 320 falls in the red half of the tiled root background.
+    print(f"[x11] virtual screen frame {img.size} pixel {got}")
+    if img.size != (640, 480) or any(abs(a - b) > 40 for a, b in zip(got, (255, 0, 0))):
+        fail(f"virtual screen shows {got}, expected the red root tile at x={W + 320}")
+    s.sendall(struct.pack("<BIBHHBhh", 0x10, 10, vid, 100, 50, 0, 0, 0))
+    time.sleep(0.3)
+    loc = x(env, "xdotool", "getmouselocation")
+    if not loc.startswith(f"x:{W + 100} y:50 "):
+        fail(f"pointer on the virtual screen: {loc.strip()}")
+    status, _, _, mons = vdisplay(s, remove=vid, also=[0x06])
+    if status != 0 or any(m[0] == vid for m in mons) or "IM2-VIRTUAL" in x(env, "xrandr", "--listmonitors"):
+        fail("removing the virtual screen left it behind")
+    if vdisplay(s, create=(2000, 1000))[0] != 2:
+        fail("a virtual screen beyond Xvfb's fixed framebuffer should fail (2)")
+    print("[x11] virtual screen: created, streamed, pointer, removed; oversize refused")
+    send_multi_select(s, [0, 1])  # back to the two monitors for the codec check
+
+    # 6. Inter-frame codecs, decoded for real
     if shutil.which("ffmpeg"):
         codec_test.fail = fail  # clean up Xvfb on failure too
         codec_test.check_codecs(s, udp, {0: (255, 0, 0), 1: (0, 0, 255)},
@@ -196,7 +246,8 @@ def run():
     host.terminate()
     if host.wait(timeout=5) != 0:
         fail("host did not exit cleanly")
-    print("[x11] OK: RandR monitors, per-monitor capture, mouse, keyboard, wheel, codecs")
+    print("[x11] OK: RandR monitors, per-monitor capture, mouse, keyboard, wheel, "
+          "virtual screens, codecs")
 
 
 if __name__ == "__main__":

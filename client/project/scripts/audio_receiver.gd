@@ -20,9 +20,12 @@ class_name AudioReceiver
 
 const SAMPLE_RATE   := 48000
 const CHANNELS      := 2
-const BUFFER_FRAMES := 8192  ## Circular buffer size in frames (stereo samples)
-const MIN_BUFFER    := 960   ## Minimum buffered frames before playback starts
-const JITTER_WINDOW := 8     ## Max out-of-order packet reorder window
+## Audio queued before playback (re)starts: 40 ms absorbs Wi-Fi jitter.
+const MIN_BUFFER    := 1920
+## Most audio kept waiting, in the reorder queue plus the player (~120 ms).
+## Above it the oldest audio is dropped, so a host clock running slightly
+## fast cannot pile up delay over a long session.
+const MAX_BUFFER    := 5760
 
 # ---------------------------------------------------------------------------
 # State
@@ -45,6 +48,8 @@ var _next_seq: int = -1          # next expected sequence number
 
 ## Whether playback has been started (we wait for MIN_BUFFER first).
 var _playback_started: bool = false
+## Underruns reported by the player so far (get_skips()).
+var _last_skips: int = 0
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -147,49 +152,70 @@ func parse_packet(raw: PackedByteArray) -> void:
 		stereo[i] = Vector2(l, r)
 		offset += stride
 
+	# Already played past it: a late packet would only play out of order.
+	if _next_seq >= 0 and seq < _next_seq and _next_seq - seq < 1_000_000:
+		return
 	# Insert into jitter buffer sorted by seq
 	_jitter_buffer.append({"seq": seq, "frames": stereo})
 	_jitter_buffer.sort_custom(func(a, b): return a["seq"] < b["seq"])
 
-	# Trim buffer: drop the OLDEST packets so latency stays bounded
-	while _jitter_buffer.size() > JITTER_WINDOW:
-		_jitter_buffer.pop_front()
+func _queued_frames() -> int:
+	var n := 0
+	for entry in _jitter_buffer:
+		n += entry["frames"].size()
+	return n
+
+## Frames sitting in the player, not yet heard.
+func _player_frames() -> int:
+	if not _playback:
+		return 0
+	var capacity := int((_player.stream as AudioStreamGenerator).buffer_length * SAMPLE_RATE)
+	return max(0, capacity - _playback.get_frames_available())
 
 func _push_to_generator() -> void:
 	if _jitter_buffer.is_empty():
 		return
 
-	# Pre-buffer: wait until enough audio is queued before starting playback
+	# Pre-buffer: wait until enough audio is queued before (re)starting, so
+	# the first bit of Wi-Fi jitter does not crackle.
 	if not _playback_started:
-		var total_frames := 0
-		for entry in _jitter_buffer:
-			total_frames += entry["frames"].size()
-		if total_frames < MIN_BUFFER:
+		if _queued_frames() < MIN_BUFFER:
 			return
-		_player.play()
+		if not _player.playing:
+			_player.play()
 		_playback = _player.get_stream_playback()
 		_playback_started = true
+		_last_skips = _playback.get_skips()
 
 	if not _playback:
 		return
+
+	# The player ran dry (host clock slower, or a Wi-Fi stall): build the
+	# cushion up again instead of crackling on every packet from now on.
+	var skips := _playback.get_skips()
+	if skips != _last_skips:
+		_last_skips = skips
+		if _player_frames() == 0 and _queued_frames() < MIN_BUFFER:
+			_playback_started = false
+			return
+
+	# Too much waiting (host clock faster): drop the oldest audio.
+	while _jitter_buffer.size() > 1 and _queued_frames() + _player_frames() > MAX_BUFFER:
+		_next_seq = _jitter_buffer.pop_front()["seq"] + 1
 
 	# Initialise expected seq from first packet
 	if _next_seq < 0:
 		_next_seq = _jitter_buffer[0]["seq"]
 
-	# Push sequential packets to generator
+	# Push packets in order; a missing one is waited for only while the
+	# queue is short, then given up on.
 	while not _jitter_buffer.is_empty():
 		var entry: Dictionary = _jitter_buffer[0]
-		# If the gap is too big the missing packets are lost — resync
-		if entry["seq"] > _next_seq + JITTER_WINDOW:
-			_next_seq = entry["seq"]
-
+		if entry["seq"] > _next_seq and _queued_frames() < MIN_BUFFER:
+			break
 		var stereo: PackedVector2Array = entry["frames"]
-
-		# Don't overflow the generator's internal buffer
 		if _playback.get_frames_available() < stereo.size():
 			break
-
 		_jitter_buffer.pop_front()
 		_next_seq = entry["seq"] + 1
 		_playback.push_buffer(stereo)

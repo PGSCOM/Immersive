@@ -78,6 +78,19 @@ std::unique_ptr<IInputInjector> create_input_injector() {
     return injector;
 }
 
+std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {
+    if (is_wayland_session()) {
+#ifdef IMMERSIVE_HAVE_PORTAL
+        return create_mutter_virtual_display_manager();
+#endif
+    } else {
+#ifdef IMMERSIVE_HAVE_X11
+        if (std::getenv("DISPLAY")) return create_x11_virtual_display_manager();
+#endif
+    }
+    return std::make_unique<IVirtualDisplayManager>();
+}
+
 #ifndef IMMERSIVE_HAVE_FFMPEG
 // Built without FFmpeg: no H.264/HEVC/AV1, main.cpp falls back to MJPEG.
 std::unique_ptr<IVideoEncoder> create_hw_encoder() { return nullptr; }

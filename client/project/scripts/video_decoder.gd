@@ -64,6 +64,10 @@ func open(codec: int, width: int, height: int) -> bool:
 	var sid := _stream_id
 	var plug := _plugin
 	var mime: String = CODEC_MIME[codec]
+	# The render-thread call runs synchronously under the default (single
+	# thread) rendering model, so its result is known on return; with a
+	# separate render thread it stays null and the open is assumed to work.
+	var result := [null]
 	RenderingServer.call_on_render_thread(func():
 		# get_external_texture_id() lazily allocates Godot's GL_TEXTURE_EXTERNAL_OES
 		# texture (via _ensure_created()) and returns its glGenTextures name. We pass
@@ -74,14 +78,21 @@ func open(codec: int, width: int, height: int) -> bool:
 		print("[VideoDecoder] Godot ExternalTexture glTex=%d stream=%d" % [gl_tex_id, sid])
 		if gl_tex_id <= 0:
 			push_warning("[VideoDecoder] ExternalTexture not ready (glTex=0) for stream=%d" % sid)
+			result[0] = false
 			return
 		var ok: bool = plug.create_with_surface(sid, gl_tex_id, mime, width, height)
+		result[0] = ok
 		if ok:
 			print("[VideoDecoder] Decoder ready: glTex=%d stream=%d" % [gl_tex_id, sid])
 		else:
 			push_warning("[VideoDecoder] create_with_surface failed for %s (%dx%d)" % [mime, width, height])
 	)
 	print("[VideoDecoder] Scheduling %s decoder (%dx%d), stream id %d" % [mime, width, height, _stream_id])
+	if result[0] == false:
+		# No decoder for this codec here (e.g. AV1 on a Quest 2 or Pico 4):
+		# report it so main.gd falls back instead of showing a black panel.
+		close()
+		return false
 	return true
 
 
@@ -100,10 +111,12 @@ func get_tex_transform() -> Projection:
 	return _tex_transform
 
 
-## Feed one encoded access unit to the decoder.
-func submit(encoded: PackedByteArray) -> void:
+## Feed one encoded access unit to the decoder. False when it had to drop
+## it (no free input buffer): the caller should ask for a keyframe.
+func submit(encoded: PackedByteArray) -> bool:
 	if _plugin and not encoded.is_empty():
-		_plugin.submit(_stream_id, encoded)
+		return _plugin.submit(_stream_id, encoded)
+	return false
 
 
 ## Schedule a SurfaceTexture.updateTexImage() + transform matrix read on the
@@ -111,12 +124,14 @@ func submit(encoded: PackedByteArray) -> void:
 ## ShaderMaterial is not render-thread-safe for writes, so we use
 ## RenderingServer.material_set_param() with the material's RID instead of
 ## material.set_shader_parameter(), which can silently corrupt state.
-func schedule_update(material: ShaderMaterial) -> void:
+func schedule_update(material: ShaderMaterial, layer_material: ShaderMaterial = null) -> void:
 	if not _plugin or _stream_id < 0 or _external_tex == null:
 		return
 	var plug := _plugin
 	var sid := _stream_id
-	var mat_rid := material.get_rid()
+	var rids := [material.get_rid()]
+	if layer_material:
+		rids.append(layer_material.get_rid())  # the compositor layer's canvas
 	RenderingServer.call_on_render_thread(func():
 		if plug.update_tex_image(sid):
 			var arr: PackedFloat32Array = plug.get_transform_matrix(sid)
@@ -127,7 +142,8 @@ func schedule_update(material: ShaderMaterial) -> void:
 					Vector4(arr[8], arr[9], arr[10], arr[11]),
 					Vector4(arr[12], arr[13], arr[14], arr[15])
 				)
-				RenderingServer.material_set_param(mat_rid, "tex_transform", proj)
+				for rid in rids:
+					RenderingServer.material_set_param(rid, "tex_transform", proj)
 	)
 
 

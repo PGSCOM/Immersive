@@ -46,11 +46,15 @@ enum class MessageType : uint8_t {
     STREAM_STOP          = 0x06,
     AUDIO_START          = 0x07,  ///< Server → client: audio stream started
     AUDIO_STOP           = 0x08,  ///< Server → client: audio stream stopped
+    HELLO_REJECT         = 0x09,  ///< Server → client: handshake refused, host then closes
     INPUT_MOUSE          = 0x10,
     INPUT_KEYBOARD       = 0x11,
     INPUT_POINTER        = 0x12,
     MULTI_MONITOR_SELECT = 0x20, ///< Select multiple monitors simultaneously
     STREAM_CONFIG        = 0x21, ///< Client requests stream quality settings
+    VIRTUAL_DISPLAY_CREATE = 0x22, ///< Client → host: add a virtual monitor
+    VIRTUAL_DISPLAY_REMOVE = 0x23, ///< Client → host: remove a virtual monitor this host made
+    VIRTUAL_DISPLAY_RESULT = 0x24, ///< Host → client: outcome of CREATE / REMOVE
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
@@ -74,15 +78,58 @@ struct ControlHeader {
 constexpr uint8_t HELLO_FLAG_TCP_MEDIA = 0x01;
 
 struct Hello {
-    uint8_t protocol_version;
-    char    client_name[32];
-    uint8_t flags;  ///< HELLO_FLAG_* bitmask; optional (absent = 0)
+    uint8_t  protocol_version;
+    char     client_name[32];
+    uint8_t  flags;  ///< HELLO_FLAG_* bitmask; optional (absent = 0)
+    uint32_t pin;    ///< Pairing PIN (100000-999999); optional (absent = 0 = none)
 };
 
 struct HelloAck {
     uint8_t  protocol_version;
     uint16_t udp_port;
     uint8_t  monitor_count;
+    char     host_name[64];  ///< UTF-8, NUL-padded; optional (older hosts omit it)
+    uint8_t  flags;          ///< HOST_FLAG_*; optional (absent = 0)
+};
+
+/// HelloAck.flags bits.
+constexpr uint8_t HOST_FLAG_VIEW_ONLY        = 0x01;  ///< --view-only: input is ignored
+constexpr uint8_t HOST_FLAG_VIRTUAL_DISPLAYS = 0x02;  ///< VIRTUAL_DISPLAY_CREATE works here
+
+/// HelloReject.reason values.
+constexpr uint8_t REJECT_PIN_REQUIRED = 1;  ///< Host needs a PIN and none was sent
+constexpr uint8_t REJECT_WRONG_PIN    = 2;
+constexpr uint8_t REJECT_SERVER_FULL  = 3;  ///< --max-clients reached
+constexpr uint8_t REJECT_LOCKED_OUT   = 4;  ///< Too many wrong PINs from this address; retry later
+
+/// Sent instead of HELLO_ACK when the host refuses the client. Only
+/// connections from 127.0.0.1 (USB via `adb reverse`, a local bridge) skip the
+/// PIN; every other client must send the host's pairing PIN in HELLO.
+struct HelloReject {
+    uint8_t reason;  ///< REJECT_*
+};
+
+/// LAN discovery (UDP). The host listens on UDP <tcp_port> (19800 by default,
+/// a separate namespace from the TCP control port). A client broadcasts a
+/// DiscoveryRequest there; every host answers the sender with a unicast
+/// DiscoveryReply, so the headset can list PCs without typing an IP.
+constexpr uint32_t DISCOVERY_REQUEST_MAGIC = 0x3F324D49;  ///< "IM2?"
+constexpr uint32_t DISCOVERY_REPLY_MAGIC   = 0x21324D49;  ///< "IM2!"
+constexpr uint8_t  DISCOVERY_FLAG_PIN      = 0x01;  ///< connecting needs the PIN
+constexpr uint8_t  DISCOVERY_FLAG_VIEW_ONLY = 0x02; ///< the PC shares its screens but takes no input
+
+struct DiscoveryRequest {
+    uint32_t magic;             ///< DISCOVERY_REQUEST_MAGIC
+    uint8_t  protocol_version;
+};
+
+struct DiscoveryReply {
+    uint32_t magic;             ///< DISCOVERY_REPLY_MAGIC
+    uint8_t  protocol_version;
+    uint16_t tcp_port;
+    uint8_t  monitor_count;
+    uint8_t  flags;             ///< DISCOVERY_FLAG_*
+    char     host_name[64];     ///< UTF-8, NUL-padded
 };
 
 struct MonitorInfo {
@@ -95,7 +142,40 @@ struct MonitorInfo {
 
 struct MonitorList {
     uint8_t     count;
-    // Followed by count * MonitorInfo
+    // Followed by count * MonitorInfo, then (optional, older hosts omit it)
+    // count * uint8_t MONITOR_FLAG_* in the same order.
+};
+
+constexpr uint8_t MONITOR_FLAG_VIRTUAL = 0x01;  ///< made by this host on request; removable
+constexpr uint8_t MONITOR_FLAG_PRIMARY = 0x02;
+
+/// Ask the host for an extra, virtual monitor of this size. The host answers
+/// with VIRTUAL_DISPLAY_RESULT and sends every client a new MONITOR_LIST.
+/// Virtual monitors get ids >= VIRTUAL_MONITOR_ID_BASE, which stay the same
+/// while they exist (physical ids are 0..).
+struct VirtualDisplayCreate {
+    uint16_t width;
+    uint16_t height;
+    uint8_t  refresh_rate;  ///< 0 = 60
+};
+
+struct VirtualDisplayRemove {
+    uint8_t monitor_id;
+};
+
+constexpr uint8_t VIRTUAL_MONITOR_ID_BASE = 100;
+constexpr uint8_t MAX_VIRTUAL_DISPLAYS    = 4;
+
+/// VirtualDisplayResult.status values.
+constexpr uint8_t VDISPLAY_OK          = 0;
+constexpr uint8_t VDISPLAY_UNSUPPORTED = 1;  ///< this PC / desktop cannot make them
+constexpr uint8_t VDISPLAY_FAILED      = 2;  ///< it tried and failed (see the host log)
+constexpr uint8_t VDISPLAY_LIMIT       = 3;  ///< MAX_VIRTUAL_DISPLAYS already exist
+
+struct VirtualDisplayResult {
+    uint8_t status;      ///< VDISPLAY_*
+    uint8_t removed;     ///< 1 = answer to REMOVE, 0 = answer to CREATE
+    uint8_t monitor_id;  ///< the monitor created / removed; 0xFF on failure
 };
 
 struct MonitorSelect {
@@ -115,6 +195,10 @@ struct StreamStart {
     uint16_t width;
     uint16_t height;
     uint8_t  codec;  ///< VideoCodec enum value
+    /// Number of this stream's first frame (optional; older hosts omit it and
+    /// start at 0). Numbers keep growing across restarts of a monitor's
+    /// stream, so a client can drop late frames of the previous stream.
+    uint32_t first_frame;
 };
 
 /// Sent by the server when a monitor stream ends (e.g. it was deselected).

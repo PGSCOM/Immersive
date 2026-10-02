@@ -29,6 +29,15 @@ signal frame_gap_detected(monitor_id: int)
 ## Emitted per audio packet received in-band on TCP (USB mode). Same bytes as
 ## one UDP audio packet; feed it to AudioReceiver.parse_packet().
 signal audio_packet_received(packet: PackedByteArray)
+## The host refused the HELLO (REJECT_* reason, see protocol.h); the
+## connection is closed right after, with disconnected_from_host.
+signal connection_rejected(reason: int)
+## HELLO_ACK arrived: the PC's name (empty from older hosts) and its
+## HOST_FLAG_* bits (view-only, can make virtual screens).
+signal handshake_accepted(host_name: String, host_flags: int)
+## Answer to a virtual screen request (VDISPLAY_* status; removed = answer to
+## a removal; monitor_id = the screen made or removed, 0xFF on failure).
+signal virtual_display_result(status: int, removed: bool, monitor_id: int)
 
 # --- Constants (matching protocol.h) ---
 
@@ -40,11 +49,15 @@ const MSG_STREAM_START: int          = 0x05
 const MSG_STREAM_STOP: int           = 0x06
 const MSG_AUDIO_START: int           = 0x07
 const MSG_AUDIO_STOP: int            = 0x08
+const MSG_HELLO_REJECT: int          = 0x09
 const MSG_INPUT_MOUSE: int           = 0x10
 const MSG_INPUT_KEYBOARD: int        = 0x11
 const MSG_INPUT_POINTER: int         = 0x12
 const MSG_MULTI_MONITOR_SELECT: int  = 0x20
 const MSG_STREAM_CONFIG: int         = 0x21
+const MSG_VIRTUAL_DISPLAY_CREATE: int = 0x22
+const MSG_VIRTUAL_DISPLAY_REMOVE: int = 0x23
+const MSG_VIRTUAL_DISPLAY_RESULT: int = 0x24
 const MSG_FRAME_ACK: int             = 0x30
 const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
@@ -57,6 +70,14 @@ const PROTOCOL_VERSION: int   = 1
 const MAX_UDP_PAYLOAD: int    = 1400
 const VIDEO_HEADER_SIZE: int  = 9  # 1 + 4 + 2 + 2 bytes
 const HELLO_FLAG_TCP_MEDIA: int = 0x01
+const REJECT_PIN_REQUIRED: int = 1
+const REJECT_WRONG_PIN: int = 2
+const REJECT_SERVER_FULL: int = 3
+const REJECT_LOCKED_OUT: int = 4
+const HOST_FLAG_VIEW_ONLY: int = 0x01
+const HOST_FLAG_VIRTUAL_DISPLAYS: int = 0x02
+const MONITOR_FLAG_VIRTUAL: int = 0x01
+const MONITOR_FLAG_PRIMARY: int = 0x02
 ## A whole encoded frame arrives as one VIDEO_FRAME message in TCP media mode;
 ## a high-quality 4K MJPEG keyframe runs to a few MB.
 const MAX_MESSAGE_SIZE: int   = 16 * 1024 * 1024
@@ -73,6 +94,14 @@ var _udp_port: int = 0
 ## USB mode: `adb reverse` only tunnels TCP, so video and audio are asked for
 ## in-band on the control socket (HELLO_FLAG_TCP_MEDIA) and UDP is unused.
 var _tcp_media: bool = false
+## Pairing PIN sent in HELLO (0 = none; the host skips it for 127.0.0.1).
+var _pin: int = 0
+
+## Received video, for the stats line: frames and bytes since the last
+## take_stats() call.
+var _stat_frames: int = 0
+var _stat_bytes: int = 0
+var _stat_since_ms: int = 0
 
 ## Frame reassembly buffer: frame_number -> { chunks: Dictionary, total: int }
 var _frame_buffer: Dictionary = {}
@@ -94,13 +123,21 @@ var _connect_deadline_ms: int = 0
 ## and auto-reconnect never fires. (Not PING: both ends echo PING, so a
 ## client-sent PING would bounce back and forth forever.)
 const HOST_TIMEOUT_MS: int = 10000
+## Over USB the host sends a frame at least every second while streaming (an
+## idle screen is re-sent), so a pulled cable is noticed sooner.
+const USB_TIMEOUT_MS: int = 5000
 var _last_rx_ms: int = 0
+var _last_tick_ms: int = 0
 
 ## Throttle for the stale-partial-frame sweep.
 var _next_cleanup_ms: int = 0
 
 ## Highest completed frame number per monitor, for loss/gap detection.
 var _last_completed_frame: Dictionary = {}
+## First frame number of each monitor's current stream (STREAM_START's
+## first_frame). Anything below it is a late leftover of the previous stream.
+## Hosts too old to send it get no ordering checks (their streams restart at 0).
+var _first_frame: Dictionary = {}
 
 var _tcp_buffer := PackedByteArray()
 
@@ -115,7 +152,8 @@ func _notification(what: int) -> void:
 
 ## Connect to the Immersive-2 host. tcp_media: receive video/audio on the TCP
 ## control socket instead of UDP (USB via adb reverse).
-func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool = false) -> void:
+func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool = false,
+		pin: int = 0) -> void:
 	# Cerrar conexiones previas limpiamente antes de reconectar
 	udp_client.close()
 	tcp_client.disconnect_from_host()
@@ -123,12 +161,14 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool
 	_connected = false
 	_frame_buffer.clear()
 	_last_completed_frame.clear()
+	_first_frame.clear()
 	_stream_size.clear()
 
 	_host_ip = ip
 	_tcp_port = tcp_port
 	_udp_port = udp_port
 	_tcp_media = tcp_media
+	_pin = pin
 
 	_connect_deadline_ms = Time.get_ticks_msec() + CONNECT_TIMEOUT_MS
 	tcp_client.connect_to_host(ip, tcp_port)
@@ -139,6 +179,12 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool
 
 func _process(_delta: float) -> void:
 	tcp_client.poll()
+	# A Pico/Quest that sleeps (headset taken off) stops this loop without an
+	# Android pause: a gap in our own ticks is our silence, not the host's.
+	var now := Time.get_ticks_msec()
+	if _last_tick_ms > 0 and now - _last_tick_ms > 2000:
+		_last_rx_ms = now
+	_last_tick_ms = now
 
 	# Handle TCP connection state
 	var tcp_status: StreamPeerTCP.Status = tcp_client.get_status()
@@ -148,10 +194,14 @@ func _process(_delta: float) -> void:
 			if not _connected:
 				_connected = true
 				_last_rx_ms = Time.get_ticks_msec()
+				# Input and ACKs are tiny messages: send each at once rather
+				# than letting Nagle hold it for the previous one's ACK.
+				tcp_client.set_no_delay(true)
 				_on_tcp_connected()
 			_read_tcp_messages()
-			if _connected and Time.get_ticks_msec() - _last_rx_ms > HOST_TIMEOUT_MS:
-				_fail_connection("host not responding for %d s" % (HOST_TIMEOUT_MS / 1000))
+			var timeout_ms := USB_TIMEOUT_MS if _tcp_media else HOST_TIMEOUT_MS
+			if _connected and Time.get_ticks_msec() - _last_rx_ms > timeout_ms:
+				_fail_connection("host not responding for %d s" % (timeout_ms / 1000))
 				return
 
 		StreamPeerTCP.STATUS_CONNECTING:
@@ -179,6 +229,7 @@ func _fail_connection(reason: String) -> void:
 	_tcp_buffer.clear()
 	_frame_buffer.clear()
 	_last_completed_frame.clear()
+	_first_frame.clear()
 	_stream_size.clear()
 	tcp_client.disconnect_from_host()
 	udp_client.close()
@@ -199,17 +250,25 @@ func _on_tcp_connected() -> void:
 	if bind_err != OK:
 		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 
-	# Send HELLO message
-	var hello := PackedByteArray()
-	hello.resize(34)  # 1 byte version + 32 bytes name + 1 byte flags
-	hello[0] = PROTOCOL_VERSION
-	var name_bytes := "Immersive-2 VR".to_utf8_buffer()
-	for i in range(min(name_bytes.size(), 32)):
-		hello[1 + i] = name_bytes[i]
-	hello[33] = HELLO_FLAG_TCP_MEDIA if _tcp_media else 0
-
-	_send_control_message(MSG_HELLO, hello)
+	tcp_client.put_data(hello_message(_tcp_media, _pin))
 	connected_to_host.emit()
+
+## A whole HELLO message: version, name[32] (shown in the host's log; `note`
+## is appended to it), flags, pairing PIN.
+static func hello_message(tcp_media: bool, pin: int, note: String = "") -> PackedByteArray:
+	var model := OS.get_model_name()
+	var name := model if model != "GenericDevice" and not model.is_empty() else "Immersive-2 VR"
+	var name_bytes := (name + note).to_utf8_buffer()
+	var msg := PackedByteArray()
+	msg.resize(5 + 38)
+	msg[0] = MSG_HELLO
+	msg.encode_u32(1, 38)
+	msg[5] = PROTOCOL_VERSION
+	for i in range(min(name_bytes.size(), 31)):
+		msg[6 + i] = name_bytes[i]
+	msg[5 + 33] = HELLO_FLAG_TCP_MEDIA if tcp_media else 0
+	msg.encode_u32(5 + 34, pin)
+	return msg
 
 ## Select a monitor to stream.
 func select_monitor(monitor_id: int) -> void:
@@ -300,8 +359,24 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var version: int = payload[0]
 				var udp_port: int = payload.decode_u16(1)
 				var monitor_count: int = payload[3]
-				print("[Network] HELLO_ACK: version=%d udp_port=%d monitors=%d" %
-					[version, udp_port, monitor_count])
+				var host_name := payload.slice(4, 68).get_string_from_utf8() \
+					if payload.size() >= 68 else ""
+				var host_flags: int = payload[68] if payload.size() >= 69 else 0
+				print("[Network] HELLO_ACK: version=%d udp_port=%d monitors=%d host=%s flags=%d" %
+					[version, udp_port, monitor_count, host_name, host_flags])
+				# The host sends video to our address at ITS UDP port: listen
+				# there, whatever port this client was configured with.
+				if not _tcp_media and udp_port > 0 and udp_port != _udp_port:
+					_udp_port = udp_port
+					udp_client.close()
+					if udp_client.bind(_udp_port, "*", 8 * 1024 * 1024) != OK:
+						push_error("[Network] Failed to bind UDP port %d — no video will be received" % _udp_port)
+				handshake_accepted.emit(host_name, host_flags)
+
+		MSG_HELLO_REJECT:
+			var reason: int = payload[0] if payload.size() >= 1 else 0
+			connection_rejected.emit(reason)
+			_fail_connection("host refused the connection (reason %d)" % reason)
 
 		MSG_MONITOR_LIST:
 			if payload.size() >= 1:
@@ -316,11 +391,25 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 						"width": payload.decode_u16(offset + 1),
 						"height": payload.decode_u16(offset + 3),
 						"refresh_rate": payload[offset + 5],
-						"name": payload.slice(offset + 6, offset + 70).get_string_from_utf8()
+						"name": payload.slice(offset + 6, offset + 70).get_string_from_utf8(),
+						"virtual": false,
+						"primary": false,
 					}
 					monitors.append(mon)
 					offset += 70
+				# Newer hosts append one MONITOR_FLAG_* byte per monitor.
+				if payload.size() >= offset + monitors.size():
+					for i in monitors.size():
+						var f: int = payload[offset + i]
+						monitors[i]["virtual"] = (f & MONITOR_FLAG_VIRTUAL) != 0
+						monitors[i]["primary"] = (f & MONITOR_FLAG_PRIMARY) != 0
 				monitor_list_received.emit(monitors)
+
+		MSG_VIRTUAL_DISPLAY_RESULT:
+			if payload.size() >= 3:
+				print("[Network] VIRTUAL_DISPLAY_RESULT: status=%d removed=%d monitor=%d" %
+					[payload[0], payload[1], payload[2]])
+				virtual_display_result.emit(payload[0], payload[1] != 0, payload[2])
 
 		MSG_STREAM_START:
 			if payload.size() >= 6:
@@ -331,9 +420,16 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				_stream_size[monitor_id] = Vector2i(w, h)
 				print("[Network] STREAM_START: monitor=%d %dx%d codec=%d" %
 					[monitor_id, w, h, codec])
-				# Fresh stream: frame numbers restart at 0, so forget the old
-				# high-water mark to avoid a false gap on the first frame.
+				# New stream: forget the old high-water mark and any half-built
+				# frame. Chunks of the old stream can still be queued in the
+				# UDP socket; first_frame tells them apart.
 				_last_completed_frame.erase(monitor_id)
+				_first_frame.erase(monitor_id)
+				_drop_partial_frames(monitor_id, 1 << 32)
+				if payload.size() >= 10:
+					var first: int = payload.decode_u32(6)
+					_first_frame[monitor_id] = first
+					_last_completed_frame[monitor_id] = first - 1
 				stream_started.emit(monitor_id, w, h, codec)
 
 		MSG_STREAM_STOP:
@@ -345,6 +441,7 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 					_frame_buffer.erase(key)
 			if stopped_monitor < 0:
 				_last_completed_frame.clear()
+				_first_frame.clear()
 				_stream_size.clear()
 			else:
 				_last_completed_frame.erase(stopped_monitor)
@@ -402,6 +499,11 @@ func _read_udp_packets() -> void:
 		# Validate chunk index to avoid corrupting the frame buffer
 		if frame_num < 0 or chunk_idx < 0 or chunk_idx >= chunk_cnt:
 			continue
+		# Late chunks of a stream that was stopped, or of a frame older than
+		# the last one shown: nothing can use them.
+		if not _stream_size.has(monitor_id) or \
+				(_first_frame.has(monitor_id) and frame_num <= int(_last_completed_frame[monitor_id])):
+			continue
 
 		# Store chunk in frame buffer (key combines monitor and frame number
 		# so simultaneous monitor streams cannot collide)
@@ -448,16 +550,22 @@ func _deliver_frame(monitor_id: int, frame_num: int, frame_data: PackedByteArray
 	# Detect a gap in completed frame numbers (a frame was lost or the host
 	# dropped it). For inter-frame codecs this breaks the decode chain, so we
 	# signal it; main.gd asks for a keyframe when a hardware decoder is active.
+	if not _stream_size.has(monitor_id):
+		return  # that monitor's stream already stopped
 	if _last_completed_frame.has(monitor_id):
 		var prev: int = _last_completed_frame[monitor_id]
+		if frame_num <= prev and _first_frame.has(monitor_id):
+			return  # older than one already shown, or of the previous stream
 		if frame_num > prev + 1:
 			frame_gap_detected.emit(monitor_id)
-		if frame_num > prev:
-			_last_completed_frame[monitor_id] = frame_num
-	else:
-		_last_completed_frame[monitor_id] = frame_num
+			_drop_partial_frames(monitor_id, frame_num)
+	# (An older host restarts streams at 0 and sends no first_frame: its
+	# frames are shown as they come, as before.)
+	_last_completed_frame[monitor_id] = frame_num
 
 	_frames_assembled += 1
+	_stat_frames += 1
+	_stat_bytes += frame_data.size()
 	# Log every large frame (potential IDR) and periodically for small ones.
 	if frame_data.size() > 50000:
 		print("[Net] LARGE frame assembled: mon=%d frame=%d size=%d" % [
@@ -471,6 +579,14 @@ func _deliver_frame(monitor_id: int, frame_num: int, frame_data: PackedByteArray
 
 	# Acknowledge so the host's flow control can drop frames when we lag
 	send_frame_ack(monitor_id, frame_num)
+
+## Forget the unfinished frames of `monitor_id` older than `frame_num`: once a
+## newer frame is complete they can never be shown.
+func _drop_partial_frames(monitor_id: int, frame_num: int) -> void:
+	for key in _frame_buffer.keys():
+		var e: Dictionary = _frame_buffer[key]
+		if e["monitor_id"] == monitor_id and e["frame_num"] < frame_num:
+			_frame_buffer.erase(key)
 
 ## Drop partial frames older than 5 s, across every monitor.
 ##
@@ -498,6 +614,17 @@ func _cleanup_old_frames() -> void:
 	for key in keys_to_remove:
 		_frame_buffer.erase(key)
 
+## Received video since the previous call: {fps, mbps} (fps summed over
+## every monitor). Call about once a second.
+func take_stats() -> Dictionary:
+	var now := Time.get_ticks_msec()
+	var secs: float = max(0.001, (now - _stat_since_ms) / 1000.0)
+	var stats := {"fps": _stat_frames / secs, "mbps": _stat_bytes * 8.0 / secs / 1e6}
+	_stat_frames = 0
+	_stat_bytes = 0
+	_stat_since_ms = now
+	return stats
+
 ## Send a multi-monitor select (up to 3 monitors simultaneously).
 func select_monitors(monitor_ids: Array) -> void:
 	var payload := PackedByteArray()
@@ -511,7 +638,9 @@ func select_monitors(monitor_ids: Array) -> void:
 	payload[4] = 0  # reserved
 	_send_control_message(MSG_MULTI_MONITOR_SELECT, payload)
 
-## Send stream quality settings. The host restarts active streams to apply.
+## Send stream quality settings. A new codec or size restarts the streams;
+## bitrate, JPEG quality and fps are retuned live (they are ceilings: the
+## host adapts below them to the link).
 ## codec: 0 = H.264, 2 = MJPEG, 0xFF = host default. Zero values = default.
 func send_stream_config(codec: int, bitrate_kbps: int, jpeg_quality: int,
 		max_width: int, max_fps: int) -> void:
@@ -525,6 +654,19 @@ func send_stream_config(codec: int, bitrate_kbps: int, jpeg_quality: int,
 	_send_control_message(MSG_STREAM_CONFIG, payload)
 	print("[Network] STREAM_CONFIG: codec=%d bitrate=%d jpegq=%d max_w=%d fps=%d" %
 		[codec, bitrate_kbps, jpeg_quality, max_width, max_fps])
+
+## Ask the host for an extra, virtual screen of this size.
+func send_virtual_display_create(width: int, height: int, refresh_rate: int = 60) -> void:
+	var payload := PackedByteArray()
+	payload.resize(5)
+	payload.encode_u16(0, width)
+	payload.encode_u16(2, height)
+	payload[4] = clampi(refresh_rate, 0, 255)
+	_send_control_message(MSG_VIRTUAL_DISPLAY_CREATE, payload)
+
+## Remove a virtual screen the host made.
+func send_virtual_display_remove(monitor_id: int) -> void:
+	_send_control_message(MSG_VIRTUAL_DISPLAY_REMOVE, PackedByteArray([monitor_id]))
 
 ## Send a frame acknowledgement.
 func send_frame_ack(monitor_id: int, frame_number: int) -> void:
@@ -557,6 +699,7 @@ func disconnect_from_server() -> void:
 	_tcp_buffer.clear()
 	_frame_buffer.clear()
 	_last_completed_frame.clear()
+	_first_frame.clear()
 	_stream_size.clear()
 	tcp_client.disconnect_from_host()
 	udp_client.close()

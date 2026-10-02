@@ -1,6 +1,6 @@
 # Immersive-2 Wire Protocol
 
-This document describes the network protocol used between the Windows host and the VR client.
+This document describes the network protocol used between the host (Windows, Linux or macOS) and the VR client.
 
 All multi-byte integers are **little-endian** unless noted otherwise.
 
@@ -13,6 +13,7 @@ All multi-byte integers are **little-endian** unless noted otherwise.
 | Control | TCP      | 19800       | Bidirectional| Handshake, control, input |
 | Video   | UDP      | 19801       | Host → Client| Video frame chunks |
 | Audio   | UDP      | 19802       | Host → Client| PCM-16 stereo 48 kHz system audio |
+| Discovery | UDP    | 19800       | Client ↔ Host| LAN discovery (a separate namespace from the TCP control port) |
 
 The host's UDP socket is send-only and binds an ephemeral port; the client owns
 19801/19802 for receiving. (Binding them on the host too would stop a client on
@@ -21,8 +22,66 @@ the same machine from receiving video at all.)
 **TCP media mode (USB).** A client that sets `HELLO_FLAG_TCP_MEDIA` in HELLO gets
 no UDP at all: video and audio arrive on the control socket as `VIDEO_FRAME`
 (0x50) and `AUDIO_DATA` (0x51) messages. This is how a headset on a USB cable
-works — the host runs `adb reverse tcp:19800 tcp:19800`, the headset connects to
-its own `127.0.0.1:19800`, and `adb reverse` can only tunnel TCP.
+works — the host runs `adb -s <serial> reverse tcp:19800 tcp:19800` on each
+authorised device, the headset connects to its own `127.0.0.1:19800`, and
+`adb reverse` can only tunnel TCP. The headset looks for the tunnel by itself
+with a plain HELLO to `127.0.0.1` (a HELLO_ACK means a host answers; the
+connection is then closed) and moves its session there.
+
+Over TCP a frame is never lost, only queued, so the host limits each
+monitor to 4 frames sent and not yet acknowledged by `FRAME_ACK` (the client
+ACKs each frame as it reads it) and drops whole frames beyond that; the client
+sees the gap in frame numbers and asks for a keyframe. A client that never
+sends `FRAME_ACK` is not limited.
+
+---
+
+## LAN Discovery (UDP)
+
+The host listens on **UDP `<tcp_port>`** (19800 by default). A client finds
+hosts without an IP by broadcasting a request there (to `255.255.255.255` and
+to its subnet's `x.y.z.255`); every host answers the sender with a unicast
+reply. Sending broadcasts and reading unicast replies needs no multicast lock
+on Android.
+
+**DiscoveryRequest** (5 bytes): `magic` uint32 LE = `0x3F324D49` ("IM2?"),
+`protocol_version` uint8.
+
+**DiscoveryReply** (73 bytes):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| magic | uint32 LE | `0x21324D49` ("IM2!") |
+| protocol_version | uint8 | |
+| tcp_port | uint16 LE | Control port to connect to |
+| monitor_count | uint8 | Number of displays |
+| flags | uint8 | Bit 0 `DISCOVERY_FLAG_PIN`: connecting needs the pairing PIN. Bit 1 `DISCOVERY_FLAG_VIEW_ONLY`: the PC shares its screens but takes no input (`--view-only`) |
+| host_name | char[64] | The PC's name, UTF-8, NUL-padded |
+
+---
+
+## Pairing
+
+Everything the host does — sending the desktop, injecting mouse and keyboard
+— waits for a HELLO that passed the pairing check:
+
+- Connections from **127.0.0.1** are trusted: a process on the PC itself, or a
+  headset on the USB cable (`adb reverse`, which the headset authorised).
+- Everyone else must put the host's **PIN** in HELLO. The host prints it at
+  start-up; by default it is six random digits created once and kept in the
+  settings folder (`%APPDATA%\Immersive2\pairing-pin`,
+  `~/.config/immersive2/pairing-pin`). `--pin NNNNNN` sets it, `--no-pin`
+  turns pairing off.
+- A wrong PIN costs half a second; five from one address lock it out for a
+  minute (`REJECT_LOCKED_OUT`).
+- Any other message before an accepted HELLO drops the connection. A socket
+  that sends no accepted HELLO within 5 s is closed, and `--max-clients`
+  counts paired clients only, so idle connections cannot lock a headset out.
+- Mouse and keyboard input is only taken from the client that owns the
+  streams (the last one to select monitors); when that client goes away the
+  host releases any button or key it was holding.
+
+The client remembers the PIN per PC and sends it on every connection.
 
 ---
 
@@ -50,10 +109,10 @@ All control messages use a **TLV (Type-Length-Value)** framing:
 Sent immediately after TCP connection is established.
 
 ```
- 0         1                      33       34
- +---------+----------------------+--------+
- | version | client_name[32]      | flags  |
- +---------+----------------------+--------+
+ 0         1                      33       34                38
+ +---------+----------------------+--------+-----------------+
+ | version | client_name[32]      | flags  | pin (uint32 LE) |
+ +---------+----------------------+--------+-----------------+
 ```
 
 | Field | Type | Description |
@@ -61,6 +120,10 @@ Sent immediately after TCP connection is established.
 | version | uint8 | Protocol version (currently 1) |
 | client_name | char[32] | UTF-8 null-terminated display name |
 | flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP |
+| pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing) |
+
+The host answers with HELLO_ACK, then MONITOR_LIST (and AUDIO_START when it
+captures audio) — or with HELLO_REJECT and closes.
 
 ---
 
@@ -69,10 +132,10 @@ Sent immediately after TCP connection is established.
 Response to HELLO.
 
 ```
- 0         1         3         4
- +---------+---------+---------+
- | version | udp_port| mon_cnt |
- +---------+---------+---------+
+ 0         1         3         4                  68        69
+ +---------+---------+---------+------------------+---------+
+ | version | udp_port| mon_cnt | host_name[64]    | flags   |
+ +---------+---------+---------+------------------+---------+
 ```
 
 | Field | Type | Description |
@@ -80,16 +143,44 @@ Response to HELLO.
 | version | uint8 | Protocol version |
 | udp_port | uint16 LE | UDP port for video stream |
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
+| host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
+| flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`, or "Let headsets control this PC" off in the host's settings window). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC |
+
+When the flags change while clients are connected (the settings window turns
+remote control on or off), the host sends every paired client a fresh
+HELLO_ACK with the new flags; a client treats a later HELLO_ACK as an update
+of the host's name and flags, not as a new session.
+
+---
+
+### `0x09` HELLO_REJECT — Host → Client
+
+Sent instead of HELLO_ACK; the host closes the connection right after.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| reason | uint8 | 1 `REJECT_PIN_REQUIRED` (no PIN sent), 2 `REJECT_WRONG_PIN`, 3 `REJECT_SERVER_FULL` (`--max-clients` reached), 4 `REJECT_LOCKED_OUT` (too many wrong PINs, retry in a minute) |
+
+A client should ask the user for the PIN on 1 and 2 instead of retrying, and
+stop retrying on 4. A headset disconnected from the host's settings window
+gets reason 1 on its next HELLO (once, whatever PIN it sends), so it stops
+reconnecting by itself and has to be paired again.
 
 ---
 
 ### `0x03` MONITOR_LIST — Host → Client
 
-Sent after HELLO_ACK to enumerate available displays.
+Sent after HELLO_ACK to enumerate available displays, and again to every
+client whenever a virtual monitor is added or removed.
 
 ```
-Payload: uint8 count + count × MonitorInfo
+Payload: uint8 count + count × MonitorInfo [+ count × uint8 flags]
 ```
+
+The trailing flags (optional, older hosts omit them) are one byte per
+monitor, in the same order: bit 0 `MONITOR_FLAG_VIRTUAL` (made by this host
+on request, removable with VIRTUAL_DISPLAY_REMOVE), bit 1
+`MONITOR_FLAG_PRIMARY`.
 
 **MonitorInfo** (70 bytes):
 ```
@@ -127,10 +218,10 @@ Request to stream a single monitor.
 Confirms stream is starting for a monitor.
 
 ```
- 0         1         3         5         6
- +---------+---------+---------+---------+
- | mon_id  | width   | height  | codec   |
- +---------+---------+---------+---------+
+ 0         1         3         5         6                  10
+ +---------+---------+---------+---------+------------------+
+ | mon_id  | width   | height  | codec   | first_frame      |
+ +---------+---------+---------+---------+------------------+
 ```
 
 | Field | Type | Description |
@@ -139,6 +230,7 @@ Confirms stream is starting for a monitor.
 | width | uint16 LE | Frame width |
 | height | uint16 LE | Frame height |
 | codec | uint8 | 0=H.264, 1=H.265/HEVC, 2=MJPEG, 3=AV1 |
+| first_frame | uint32 LE | Optional (older hosts send 6 bytes and start at 0). Number of this stream's first frame. Frame numbers keep growing across restarts of a monitor's stream, so frames numbered below it are late leftovers of the previous stream and are dropped |
 
 ---
 
@@ -197,7 +289,8 @@ Mouse input event on a specific monitor.
 | x | uint16 LE | Pixel X coordinate |
 | y | uint16 LE | Pixel Y coordinate |
 | buttons | uint8 | Bitmask: bit0=left, bit1=right, bit2=middle |
-| scroll_delta | int16 LE | Vertical scroll amount |
+| scroll_delta | int16 LE | Vertical scroll, in Windows wheel units (120 = one notch; smaller values accumulate) |
+| scroll_delta_h | int16 LE | Horizontal scroll, same units |
 
 ---
 
@@ -215,9 +308,9 @@ Keyboard input event.
 | Field | Type | Description |
 |-------|------|-------------|
 | monitor_id | uint8 | Target monitor (for focus) |
-| scancode | uint16 LE | USB HID scancode |
+| scancode | uint16 LE | Windows virtual-key code (`VK_*`) on every OS; Linux and macOS hosts translate it |
 | pressed | uint8 | 1=key down, 0=key up |
-| modifiers | uint8 | Bitmask: bit0=Shift, bit1=Ctrl, bit2=Alt |
+| modifiers | uint8 | Bitmask: bit0=Shift, bit1=Ctrl, bit2=Alt, bit3=Win/Super. The host presses these around the key (the VR keyboard latches them itself) |
 
 ---
 
@@ -247,17 +340,25 @@ stops all streams.
 
 ### `0x21` STREAM_CONFIG — Client → Host
 
-Stream quality settings. Applies to all streams; the host restarts the active
-streams in place (new STREAM_START per monitor, no STREAM_STOP) so the change
-takes effect immediately.
+Stream quality settings. Applies to all streams. A new `codec` or `max_width`
+restarts the active streams (STREAM_STOP then a new STREAM_START per monitor);
+the reference client keeps each screen where it was. A message that changes
+only `bitrate_kbps`, `jpeg_quality` or `max_fps` is applied to the running
+encoders: no STREAM_STOP/START, the client keeps its decoder (a backend that
+has to re-open its encoder continues with an IDR carrying its parameter sets).
+
+`bitrate_kbps` and `jpeg_quality` are ceilings. The host adapts below them to
+the link, per client, from its FRAME_ACKs (see FRAME_ACK); the frame rate is
+also lowered, below `max_fps`, when MJPEG needs it or when the host's encoder
+cannot keep up (a CPU encoder such as libx264 defaults to 30 fps).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | codec | uint8 | 0 = H.264, 1 = H.265/HEVC, 2 = MJPEG, 3 = AV1, 0xFF = host default. If the host cannot encode the requested codec it falls back (→ H.264 → MJPEG) and announces the actual codec in STREAM_START. |
-| bitrate_kbps | uint32 LE | H.264 bitrate; 0 = host default |
+| bitrate_kbps | uint32 LE | H.264/HEVC/AV1 bitrate ceiling; 0 = host default (20000) |
 | jpeg_quality | uint8 | MJPEG quality 10–95; 0 = host default |
 | max_width | uint16 LE | Downscale streams to this width (aspect preserved, host clamps to native); 0 = native resolution |
-| max_fps | uint8 | FPS cap; 0 = auto (display refresh for H.264, 24 for MJPEG) |
+| max_fps | uint8 | FPS cap; 0 = auto (display refresh for a GPU encoder, 30 for a CPU H.264 encoder, 24 for MJPEG) |
 
 When a stream is downscaled the host announces the scaled dimensions in
 STREAM_START and maps incoming INPUT_MOUSE coordinates (which are in stream
@@ -265,9 +366,56 @@ pixels) back to native monitor pixels.
 
 ---
 
+### `0x22` VIRTUAL_DISPLAY_CREATE — Client → Host
+
+Ask for an extra monitor that exists only to be shown in VR (X11: a RandR
+monitor; GNOME: a Mutter virtual monitor; macOS: a CGVirtualDisplay). Only
+sent when HELLO_ACK set `HOST_FLAG_VIRTUAL_DISPLAYS`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| width | uint16 LE | Pixels; the host clamps to 640–7680 and rounds down to even |
+| height | uint16 LE | Pixels; clamped to 480–4320, even |
+| refresh_rate | uint8 | Hz, 0 = 60 (clamped to 24–144) |
+
+The host answers with VIRTUAL_DISPLAY_RESULT and, on success, sends every
+client a new MONITOR_LIST. Virtual monitors get ids from 100
+(`VIRTUAL_MONITOR_ID_BASE`), at most 4 at a time, and are removed when the
+host quits. The client streams one like any other monitor (MULTI_MONITOR_SELECT).
+
+### `0x23` VIRTUAL_DISPLAY_REMOVE — Client → Host
+
+| Field | Type | Description |
+|-------|------|-------------|
+| monitor_id | uint8 | A monitor flagged `MONITOR_FLAG_VIRTUAL` |
+
+If it is streaming, the host first sends STREAM_STOP for it. Answered with
+VIRTUAL_DISPLAY_RESULT, then a new MONITOR_LIST to every client.
+
+### `0x24` VIRTUAL_DISPLAY_RESULT — Host → Client
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | uint8 | 0 `VDISPLAY_OK`, 1 `VDISPLAY_UNSUPPORTED` (this desktop cannot make them), 2 `VDISPLAY_FAILED` (see the host log), 3 `VDISPLAY_LIMIT` (4 already exist) |
+| removed | uint8 | 1 = answer to REMOVE, 0 = answer to CREATE |
+| monitor_id | uint8 | The monitor created / removed; 0xFF on failure |
+
+---
+
 ### `0x30` FRAME_ACK — Client → Host
 
-Acknowledges receipt of a video frame. Used for flow control.
+Acknowledges a video frame the client has completed (sent for every one).
+The host's adaptive bitrate runs on these, per client across all its monitors:
+
+- frames skipped between two ACKs of a monitor (within a second) were lost;
+- the time from sending a frame to its ACK is the queue on the way;
+- no ACK at all for 1.5 s while frames are sent is a stall.
+
+More than 1 frame in 20 lost, an ACK later than 250 ms, or a stall cuts the
+rate to 70 % (at most once a second, down to 5 % of the ceiling); after 4 s
+without a cut each clean second raises it by 10 % + 2 % of the ceiling. A
+connection starts at half the ceiling. Clients that never send FRAME_ACK are
+not throttled. Losing ACKs never stops the stream.
 
 ```
  0         1         5
@@ -286,9 +434,9 @@ Acknowledges receipt of a video frame. Used for flow control.
 ### `0x31` REQUEST_KEYFRAME — Client → Host
 
 Asks the host to encode an IDR for one monitor. Used by an inter-frame codec
-(H.264/HEVC/AV1) to recover the decode chain after packet loss instead of
-waiting for the host's periodic keyframe. No-op for MJPEG, where every frame is
-already independently decodable.
+(H.264/HEVC/AV1) to recover the decode chain after packet loss: the host sends
+no periodic keyframe, so a client that sees a gap in frame numbers asks for one.
+No-op for MJPEG, where every frame is already independently decodable.
 
 ```
  0         1
@@ -498,4 +646,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB) — additive, old clients are unaffected |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors) — additive, old clients are unaffected |

@@ -66,6 +66,13 @@ public:
     /// Request a keyframe on the next encode call
     virtual void request_keyframe() = 0;
 
+    /// Apply a new bitrate / JPEG quality / frame rate to the running encoder.
+    /// Width, height and codec must stay the same: the stream goes on and the
+    /// client keeps its decoder (a backend that has to re-open may start
+    /// with an IDR). Returns false when this backend cannot; the caller then
+    /// restarts the stream (STREAM_STOP + STREAM_START).
+    virtual bool reconfigure(const EncoderConfig& config) { (void)config; return false; }
+
     /// Get the encoder backend type
     virtual EncoderBackend backend() const = 0;
 

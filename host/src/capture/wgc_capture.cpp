@@ -156,9 +156,11 @@ public:
 
     bool start_capture(uint8_t display_id) override {
         if (capturing_) stop_capture();
+        item_closed_ = false;
 
-        // Populate monitors_ if enumerate_displays hasn't been called yet.
-        if (monitors_.empty()) enumerate_displays();
+        // Fresh HMONITORs every time: after an unplug the cached ones are
+        // stale (the worker restarts us exactly then).
+        enumerate_displays();
 
         if (display_id >= monitors_.size() || monitors_[display_id] == nullptr) {
             std::cerr << "[WgcCapture] Display " << (int)display_id << " not found\n";
@@ -226,14 +228,24 @@ public:
                 item_.Size());
 
             // ---- Notify acquire_frame when a new frame arrives ----
+            // Notify under the lock: stop_capture() takes it after revoking,
+            // so a handler already running has finished before `this` goes.
             frame_arrived_revoker_ = frame_pool_.FrameArrived(
                 winrt::auto_revoke,
                 [this](auto&&, auto&&) {
-                    {
-                        std::lock_guard lock(frame_mutex_);
-                        frame_pending_ = true;
-                    }
+                    std::lock_guard lock(frame_mutex_);
+                    frame_pending_ = true;
                     frame_cv_.notify_one();
+                });
+
+            // Monitor unplugged / display turned off: frames just stop, so
+            // report it and let the stream worker restart the capture.
+            item_closed_revoker_ = item_.Closed(
+                winrt::auto_revoke,
+                [this](auto&&, auto&&) {
+                    std::lock_guard lock(frame_mutex_);
+                    item_closed_ = true;
+                    frame_cv_.notify_all();
                 });
 
             // ---- Session ----
@@ -277,12 +289,14 @@ public:
         frame_cv_.notify_all();
 
         frame_arrived_revoker_ = {};
+        item_closed_revoker_ = {};
 
         try { if (session_) session_.Close(); } catch (...) {}
         session_ = nullptr;
 
         try { if (frame_pool_) frame_pool_.Close(); } catch (...) {}
         frame_pool_ = nullptr;
+        { std::lock_guard lock(frame_mutex_); }  // let an in-flight handler finish
 
         item_         = nullptr;
         winrt_device_ = nullptr;
@@ -306,10 +320,10 @@ public:
             std::unique_lock lock(frame_mutex_);
             if (!frame_cv_.wait_for(lock,
                     std::chrono::milliseconds(timeout_ms),
-                    [this] { return frame_pending_ || !capturing_; })) {
+                    [this] { return frame_pending_ || !capturing_ || item_closed_; })) {
                 return nullptr;  // timeout
             }
-            if (!capturing_) return nullptr;
+            if (!capturing_ || item_closed_) return nullptr;
             frame_pending_ = false;
         }
 
@@ -321,6 +335,21 @@ public:
         if (!wgc_frame) return nullptr;
 
         try {
+            // Resolution or scaling changed: the pool still has the old size
+            // and would crop. Resize it; the next frame comes at the new size.
+            const auto content = wgc_frame.ContentSize();
+            if (content.Width > 0 && content.Height > 0 &&
+                (static_cast<uint32_t>(content.Width) != capture_width_ ||
+                 static_cast<uint32_t>(content.Height) != capture_height_)) {
+                capture_width_  = static_cast<uint32_t>(content.Width);
+                capture_height_ = static_cast<uint32_t>(content.Height);
+                wgc_frame.Close();
+                frame_pool_.Recreate(winrt_device_,
+                                     wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                                     2, content);
+                return nullptr;
+            }
+
             auto surface = wgc_frame.Surface();
             ComPtr<ID3D11Texture2D> src_tex = get_texture(surface);
 
@@ -384,7 +413,7 @@ public:
         }
     }
 
-    bool is_capturing() const override { return capturing_; }
+    bool is_capturing() const override { return capturing_ && !item_closed_; }
 
 private:
     /// Read from the FrameArrived callback thread as well as the capture
@@ -408,6 +437,8 @@ private:
     wgc::Direct3D11CaptureFramePool                   frame_pool_{nullptr};
     wgc::GraphicsCaptureSession                       session_{nullptr};
     wgc::Direct3D11CaptureFramePool::FrameArrived_revoker frame_arrived_revoker_;
+    wgc::GraphicsCaptureItem::Closed_revoker          item_closed_revoker_;
+    std::atomic<bool>                                 item_closed_{false};
 
     std::mutex              frame_mutex_;
     std::condition_variable frame_cv_;

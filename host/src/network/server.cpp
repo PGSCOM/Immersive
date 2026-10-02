@@ -6,6 +6,7 @@
 #include "network/server.h"
 
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <vector>
 #include <cstring>
 #include <chrono>
+#include <deque>
 #include <limits>
 #include <cstddef>
 #include <string>
@@ -42,6 +44,8 @@ constexpr int SEND_FLAGS = 0;  // Winsock has no SIGPIPE to suppress
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netdb.h>
+#include <fcntl.h>
 using SocketType = int;
 constexpr SocketType INVALID_SOCK = -1;
 constexpr int SHUTDOWN_BOTH = SHUT_RDWR;
@@ -67,13 +71,33 @@ struct ClientState {
     struct sockaddr_in  udp_addr;
     bool                udp_addr_set = false;
     bool                tcp_media = false;  ///< HELLO_FLAG_TCP_MEDIA: video/audio in-band on TCP
+    /// TCP media: frames sent and not yet acknowledged, per monitor.
+    std::unordered_map<uint8_t, std::deque<uint32_t>> tcp_unacked;
+    bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
     std::string         name;
     struct FlowState {
+        uint32_t first_frame = 0;  ///< this stream's first frame; older ACKs are the last stream's
+        uint32_t last_sent = 0;
         uint32_t last_ack = 0;
         bool     ack_seen = false;
-        std::chrono::steady_clock::time_point last_log{};
+        std::chrono::steady_clock::time_point last_ack_time{}, last_log{};
+        std::array<std::chrono::steady_clock::time_point, 128> sent_at{};  ///< by frame % 128
     };
     std::unordered_map<uint8_t, FlowState> flow_state;
+
+    /// Adaptive bitrate for this client; all its monitors share one link.
+    /// Fed by FRAME_ACK (the client acks every frame it completes): frames
+    /// skipped over were lost; frames sent while one was in flight mean a
+    /// queue filling up on the way; no ACK at all for a while is a stall.
+    /// Each cuts the rate at once, a clean spell raises it slowly — the
+    /// user's setting is the ceiling.
+    struct RateControl {
+        float    scale = 0.5f;  ///< share of the configured bitrate; starts at half
+        uint32_t sent = 0, lost = 0;  ///< this window
+        std::chrono::milliseconds worst_delay{0};  ///< this window: send -> ACK
+        bool     stalled = false;                  ///< this window
+        std::chrono::steady_clock::time_point window_start{}, last_cut{}, last_ack{};
+    } rate;
 };
 
 class NetworkServer : public INetworkServer {
@@ -84,7 +108,11 @@ public:
         stop();
     }
 
-    static constexpr uint32_t kMaxInFlightFrames = 6;
+    /// Rate control (see ClientState::RateControl). A frame confirmed later
+    /// than this after sending sat in a queue: Wi-Fi round trips are tens of
+    /// ms, and the small VBV keeps any frame's own transfer near 50-100 ms.
+    static constexpr std::chrono::milliseconds kMaxFrameDelay{250};
+    static constexpr float kMinRateScale = 0.05f;
 
     /// Hard ceiling on a control-message payload. Every message defined in
     /// protocol.h is a few dozen bytes; anything larger is a corrupt stream or a
@@ -92,9 +120,18 @@ public:
     /// throw bad_alloc (or thrash) instead of just dropping the connection.
     static constexpr uint32_t kMaxControlPayload = 64 * 1024;
 
+    /// A socket that has not sent an accepted HELLO within this many seconds
+    /// is dropped, and at most kMaxPending such sockets exist on top of
+    /// --max-clients, so idle connections can't starve the real headset.
+    static constexpr int      kHelloTimeoutS = 5;
+    static constexpr uint32_t kMaxPending = 8;
+
     bool start(const ServerConfig& config) override {
         if (running_) return false;
         config_ = config;
+        monitor_count_ = config.monitor_count;
+        pin_ = config.pin;
+        host_flags_ = config.host_flags;
 
 #ifdef _WIN32
         WSADATA wsa;
@@ -110,6 +147,7 @@ public:
             std::cerr << "[Server] Failed to create TCP socket\n";
             return false;
         }
+        no_inherit(tcp_socket_);
 
         int reuse = 1;
         setsockopt(tcp_socket_, SOL_SOCKET, SO_REUSEADDR,
@@ -140,6 +178,7 @@ public:
             closesocket(tcp_socket_);
             return false;
         }
+        no_inherit(udp_socket_);
 
         // Aumentar el buffer de envío UDP a 2 MB
         int sndbuf = 2 * 1024 * 1024;
@@ -167,10 +206,30 @@ public:
             return false;
         }
 
+        // LAN discovery: answer DiscoveryRequest broadcasts on UDP <tcp_port>.
+        // Optional — without it clients can still type the IP.
+        host_name_ = local_host_name();
+        discovery_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (discovery_socket_ != INVALID_SOCK) no_inherit(discovery_socket_);
+        struct sockaddr_in disc_addr = {};
+        disc_addr.sin_family = AF_INET;
+        disc_addr.sin_addr.s_addr = INADDR_ANY;
+        disc_addr.sin_port = htons(config_.tcp_port);
+        if (discovery_socket_ != INVALID_SOCK &&
+            bind(discovery_socket_, reinterpret_cast<struct sockaddr*>(&disc_addr),
+                 sizeof(disc_addr)) < 0) {
+            std::cerr << "[Server] LAN discovery unavailable (UDP " << config_.tcp_port
+                      << " busy); clients must enter this PC's IP\n";
+            closesocket(discovery_socket_);
+            discovery_socket_ = INVALID_SOCK;
+        }
+
         running_ = true;
 
         // Start TCP accept thread
         tcp_thread_ = std::thread([this]() { tcp_accept_loop(); });
+        if (discovery_socket_ != INVALID_SOCK)
+            discovery_thread_ = std::thread([this]() { discovery_loop(); });
 
         std::cout << "[Server] Started on TCP:" << config_.tcp_port
                   << " UDP:" << config_.udp_port << "\n";
@@ -188,6 +247,9 @@ public:
         if (tcp_thread_.joinable()) tcp_thread_.join();
         closesocket(tcp_socket_);
         tcp_socket_ = INVALID_SOCK;
+        if (discovery_thread_.joinable()) discovery_thread_.join();
+        if (discovery_socket_ != INVALID_SOCK) closesocket(discovery_socket_);
+        discovery_socket_ = INVALID_SOCK;
 
         // shutdown() (not closesocket()) so each handler thread's blocking
         // recv() returns while its descriptor stays valid — the thread closes
@@ -232,31 +294,49 @@ public:
     }
 
     void send_monitor_list(uint32_t client_id,
-                           const std::vector<protocol::MonitorInfo>& monitors) override {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        auto it = clients_.find(client_id);
-        if (it == clients_.end()) return;
-
-        // Build message
-        protocol::MonitorList list_header;
-        list_header.count = static_cast<uint8_t>(monitors.size());
-
-        uint32_t payload_size = sizeof(list_header) +
-            static_cast<uint32_t>(monitors.size() * sizeof(protocol::MonitorInfo));
-
+                           const std::vector<protocol::MonitorInfo>& monitors,
+                           const std::vector<uint8_t>& flags) override {
+        // count, the records, then one MONITOR_FLAG_* byte per record
+        // (older clients stop after the records).
+        const size_t count = std::min<size_t>(monitors.size(), 255);
+        std::vector<uint8_t> msg(sizeof(protocol::ControlHeader) + 1 +
+                                 count * (sizeof(protocol::MonitorInfo) + 1));
         protocol::ControlHeader header;
         header.type = static_cast<uint8_t>(protocol::MessageType::MONITOR_LIST);
-        header.length = payload_size;
+        header.length = static_cast<uint32_t>(msg.size() - sizeof(header));
+        std::memcpy(msg.data(), &header, sizeof(header));
+        uint8_t* p = msg.data() + sizeof(header);
+        *p++ = static_cast<uint8_t>(count);
+        std::memcpy(p, monitors.data(), count * sizeof(protocol::MonitorInfo));
+        p += count * sizeof(protocol::MonitorInfo);
+        for (size_t i = 0; i < count; ++i) *p++ = i < flags.size() ? flags[i] : 0;
 
-        send_tcp(it->second.tcp_socket, &header, sizeof(header));
-        send_tcp(it->second.tcp_socket, &list_header, sizeof(list_header));
-        for (const auto& mon : monitors) {
-            send_tcp(it->second.tcp_socket, &mon, sizeof(mon));
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (auto& [id, client] : clients_) {
+            if (client_id ? id != client_id : !client.authed) continue;
+            if (!send_tcp(client.tcp_socket, msg.data(), msg.size()))
+                shutdown(client.tcp_socket, SHUTDOWN_BOTH);
         }
     }
 
+    void set_monitor_count(uint8_t count) override { monitor_count_ = count; }
+
     void send_stream_start(uint32_t client_id,
                            const protocol::StreamStart& info) override {
+        {
+            // A new stream numbers its frames from info.first_frame: forget
+            // the previous stream's acknowledgements.
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = clients_.find(client_id);
+            if (it != clients_.end()) {
+                ClientState::FlowState fresh;
+                fresh.first_frame = info.first_frame;
+                it->second.flow_state[info.monitor_id] = fresh;
+                // A restart pauses the ACKs (no frames, a new decoder): not a stall.
+                if (it->second.rate.last_ack.time_since_epoch().count())
+                    it->second.rate.last_ack = std::chrono::steady_clock::now();
+            }
+        }
         send_control_message(client_id,
                              protocol::MessageType::STREAM_START,
                              &info,
@@ -280,44 +360,51 @@ public:
             if (it == clients_.end() || !it->second.udp_addr_set) return;
             dest = it->second.udp_addr;
 
+            auto& flow = it->second.flow_state[monitor_id];
+            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+                flow.ack_seen = false;
+                flow.last_ack = frame_number;
+            }
+            // A client falling behind is never a reason to stop sending:
+            // catching up needs the newest frames, and refusing them froze the
+            // stream for good (the client could never ACK again). The rate
+            // control sends less instead.
+            const auto now = std::chrono::steady_clock::now();
+            flow.last_sent = frame_number;
+            flow.sent_at[frame_number % flow.sent_at.size()] = now;
+            rate_on_sent(it->second, now);
+
             if (it->second.tcp_media) {
+                // TCP never loses a frame, it queues it (in adb, the kernels,
+                // the headset), and a queue is latency. The client ACKs each
+                // frame as it reads it: with more than kMaxTcpInFlight of
+                // them unacknowledged, drop whole frames until it catches up.
+                // It sees the gap in frame numbers and asks for a keyframe.
+                // (A client that never ACKs, or has not yet on this stream,
+                // is not limited.)
+                constexpr size_t kMaxTcpInFlight = 4;
+                auto& flow = it->second.flow_state[monitor_id];
+                auto& unacked = it->second.tcp_unacked[monitor_id];
+                if (!flow.ack_seen) unacked.clear();
+                while (!unacked.empty() && unacked.front() <= flow.last_ack) unacked.pop_front();
+                if (unacked.size() >= kMaxTcpInFlight) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - flow.last_log > std::chrono::seconds(2)) {
+                        std::cout << "[Server] Client " << client_id << " monitor "
+                                  << static_cast<int>(monitor_id) << ": " << unacked.size()
+                                  << " frames unacknowledged on TCP, dropping frames\n";
+                        flow.last_log = now;
+                    }
+                    return;
+                }
                 // ponytail: the whole frame is written under clients_mutex_,
                 // serialising every monitor (they share this one socket anyway).
                 // SO_SNDTIMEO bounds the hold; a per-client send lock if it shows.
                 protocol::VideoFrameHeader vfh{monitor_id, frame_number};
                 send_media_locked(it->second, protocol::MessageType::VIDEO_FRAME,
                                   &vfh, sizeof(vfh), data, size);
+                unacked.push_back(frame_number);
                 return;
-            }
-
-            auto& flow = it->second.flow_state[monitor_id];
-            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
-                flow.ack_seen = false;
-                flow.last_ack = frame_number;
-            }
-            if (flow.ack_seen) {
-                uint32_t backlog = (frame_number >= flow.last_ack)
-                    ? (frame_number - flow.last_ack)
-                    : 0;
-                if (backlog > kMaxInFlightFrames) {
-                    // The client has fallen behind (slow decode or Wi-Fi chunk
-                    // loss). Do NOT stop sending: catching up requires frames
-                    // we'd be refusing to send, so a `return` here deadlocks
-                    // the stream into a permanent black screen (the client can
-                    // never ACK, so last_ack stays frozen and every future
-                    // frame is dropped). Instead resync the flow window to the
-                    // present and keep streaming the freshest frame.
-                    auto now = std::chrono::steady_clock::now();
-                    if (flow.last_log.time_since_epoch().count() == 0 ||
-                        std::chrono::duration_cast<std::chrono::milliseconds>(now - flow.last_log).count() > 500) {
-                        std::cout << "[Server] Client " << client_id
-                                  << " monitor " << static_cast<int>(monitor_id)
-                                  << " lagging (backlog " << backlog << " > "
-                                  << kMaxInFlightFrames << "), resyncing flow window\n";
-                        flow.last_log = now;
-                    }
-                    flow.last_ack = frame_number;
-                }
             }
         }
 
@@ -370,13 +457,14 @@ public:
         header.type = static_cast<uint8_t>(type);
         header.length = static_cast<uint32_t>(payload_size);
 
-        if (!send_tcp(it->second.tcp_socket, &header, sizeof(header))) {
+        if (!send_tcp(it->second.tcp_socket, &header, sizeof(header)) ||
+            (payload_size > 0 && payload &&
+             !send_tcp(it->second.tcp_socket, payload, payload_size))) {
+            // A timed-out (SO_SNDTIMEO) write can stop mid-message; anything
+            // sent after it would be parsed out of frame. Drop the connection
+            // like send_media_locked does; the handler thread cleans it up.
+            shutdown(it->second.tcp_socket, SHUTDOWN_BOTH);
             return false;
-        }
-        if (payload_size > 0 && payload) {
-            if (!send_tcp(it->second.tcp_socket, payload, payload_size)) {
-                return false;
-            }
         }
         return true;
     }
@@ -387,6 +475,7 @@ public:
         if (!data || size == 0) return;
         std::lock_guard<std::mutex> lock(clients_mutex_);
         for (auto& [id, client] : clients_) {
+            if (!client.authed) continue;  // no audio before the PIN is checked
             if (client.tcp_media) {
                 send_media_locked(client, protocol::MessageType::AUDIO_DATA,
                                   nullptr, 0, data, size);
@@ -434,6 +523,64 @@ public:
 
     void set_on_request_keyframe(RequestKeyframeCallback cb) override {
         on_request_keyframe_ = std::move(cb);
+    }
+
+    void set_on_virtual_display_create(VirtualDisplayCreateCallback cb) override {
+        on_vdisplay_create_ = std::move(cb);
+    }
+
+    void set_on_pin_requested(PinRequestedCallback cb) override {
+        on_pin_requested_ = std::move(cb);
+    }
+    void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) override {
+        on_vdisplay_remove_ = std::move(cb);
+    }
+
+    void set_pin(uint32_t pin) override { pin_ = pin; }
+
+    void set_host_flags(uint8_t flags) override {
+        if (host_flags_.exchange(flags) == flags) return;
+        const protocol::HelloAck ack = make_ack();
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (auto& [id, client] : clients_) {
+            if (!client.authed) continue;
+            protocol::ControlHeader header{static_cast<uint8_t>(protocol::MessageType::HELLO_ACK),
+                                           static_cast<uint32_t>(sizeof(ack))};
+            if (!send_tcp(client.tcp_socket, &header, sizeof(header)) ||
+                !send_tcp(client.tcp_socket, &ack, sizeof(ack)))
+                shutdown(client.tcp_socket, SHUTDOWN_BOTH);
+        }
+    }
+
+    std::vector<ClientInfo> clients() const override {
+        std::vector<ClientInfo> out;
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        for (const auto& [id, c] : clients_) {
+            if (!c.authed) continue;
+            char ip[INET_ADDRSTRLEN] = {};
+            inet_ntop(AF_INET, &c.udp_addr.sin_addr, ip, sizeof(ip));
+            out.push_back({id, c.name, ip, c.tcp_media});
+        }
+        std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        return out;
+    }
+
+    void disconnect_client(uint32_t client_id) override {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.find(client_id);
+        if (it == clients_.end()) return;
+        {
+            std::lock_guard<std::mutex> auth(auth_mutex_);
+            kicked_.insert(it->second.udp_addr.sin_addr.s_addr);
+        }
+        std::cout << "[Server] Client " << client_id << " disconnected from the settings panel\n";
+        shutdown(it->second.tcp_socket, SHUTDOWN_BOTH);
+    }
+
+    float link_rate_scale(uint32_t client_id) const override {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.find(client_id);
+        return it == clients_.end() ? 1.0f : it->second.rate.scale;
     }
 
     bool is_running() const override { return running_; }
@@ -484,15 +631,19 @@ private:
                 continue;
             }
 
-            // Enforce the configured client limit (--max-clients). Without
-            // this the option was purely decorative.
+            // --max-clients counts paired clients (checked on HELLO), so idle
+            // sockets that never say hello can't lock the headset out. This
+            // cap only bounds the handler threads; pending sockets time out
+            // after kHelloTimeoutS anyway.
             {
                 std::lock_guard<std::mutex> lock(clients_mutex_);
-                if (clients_.size() >= config_.max_clients) {
+                if (clients_.size() >= config_.max_clients + kMaxPending) {
                     std::cerr << "[Server] Rejecting connection from "
                               << inet_ntoa(client_addr.sin_addr)
                               << ": client limit (" << config_.max_clients
                               << ") reached\n";
+                    // Say why, so the headset shows it instead of retrying blind.
+                    send_reject(client_sock, protocol::REJECT_SERVER_FULL);
                     closesocket(client_sock);
                     continue;
                 }
@@ -513,8 +664,10 @@ private:
                 }
             }
 
+            no_inherit(client_sock);
             suppress_sigpipe(client_sock);
             enable_keepalive(client_sock);
+            set_recv_timeout(client_sock, kHelloTimeoutS);  // cleared once HELLO passes
             uint32_t client_id = next_client_id_++;
 
             {
@@ -531,8 +684,6 @@ private:
             std::cout << "[Server] Client " << client_id << " connected from "
                       << inet_ntoa(client_addr.sin_addr) << "\n";
 
-            if (on_connected_) on_connected_(client_id);
-
             // Tracked (not detached) so stop() can join it — see stop().
             {
                 std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -547,11 +698,15 @@ private:
 
     void handle_client(uint32_t client_id) {
         SocketType sock;
+        struct in_addr peer;
+        bool authed = false;
+        bool rejected = false;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
             auto it = clients_.find(client_id);
             if (it == clients_.end()) return;
             sock = it->second.tcp_socket;
+            peer = it->second.udp_addr.sin_addr;
         }
 
         while (running_) {
@@ -573,6 +728,14 @@ private:
 
             // Dispatch by message type
             auto msg_type = static_cast<protocol::MessageType>(header.type);
+            if (!authed && msg_type != protocol::MessageType::HELLO) {
+                // Input, monitor selection, everything waits for a HELLO
+                // that passed the PIN check.
+                std::cerr << "[Server] Client " << client_id
+                          << " sent a request before HELLO, dropping connection\n";
+                break;
+            }
+            if (authed && msg_type == protocol::MessageType::HELLO) continue;
             switch (msg_type) {
             case protocol::MessageType::HELLO: {
                 // Clients older than the flags byte send one byte less.
@@ -585,23 +748,69 @@ private:
                               << std::string(hello.client_name,
                                              strnlen(hello.client_name, sizeof(hello.client_name)))
                               << (tcp_media ? " (video/audio over TCP)" : "") << "\n";
+
+                    bool kicked;  // disconnected from the panel: ask for the PIN once
+                    {
+                        std::lock_guard<std::mutex> lock(auth_mutex_);
+                        kicked = kicked_.erase(peer.s_addr) > 0;
+                    }
+                    const uint8_t reject = kicked ? protocol::REJECT_PIN_REQUIRED
+                                                  : check_pin(peer, hello.pin);
+                    if (reject) {
+                        std::cerr << "[Server] Client " << client_id << " refused: "
+                                  << (kicked ? "disconnected from the settings panel, asking for the PIN"
+                                      : reject == protocol::REJECT_PIN_REQUIRED ? "no PIN"
+                                      : reject == protocol::REJECT_WRONG_PIN ? "wrong PIN"
+                                      : "too many wrong PINs, locked out for a minute")
+                                  << " (the PIN is shown in this window)\n";
+                        send_reject(sock, reject);
+                        if (reject != protocol::REJECT_LOCKED_OUT && !kicked && on_pin_requested_)
+                            on_pin_requested_(inet_ntoa(peer));
+                        rejected = true;
+                        break;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(clients_mutex_);
+                        uint32_t paired = 0;
+                        for (const auto& [id, c] : clients_) paired += c.authed ? 1 : 0;
+                        if (paired >= config_.max_clients) {
+                            std::cerr << "[Server] Client " << client_id
+                                      << " refused: client limit (" << config_.max_clients
+                                      << ") reached\n";
+                            send_reject(sock, protocol::REJECT_SERVER_FULL);
+                            rejected = true;
+                            break;
+                        }
+                        auto it = clients_.find(client_id);
+                        if (it != clients_.end()) {
+                            it->second.authed = true;
+                            it->second.name.assign(hello.client_name,
+                                                   strnlen(hello.client_name, sizeof(hello.client_name)));
+                        }
+                    }
+                    authed = true;
+                    set_recv_timeout(sock, 0);  // paired: idle is fine now (keepalive covers dead peers)
                     if (tcp_media) {
                         // A client that stops reading must not wedge the
                         // sender (and clients_mutex_) forever: a timed-out
                         // send drops the connection instead.
                         set_send_timeout(sock, 3);
+                        // Each frame goes out at once (no Nagle wait for its
+                        // tail), into a bounded kernel queue.
+                        int on = 1, sndbuf = 1 << 20;
+                        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                                   reinterpret_cast<const char*>(&on), sizeof(on));
+                        setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
+                                   reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
                         std::lock_guard<std::mutex> lock(clients_mutex_);
                         auto it = clients_.find(client_id);
                         if (it != clients_.end()) it->second.tcp_media = true;
                     }
 
-                    // Send HELLO_ACK de forma segura para evitar mezclar bytes
-                    protocol::HelloAck ack;
-                    ack.protocol_version = protocol::PROTOCOL_VERSION;
-                    ack.udp_port = config_.udp_port;
-                    ack.monitor_count = 0;
-
+                    const protocol::HelloAck ack = make_ack();
                     send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
+                    // Monitor list and audio announcement follow the ACK.
+                    if (on_connected_) on_connected_(client_id);
                 }
                 break;
             }
@@ -678,16 +887,41 @@ private:
                 break;
             }
             case protocol::MessageType::FRAME_ACK: {
-                // Flow control: client acknowledged a frame — currently logged only
+                // The client completed a frame. Frame numbers only count sent
+                // frames, so the ones skipped over were lost on the way —
+                // unless this monitor's last ACK is old: then it was idle (one
+                // frame a second) or the link stalled, which is reported
+                // already; counted again, the recovery would read as loss.
+                // Its send-to-ACK delay is the queue in front of it.
                 if (payload.size() >= sizeof(protocol::FrameAck)) {
                     protocol::FrameAck ack;
                     std::memcpy(&ack, payload.data(), sizeof(ack));
+                    const auto now = std::chrono::steady_clock::now();
                     std::lock_guard<std::mutex> lock(clients_mutex_);
                     auto it = clients_.find(client_id);
                     if (it != clients_.end()) {
                         auto& flow = it->second.flow_state[ack.monitor_id];
+                        auto& rate = it->second.rate;
+                        if (ack.frame_number < flow.first_frame) break;  // the previous stream's
+                        if (flow.ack_seen && ack.frame_number > flow.last_ack + 1 &&
+                            now - flow.last_ack_time < std::chrono::seconds(1)) {
+                            rate.lost += ack.frame_number - flow.last_ack - 1;
+                        }
+                        if (flow.last_sent - ack.frame_number < flow.sent_at.size()) {
+                            const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - flow.sent_at[ack.frame_number % flow.sent_at.size()]);
+                            rate.worst_delay = std::max(rate.worst_delay, delay);
+                            if (delay > kMaxFrameDelay && now - flow.last_log > std::chrono::seconds(2)) {
+                                std::cout << "[Server] Client " << client_id << " monitor "
+                                          << static_cast<int>(ack.monitor_id) << " lagging ("
+                                          << delay.count() << " ms from send to ACK)\n";
+                                flow.last_log = now;
+                            }
+                        }
+                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, ack.frame_number)
+                                                      : ack.frame_number;
                         flow.ack_seen = true;
-                        flow.last_ack = std::max(flow.last_ack, ack.frame_number);
+                        flow.last_ack_time = rate.last_ack = now;
                     }
                 }
                 break;
@@ -699,6 +933,20 @@ private:
                     if (on_request_keyframe_) {
                         on_request_keyframe_(client_id, req.monitor_id);
                     }
+                }
+                break;
+            }
+            case protocol::MessageType::VIRTUAL_DISPLAY_CREATE: {
+                if (payload.size() >= sizeof(protocol::VirtualDisplayCreate) && on_vdisplay_create_) {
+                    protocol::VirtualDisplayCreate req;
+                    std::memcpy(&req, payload.data(), sizeof(req));
+                    on_vdisplay_create_(client_id, req);
+                }
+                break;
+            }
+            case protocol::MessageType::VIRTUAL_DISPLAY_REMOVE: {
+                if (payload.size() >= sizeof(protocol::VirtualDisplayRemove) && on_vdisplay_remove_) {
+                    on_vdisplay_remove_(client_id, payload[0]);
                 }
                 break;
             }
@@ -730,9 +978,10 @@ private:
             }
             default:
                 std::cerr << "[Server] Unknown message type: 0x"
-                          << std::hex << (int)header.type << "\n";
+                          << std::hex << (int)header.type << std::dec << "\n";
                 break;
             }
+            if (rejected) break;
         }
 
         // Client disconnected
@@ -747,6 +996,121 @@ private:
 
         std::cout << "[Server] Client " << client_id << " disconnected\n";
         if (on_disconnected_) on_disconnected_(client_id);
+    }
+
+    /// One sent frame for the client's rate control; once a second decide.
+    /// Caller holds clients_mutex_.
+    /// ponytail: fixed thresholds, no delay-gradient estimator; a queue shows
+    /// once it is kMaxFrameDelay deep.
+    void rate_on_sent(ClientState& client, std::chrono::steady_clock::time_point now) {
+        using namespace std::chrono_literals;
+        auto& r = client.rate;
+        if (r.window_start.time_since_epoch().count() == 0) r.window_start = r.last_cut = now;
+        ++r.sent;
+        // Sending, and no ACK for 1.5 s (an idle screen still sends one
+        // frame a second): the link or the client has stalled. Clients that
+        // never ACK (older ones, the web bridge) are left alone.
+        if (r.last_ack.time_since_epoch().count() && now - r.last_ack > 1500ms) r.stalled = true;
+        if (now - r.window_start < 1s) return;
+
+        // More than 1 frame in 20 lost costs an IDR request each, and each
+        // frame is more UDP chunks that can go missing the higher the rate.
+        const bool lossy = r.lost >= 2 && r.lost * 20 > r.sent;
+        const bool queued = r.stalled || r.worst_delay > kMaxFrameDelay;
+        if ((lossy || queued) && now - r.last_cut >= 1s) {
+            r.scale = std::max(kMinRateScale, r.scale * 0.7f);
+            r.last_cut = now;
+            std::cout << "[Server] Client " << client.id << " link congested ("
+                      << r.lost << "/" << r.sent << " frames lost, "
+                      << (r.stalled ? std::string("no ACKs")
+                                    : std::to_string(r.worst_delay.count()) + " ms to ACK")
+                      << "): video bitrate down to "
+                      << static_cast<int>(r.scale * 100 + 0.5f) << "%\n";
+        } else if (!lossy && !queued && r.sent >= 5 && r.scale < 1.0f && now - r.last_cut >= 4s) {
+            r.scale = std::min(1.0f, r.scale * 1.1f + 0.02f);  // floor to full: ~20 s
+            if (r.scale == 1.0f)
+                std::cout << "[Server] Client " << client.id << " link clean: full video bitrate\n";
+        }
+        r.window_start = now;
+        r.sent = r.lost = 0;
+        r.worst_delay = 0ms;
+        r.stalled = false;
+    }
+
+    /// 0 when a HELLO carrying `pin` from `peer` may proceed, else the
+    /// REJECT_* reason. 127.0.0.1 is trusted: it is a process on this PC or a
+    /// headset on the USB cable (`adb reverse`, which the headset authorised).
+    /// Five wrong PINs from one address lock it out for a minute, and every
+    /// wrong answer costs half a second, so the 900 000 PINs can't be walked.
+    uint8_t check_pin(struct in_addr peer, uint32_t pin) {
+        const uint32_t want = pin_;
+        if (want == 0 || peer.s_addr == htonl(INADDR_LOOPBACK)) return 0;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(auth_mutex_);
+            auto& st = auth_failures_[peer.s_addr];
+            if (now < st.locked_until) return protocol::REJECT_LOCKED_OUT;
+            if (pin == want) { st.failures = 0; return 0; }
+            if (pin == 0) return protocol::REJECT_PIN_REQUIRED;
+            if (++st.failures >= 5) {
+                st.failures = 0;
+                st.locked_until = now + std::chrono::seconds(60);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        return protocol::REJECT_WRONG_PIN;
+    }
+
+    protocol::HelloAck make_ack() const {
+        protocol::HelloAck ack{};
+        ack.protocol_version = protocol::PROTOCOL_VERSION;
+        ack.udp_port = config_.udp_port;
+        ack.monitor_count = monitor_count_;
+        ack.flags = host_flags_;
+        std::strncpy(ack.host_name, host_name_.c_str(), sizeof(ack.host_name) - 1);
+        return ack;
+    }
+
+    /// Write one HELLO_REJECT straight to a socket (no client entry needed).
+    static void send_reject(SocketType sock, uint8_t reason) {
+        protocol::ControlHeader header{static_cast<uint8_t>(protocol::MessageType::HELLO_REJECT), 1};
+        uint8_t msg[sizeof(header) + 1];
+        std::memcpy(msg, &header, sizeof(header));
+        msg[sizeof(header)] = reason;
+        send_tcp(sock, msg, sizeof(msg));
+    }
+
+    /// Answer LAN discovery broadcasts until stop(). Polls like the accept
+    /// loop so stop() is noticed within 200 ms.
+    void discovery_loop() {
+        while (running_) {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(discovery_socket_, &readable);
+            struct timeval tv{0, 200000};
+            if (select(static_cast<int>(discovery_socket_) + 1, &readable,
+                       nullptr, nullptr, &tv) <= 0) continue;
+
+            protocol::DiscoveryRequest req{};
+            struct sockaddr_in from{};
+            socklen_t from_len = sizeof(from);
+            const int n = recvfrom(discovery_socket_, reinterpret_cast<char*>(&req), sizeof(req), 0,
+                                   reinterpret_cast<struct sockaddr*>(&from), &from_len);
+            if (n < static_cast<int>(sizeof(req)) ||
+                req.magic != protocol::DISCOVERY_REQUEST_MAGIC) continue;
+
+            protocol::DiscoveryReply reply{};
+            reply.magic            = protocol::DISCOVERY_REPLY_MAGIC;
+            reply.protocol_version = protocol::PROTOCOL_VERSION;
+            reply.tcp_port         = config_.tcp_port;
+            reply.monitor_count    = monitor_count_;
+            reply.flags            = (pin_ ? protocol::DISCOVERY_FLAG_PIN : 0) |
+                                     ((host_flags_ & protocol::HOST_FLAG_VIEW_ONLY)
+                                          ? protocol::DISCOVERY_FLAG_VIEW_ONLY : 0);
+            std::strncpy(reply.host_name, host_name_.c_str(), sizeof(reply.host_name) - 1);
+            sendto(discovery_socket_, reinterpret_cast<const char*>(&reply), sizeof(reply), 0,
+                   reinterpret_cast<struct sockaddr*>(&from), from_len);
+        }
     }
 
     /// Receive exactly `size` bytes from a TCP socket.
@@ -799,13 +1163,33 @@ private:
     }
 
     static void set_send_timeout(SocketType sock, int seconds) {
+        set_timeout(sock, SO_SNDTIMEO, seconds);
+    }
+
+    /// 0 = block forever.
+    static void set_recv_timeout(SocketType sock, int seconds) {
+        set_timeout(sock, SO_RCVTIMEO, seconds);
+    }
+
+    static void set_timeout(SocketType sock, int option, int seconds) {
 #ifdef _WIN32
         DWORD ms = static_cast<DWORD>(seconds) * 1000;
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+        setsockopt(sock, SOL_SOCKET, option,
                    reinterpret_cast<const char*>(&ms), sizeof(ms));
 #else
         struct timeval tv{seconds, 0};
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, option, &tv, sizeof(tv));
+#endif
+    }
+
+    /// Keep a socket out of child processes: an adb daemon that
+    /// `adb devices` starts (usb/adb_reverse.cpp) would otherwise hold the
+    /// port open after the host exits.
+    static void no_inherit(SocketType sock) {
+#ifdef _WIN32
+        SetHandleInformation(reinterpret_cast<HANDLE>(sock), HANDLE_FLAG_INHERIT, 0);
+#else
+        fcntl(sock, F_SETFD, FD_CLOEXEC);
 #endif
     }
 
@@ -852,8 +1236,21 @@ private:
 
     SocketType tcp_socket_ = INVALID_SOCK;
     SocketType udp_socket_ = INVALID_SOCK;
+    SocketType discovery_socket_ = INVALID_SOCK;
+    std::string host_name_;
 
     std::thread tcp_thread_;
+    std::thread discovery_thread_;
+
+    struct AuthState {
+        int failures = 0;
+        std::chrono::steady_clock::time_point locked_until{};
+    };
+    std::mutex auth_mutex_;
+    std::unordered_map<uint32_t, AuthState> auth_failures_;  ///< by peer IPv4
+    std::set<uint32_t> kicked_;  ///< peers disconnected from the panel (auth_mutex_)
+    std::atomic<uint32_t> pin_{0};
+    std::atomic<uint8_t>  host_flags_{0};
 
     // Per-client handler threads, joined in stop(). finished_threads_ marks the
     // ones that have run to completion so the accept loop can reap them.
@@ -872,10 +1269,41 @@ private:
     InputMouseCallback           on_input_mouse_;
     InputKeyboardCallback        on_input_keyboard_;
     RequestKeyframeCallback      on_request_keyframe_;
+    VirtualDisplayCreateCallback on_vdisplay_create_;
+    VirtualDisplayRemoveCallback on_vdisplay_remove_;
+    PinRequestedCallback on_pin_requested_;
+    std::atomic<uint8_t>         monitor_count_{0};
 };
 
 std::unique_ptr<INetworkServer> create_network_server() {
     return std::make_unique<NetworkServer>();
+}
+
+std::string local_host_name() {
+    char name[256] = {};
+    if (gethostname(name, sizeof(name) - 1) != 0 || !name[0]) return "Immersive-2 host";
+    return name;
+}
+
+std::string primary_ipv4() {
+    // connect() on a UDP socket sends nothing; it only picks the route, and
+    // getsockname() then reports the source address of that route.
+    SocketType s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCK) return "";
+    struct sockaddr_in to = {};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(53);
+    inet_pton(AF_INET, "192.0.2.1", &to.sin_addr);  // TEST-NET-1, never answered
+    std::string ip;
+    struct sockaddr_in me = {};
+    socklen_t len = sizeof(me);
+    if (connect(s, reinterpret_cast<struct sockaddr*>(&to), sizeof(to)) == 0 &&
+        getsockname(s, reinterpret_cast<struct sockaddr*>(&me), &len) == 0) {
+        char buf[INET_ADDRSTRLEN] = {};
+        if (inet_ntop(AF_INET, &me.sin_addr, buf, sizeof(buf))) ip = buf;
+    }
+    closesocket(s);
+    return ip == "0.0.0.0" ? "" : ip;
 }
 
 }  // namespace immersive

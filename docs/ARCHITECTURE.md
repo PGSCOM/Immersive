@@ -12,7 +12,11 @@ The host application runs on your Windows PC and:
 1. **Discovers monitors** — enumerates physical and virtual displays
 2. **Captures screen content** — uses DXGI Desktop Duplication API
 3. **Encodes video** — hardware-accelerated H.264/H.265 encoding
-4. **Streams over network** — sends encoded video via UDP
+4. **Streams over network** — sends encoded video via UDP, adapting the
+   bitrate (and MJPEG's frame rate) to the link from the client's frame
+   ACKs, below the client's settings; a CPU encoder is paced to what it
+   sustains. Bitrate / quality / fps changes apply to the running encoder
+   without restarting the stream (see STREAM_CONFIG in PROTOCOL.md)
 5. **Receives input** — processes mouse/keyboard events from VR
 
 #### Component Architecture
@@ -30,30 +34,71 @@ The host application runs on your Windows PC and:
 └──────────┴──────────┴───────────┴───────────────┘
 ```
 
+#### Tray icon and settings window (`host/src/ui/`)
+
+The host's persistent UI, off with `--no-ui`. It never runs on a streaming
+thread:
+
+- **Settings** (`host_ui.h`): the switches the panel changes live, as atomics
+  that `main.cpp` reads where it used to read its CLI variables (view-only,
+  default codec and JPEG quality, sound, USB, PIN). Loaded from `host.conf`,
+  overridden by CLI flags; the panel writes back only the key it changed.
+- **Panel** (`panel.cpp` + `panel.html`): one thread serving a small HTTP
+  API on 127.0.0.1 only. Access needs the per-run token (in the URL the host
+  opens, then an HttpOnly SameSite=Strict cookie); the Host header must name
+  the panel (DNS rebinding) and requests carrying another Origin are refused;
+  POSTs also need an `X-Im2-Panel` header. It reads state through `Hooks`
+  lent by `main.cpp` (monitors, streams with frame/byte counters, virtual
+  screen removal) and changes the server live through `INetworkServer`
+  (`set_pin`, `set_host_flags`, which re-sends HELLO_ACK, `clients`,
+  `disconnect_client`).
+- **Tray** (`tray_win.cpp` Shell_NotifyIcon on its own thread,
+  `tray_mac.mm` NSStatusItem pumped from the main loop through
+  `HostUi::pump()`, `tray_linux.cpp` a StatusNotifierItem + dbusmenu on a
+  private session-bus connection): status line, PIN, Open, Quit. Without a
+  tray the panel opens at startup; `panel-url` in the settings folder lets a
+  second launch open the running host's window.
+- On a Wayland session the panel shows when the desktop refused remote
+  control (`portal::input_denied()`) and "Ask again" forgets the restore
+  token and restarts the portal session (`portal::ask_again()`).
+
 ### VR Client (Godot / OpenXR)
 
-The client runs on VR headsets and:
+The client runs on VR headsets (and on a PC for testing) and:
 
-1. **Initializes XR** — sets up OpenXR stereo rendering
-2. **Connects to host** — TCP handshake + UDP video reception
-3. **Decodes video** — MediaCodec H.264/H.265 decoding
-4. **Renders screens** — floating 3D panels in VR space
-5. **Sends input** — controller pointer and virtual keyboard events
+1. **Finds the PC** — `host_discovery.gd` broadcasts on UDP 19800 and lists
+   the hosts that answer; `main.gd` reconnects to the last PC on launch and
+   follows it if its address changes.
+2. **Pairs and connects** — TCP handshake with the host's PIN (asked once,
+   remembered per PC), UDP video/audio (or everything over TCP on USB).
+3. **Decodes video** — MediaCodec H.264/HEVC/AV1 straight into an
+   ExternalTexture on Android; MJPEG on a worker thread elsewhere.
+4. **Places the screens** — `screen_panel.gd` builds each screen as a flat
+   quad or a real cylinder section (curvature), arranged on an arc around the
+   head; positions persist per monitor and survive stream restarts.
+5. **Takes input** — both controllers (`vr_input.gd`), bare hands
+   (`hand_input.gd`), the VR keyboard (`virtual_keyboard.gd`) and, on the
+   headset, a Bluetooth keyboard (`key_map.gd`).
 
 #### Component Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   main.gd                        │
-│           (scene controller)                     │
-├──────────┬──────────┬────────────┬──────────────┤
-│ Network  │ Video    │ Screen     │ VR Input     │
-│ Client   │ Decoder  │ Panel      │              │
-│          │          │            │              │
-│ TCP/UDP  │ MediaCdc │ PlaneMesh  │ XRController │
-│ protocol │ H264/265 │ Shader     │ Raycast      │
-└──────────┴──────────┴────────────┴──────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                           main.gd                                │
+│  connection · pairing · selection · arrangement · persistence    │
+├───────────┬──────────┬─────────────┬─────────────┬──────────────┤
+│ Network   │ Video    │ Screen      │ Input       │ UI + space   │
+│ Client    │ Decoders │ Panel       │             │              │
+│ + LAN     │ MediaCdc │ flat/curved │ vr_input    │ ui_overlay   │
+│ discovery │ MJPEG    │ LaserDrag   │ hand_input  │ keyboard     │
+│           │          │ shader      │ key_map     │ world (sky)  │
+└───────────┴──────────┴─────────────┴─────────────┴──────────────┘
 ```
+
+`ui_theme.gd` holds the colours and type shared by the menu and keyboard (the
+same tokens as the web page). `laser_drag.gd` is how screens, menu and
+keyboard are moved: the grabbed point stays on the pointer ray and the object
+keeps facing the head.
 
 ## Data Flow
 

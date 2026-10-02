@@ -118,6 +118,12 @@ public:
         // No-op: every MJPEG frame is already independently decodable.
     }
 
+    bool reconfigure(const EncoderConfig& config) override {
+        config_  = config;
+        quality_ = static_cast<int>(std::max(10u, std::min(95u, config_.jpeg_quality)));
+        return true;
+    }
+
     EncoderBackend backend() const override {
         return EncoderBackend::SOFTWARE;
     }

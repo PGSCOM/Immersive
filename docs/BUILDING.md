@@ -58,7 +58,9 @@ cmake --build build
 
 ```bash
 # Debian/Ubuntu. Every group is optional; the host builds with whatever is found
-# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=… FFmpeg=…").
+# (cmake prints "Linux backends: X11=… Wayland-portal=… PulseAudio=… FFmpeg=… Tray=…").
+# libdbus-1-dev also gives the tray icon (StatusNotifierItem); without it the
+# settings window opens at startup instead.
 sudo apt install build-essential cmake pkg-config \
   libx11-dev libxext-dev libxrandr-dev libxtst-dev libxfixes-dev \
   libdbus-1-dev libpipewire-0.3-dev \
@@ -86,6 +88,10 @@ cmake --build build
   file to choose again. Compositors whose portal lacks RemoteDesktop (e.g.
   wlroots) stream fine but ignore VR input.
 - **X11**: MIT-SHM capture per RandR monitor, XTEST input. No dialog.
+- **Virtual screens** (added from the headset): on X11 an extra RandR 1.5
+  monitor (the X screen grows to the right to hold it); on GNOME Wayland a
+  Mutter virtual monitor (`org.gnome.Mutter.ScreenCast` RecordVirtual, no
+  dialog). Other Wayland compositors answer that they can't.
 - **Audio**: the monitor of the default output, through PulseAudio or
   PipeWire (pipewire-pulse).
 - **Video**: H.264 / HEVC / AV1 through FFmpeg — NVENC first, then VAAPI, then
@@ -114,11 +120,28 @@ the terminal (or the binary) that launches the host:
   granting it.
 - **Accessibility** — without it the VR mouse/keyboard does nothing.
 
+Virtual screens added from the headset use CoreGraphics' private
+`CGVirtualDisplay` (macOS 11+, the API behind DeskPad and BetterDisplay). It is
+looked up at run time: a macOS without it just offers none.
+
 ### Protocol testing without a desktop
 
-`./build/immersive2_host --stub` serves three fake solid-grey monitors and only
-logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
-use it.
+`./build/immersive2_host --stub` serves three fake solid-grey monitors (plus
+fake virtual screens on request) and only logs input, on any OS. `host/tools/smoke_client.py` and `host/tools/e2e_test.py`
+use it, with `--no-ui` so no tray icon or window appears. `--stub` also
+ignores `host.conf`, so saved settings never change a test run.
+
+### Tray icon and settings window
+
+The host shows a tray / menu-bar icon (`src/ui/tray_win.cpp`, `tray_mac.mm`,
+`tray_linux.cpp`) and serves its settings page (`src/ui/panel.html`, compiled
+into the binary with the Grotesk font at build time) on `127.0.0.1:19803`.
+On GNOME the icon needs the *AppIndicator and KStatusNotifierItem* extension
+(Ubuntu ships it); without a tray the window opens at startup. The page is
+opened as an app window: Edge on Windows, Chrome/Chromium on Linux when
+installed, else the default browser. `host/tools/panel_test.py` tests the
+page's security, every setting and, on Linux with `dbus-run-session` and
+python3-dbus/python3-gi, the tray on a private session bus.
 
 ### CMake Options
 
@@ -229,11 +252,15 @@ Open:
    ```powershell
    .\host\build\Release\immersive2_host.exe
    ```
-3. Launch the VR client on your headset
-4. Press **B/Y** (VR) or **O** (desktop) to open the overlay
-5. Enter the host PC's local IP address
-6. Click **Connect**
-7. Select a monitor from the list
+   It prints the PC's name, its address and a six-digit **PIN**.
+3. Launch the VR client on your headset. The menu opens on **Connect** and
+   lists the PCs it finds on the network (press **B/Y** in VR or **O** on
+   desktop to reopen it).
+4. Press **Connect** next to your PC (or type its address on the keypad).
+5. The first time, type the PIN the PC shows (a desktop notification, or a
+   message box on Windows, pops up when the headset asks; it is also printed in
+   the host window). The headset remembers it and reconnects to that PC by itself on the next launch.
+6. Pick the monitors to show on the **Screens** tab.
 
 ### Local Testing (Host + Client on Same Machine)
 
@@ -245,21 +272,25 @@ Open:
 godot --path client\project\
 ```
 
-Enter `127.0.0.1` as the host IP in the overlay.
+The host shows up in the menu's list (as loopback, no PIN needed); or type
+`127.0.0.1`.
 
 ### Firewall
 
 The host needs the following ports open for inbound connections:
 
-| Port  | Protocol | Purpose            |
-|-------|----------|--------------------|
-| 19800 | TCP      | Control channel    |
-| 19801 | UDP      | Video stream       |
+| Port  | Protocol | Purpose                         |
+|-------|----------|---------------------------------|
+| 19800 | TCP      | Control channel                 |
+| 19800 | UDP      | LAN discovery (headset finds the PC) |
+
+Video (UDP 19801) and audio (UDP 19802) flow from the PC to the headset, so
+only the headset receives on those ports.
 
 On Windows:
 ```powershell
 netsh advfirewall firewall add rule name="Immersive2 TCP" protocol=TCP dir=in localport=19800 action=allow
-netsh advfirewall firewall add rule name="Immersive2 UDP" protocol=UDP dir=in localport=19801 action=allow
+netsh advfirewall firewall add rule name="Immersive2 discovery" protocol=UDP dir=in localport=19800 action=allow
 ```
 
 ---
@@ -301,6 +332,22 @@ Artifacts are uploaded as:
 - Check that the host is running and the firewall ports are open
 - Verify you're on the same Wi-Fi network (5 GHz recommended)
 - Check the latency indicator — high latency (> 100 ms) may cause dropped frames
+
+### USB: the headset stays on Wi-Fi
+The host's console says what it sees on the cable, once per change:
+- `adb not found`: install Android platform-tools. The host looks on PATH, in
+  `$ANDROID_HOME`/`$ANDROID_SDK_ROOT`/platform-tools, the Android Studio SDK
+  (`~/Android/Sdk`, `~/Library/Android/sdk`, `%LOCALAPPDATA%\Android\Sdk`),
+  `~/.local/bin` and Homebrew's folders.
+- `has not allowed USB debugging`: put the headset on and accept the prompt
+  (tick "Always allow from this computer").
+- `adb may not use <serial>` (Linux): add a udev rule so your user may open the
+  device, e.g. `SUBSYSTEM=="usb", ATTR{idVendor}=="2d40", MODE="0660", GROUP="plugdev"`
+  for Pico (Meta Quest: `2833`) in `/etc/udev/rules.d/51-android.rules`, then replug.
+- `is on the cable and uses it by itself`: the tunnel is up; the app moves to it
+  within a couple of seconds (its menu says "over USB").
+
+`python3 host/tools/usb_test.py` checks the host side against a fake adb.
 
 ### Client: Export fails (missing templates)
 - Install export templates via **Editor → Manage Export Templates** in Godot

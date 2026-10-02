@@ -36,6 +36,15 @@ int open_pipewire_remote(uint64_t gen);
 /// ensure_session() starts over (used when its streams keep failing).
 void invalidate(uint64_t gen);
 
+/// A session is live but the desktop did not grant pointer/keyboard, so
+/// headsets can watch but not control this PC. Lock-free.
+bool input_denied();
+
+/// Forget the stored restore token, close the session and start a new one
+/// in the background, so the dialog asks for remote control again now,
+/// while the user is at the PC (settings panel "Ask again").
+void ask_again();
+
 /// Called by the capture once the buffer size of a node is known: pointer
 /// coordinates are sent in that space (see portal_input.cpp).
 void set_frame_size(uint32_t node_id, uint32_t w, uint32_t h);
@@ -44,7 +53,7 @@ void set_frame_size(uint32_t node_id, uint32_t w, uint32_t h);
 // with input or the connection is busy (e.g. while the dialog is open).
 // `fx`/`fy` are the position within stream `index` as a 0..1 fraction.
 void pointer_motion(uint8_t index, double fx, double fy);
-void pointer_button(int32_t evdev_button, bool pressed);
+bool pointer_button(int32_t evdev_button, bool pressed);  ///< false: not sent
 void pointer_axis_discrete(uint32_t axis, int32_t steps);
 void keyboard_keysym(int32_t keysym, bool pressed);
 

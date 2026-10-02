@@ -1,11 +1,17 @@
 ## Virtual screen panel for displaying streamed desktop content.
-## Attached to a MeshInstance3D (PlaneMesh) in the VR scene.
+## A MeshInstance3D whose mesh it builds itself: a flat quad, or a section of
+## a vertical cylinder when curved, so every column of the desktop sits at the
+## same distance from the axis (a real curved monitor, not a texture warp).
 ##
 ## Features:
 ##   - Texture updated each received video frame (MJPEG or raw RGBA)
-##   - Repositionable with controller grip (drag and drop in 3D space)
-##   - Latency indicator overlay in the corner
-##   - Panel size updates to match monitor aspect ratio
+##   - Laser drag (LaserDrag): locked to the pointer (or facing the head);
+##     push/pull while held, its group follows
+##   - A grab bar under the panel (GrabBar): point at it and press to move it
+##   - Corner handles (ResizeHandle): drag one to resize, aspect kept
+##   - landing_beside(): where a screen of a given size sits flush against one
+##     of this panel's four sides (main.gd's snap preview)
+##   - Panel size follows the monitor aspect ratio
 
 extends MeshInstance3D
 
@@ -15,8 +21,16 @@ extends MeshInstance3D
 
 const SCREEN_SHADER_PATH := "res://shaders/screen.gdshader"
 const SCREEN_EXTERNAL_SHADER_PATH := "res://shaders/screen_external.gdshader"
-const DEFAULT_CURVATURE := 0.18
-const DEFAULT_FOVEATION_STRENGTH := 0.55
+const LAYER_EXTERNAL_SHADER_PATH := "res://shaders/screen_layer_external.gdshader"
+## A layer's swapchain is as big as the stream, up to this width.
+const LAYER_MAX_WIDTH := 3840
+const DEFAULT_CURVATURE := 0.5
+## Arc covered by the panel at curvature 1.0 (radians, ~100°).
+const MAX_ARC := 1.75
+const CURVE_COLUMNS := 48
+const MIN_WIDTH := 0.4
+const MAX_WIDTH := 4.0
+enum Side { LEFT, RIGHT, TOP, BOTTOM }
 
 ## Texture-orientation compensation for the zero-copy ExternalTexture (OES) path.
 ## The MediaCodec→SurfaceTexture→OES frame is vertically mirrored relative to
@@ -41,7 +55,8 @@ var _texture_has_mipmaps: bool = false
 var screen_width: int  = 1920
 var screen_height: int = 1080
 
-## Panel dimensions in meters (16:9 default).
+## Panel dimensions in meters (16:9 default). Width is the arc length when
+## curved, so resizing and curving are independent.
 var panel_width: float  = 1.6
 var panel_height: float = 0.9
 
@@ -51,40 +66,51 @@ var is_active: bool = false
 ## Whether this panel is in zero-copy ExternalTexture mode (Android HW decoder).
 var _using_external_texture: bool = false
 
-## Current latency (ms) displayed in corner.
-var _latency_ms: float = 0.0
-
-## Curved-screen mode state.
+## Curved-screen state. Effective curvature 0 = flat, 1 = MAX_ARC.
 var _curved_mode: bool = false
 var _curvature_amount: float = DEFAULT_CURVATURE
 
-## Eye-tracked foveated rendering state.
-var _foveation_enabled: bool = false
-var _foveation_strength: float = DEFAULT_FOVEATION_STRENGTH
-var _foveation_focus_uv: Vector2 = Vector2(0.5, 0.5)
+## Set while a pointer holds the panel (see LaserDrag).
+var _drag: LaserDrag = null
 
-# Drag state
-var _is_dragging: bool         = false
-var _drag_controller: Node3D   = null
-var _drag_offset: Transform3D
-
-# Latency label overlay (billboard)
-var _latency_label: Label3D    = null
 var _placeholder_label: Label3D = null
+## The bar under the screen; main.gd::pick() tests it.
+var grab_bar: GrabBar = null
+## The four corner handles; main.gd::pick() probes them.
+var resize_handles: Array[ResizeHandle] = []
+
+# OpenXR compositor layer (see set_compositor_layer()).
+var _layer_wanted: bool = false
+var _layer_origin: Node3D = null
+var _layer: Node3D = null            ## OpenXRCompositionLayerQuad / Cylinder
+var _layer_viewport: SubViewport = null
+var _layer_content: Control = null   ## TextureRect, or ColorRect + OES shader
+var _ext_tex: ExternalTexture = null
 
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 
 func _ready() -> void:
+	_rebuild_mesh()
 	_create_placeholder_texture()
-	_create_latency_label()
+	grab_bar = GrabBar.new()
+	add_child(grab_bar)
+	for c in [Vector2(-1, 1), Vector2(1, 1), Vector2(-1, -1), Vector2(1, -1)]:
+		var handle := ResizeHandle.new(c)
+		add_child(handle)
+		resize_handles.append(handle)
+	_place_decorations()
 	set_process(true)
 
-func _process(_delta: float) -> void:
-	if _is_dragging and is_instance_valid(_drag_controller):
-		_follow_controller()
-	_update_latency_label()
+func _exit_tree() -> void:
+	_free_layer()  # the layer lives under XROrigin3D, not under this panel
+
+func _process(delta: float) -> void:
+	if _drag:
+		_drag.update(delta)
+	if _layer:
+		_sync_layer()
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -97,15 +123,8 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 		return
 	screen_width  = width
 	screen_height = height
-
-	# Update panel aspect ratio
-	var aspect: float = float(width) / float(height)
-	panel_height = panel_width / aspect
-
-	# Update the mesh size
-	if mesh is PlaneMesh:
-		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
-	_update_latency_label_anchor()
+	panel_height = panel_width / (float(width) / float(height))
+	_rebuild_mesh()
 
 	# A stream (re)starting means a new decoder, so any ExternalTexture bound
 	# from the previous one is stale. Drop back to the CPU-texture material and
@@ -113,20 +132,22 @@ func set_resolution(width: int, height: int, codec: int = 2) -> void:
 	# otherwise the panel would keep sampling a dead OES texture and freeze.
 	if _using_external_texture:
 		_using_external_texture = false
+		_ext_tex = null
 		material_override = null
 
 	# Create a properly-sized texture
 	screen_image = Image.create(width, height, false, Image.FORMAT_RGBA8)
-	screen_image.fill(Color(0.1, 0.1, 0.1, 1.0))
+	screen_image.fill(Color(0.06, 0.06, 0.055, 1.0))
 	screen_texture = ImageTexture.create_from_image(screen_image)
 	_texture_has_mipmaps = screen_image.has_mipmaps()
 	_apply_texture()
+	_rebuild_layer()  # new size, and back to the CPU texture
 
 	is_active = true
 	if _placeholder_label:
 		_placeholder_label.hide()
-	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m" %
-		[width, height, panel_width, panel_height])
+	print("[ScreenPanel] Resolution set: %dx%d, panel: %.2f x %.2f m (codec %d)" %
+		[width, height, panel_width, panel_height, codec])
 
 ## Returns true when the panel is using the zero-copy ExternalTexture path.
 func is_using_external_texture() -> bool:
@@ -137,11 +158,8 @@ func is_using_external_texture() -> bool:
 func set_external_texture(ext_tex: ExternalTexture, width: int, height: int) -> void:
 	screen_width = width
 	screen_height = height
-	var aspect := float(width) / float(height)
-	panel_height = panel_width / aspect
-	if mesh is PlaneMesh:
-		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
-	_update_latency_label_anchor()
+	panel_height = panel_width / (float(width) / float(height))
+	_rebuild_mesh()
 
 	var shader := load(SCREEN_EXTERNAL_SHADER_PATH) as Shader
 	var mat := ShaderMaterial.new()
@@ -152,33 +170,146 @@ func set_external_texture(ext_tex: ExternalTexture, width: int, height: int) -> 
 	mat.set_shader_parameter("tex_transform", Projection.IDENTITY)
 	mat.set_shader_parameter("flip_x", 1 if DISPLAY_FLIP_X else 0)
 	mat.set_shader_parameter("flip_y", 1 if DISPLAY_FLIP_Y else 0)
-	mat.set_shader_parameter("curvature", _curvature_amount if _curved_mode else 0.0)
-	mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
-	mat.set_shader_parameter("foveation_strength", _foveation_strength)
-	mat.set_shader_parameter("gaze_uv", _foveation_focus_uv)
 	material_override = mat
+	_apply_panel_size_to_material()
 
 	_using_external_texture = true
+	_ext_tex = ext_tex
+	_rebuild_layer()
 	is_active = true
 	if _placeholder_label:
 		_placeholder_label.hide()
 	print("[ScreenPanel] External texture mode: %dx%d" % [width, height])
 
-## Enable/disable curved mode and set curvature amount.
+## Enable/disable curved mode and set curvature amount (0..1).
 func set_curvature(enabled: bool, amount: float) -> void:
+	var before := _arc()
 	_curved_mode = enabled
-	_curvature_amount = clamp(amount, 0.0, 0.5)
-	_apply_curvature_to_material()
+	_curvature_amount = clamp(amount, 0.0, 1.0)
+	if not is_equal_approx(before, _arc()):
+		_rebuild_mesh()
+		# Flat and curved screens are different kinds of layer.
+		if _layer and (before >= 0.001) != (_arc() >= 0.001):
+			_rebuild_layer()
 
-func set_foveation(enabled: bool, strength: float) -> void:
-	_foveation_enabled = enabled
-	_foveation_strength = clamp(strength, 0.0, 1.0)
-	_apply_foveation_to_material()
+## Show the screen as an OpenXR compositor layer parented to `origin` (the
+## XROrigin3D): the runtime samples the picture once, straight through the
+## lens correction, instead of after Godot has resampled it into the eye
+## buffer — text comes out noticeably sharper. A hole is punched in Godot's
+## own rendering where the layer is, so the menu, keyboard and pointer still
+## draw in front of it. The mesh keeps serving ray hits and the handle.
+func set_compositor_layer(enabled: bool, origin: Node3D) -> void:
+	_layer_wanted = enabled and origin != null
+	_layer_origin = origin
+	_rebuild_layer()
 
-func set_foveation_focus_uv(uv: Vector2) -> void:
-	_foveation_focus_uv = Vector2(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0))
-	if material_override is ShaderMaterial:
-		(material_override as ShaderMaterial).set_shader_parameter("gaze_uv", _foveation_focus_uv)
+func has_compositor_layer() -> bool:
+	return _layer != null
+
+## The canvas material feeding the layer from the hardware decoder, so
+## main.gd can push the SurfaceTexture transform to it too (or null).
+func get_layer_material() -> ShaderMaterial:
+	return _layer_content.material as ShaderMaterial if _layer_content else null
+
+func _free_layer() -> void:
+	if is_instance_valid(_layer):
+		_layer.queue_free()
+	if is_instance_valid(_layer_viewport):
+		_layer_viewport.queue_free()
+	_layer = null
+	_layer_viewport = null
+	_layer_content = null
+	layers = 1  # the mesh draws the screen again
+
+func _rebuild_layer() -> void:
+	_free_layer()
+	if not _layer_wanted or not is_inside_tree():
+		return
+	var curved := _arc() >= 0.001
+	var cls := "OpenXRCompositionLayerCylinder" if curved else "OpenXRCompositionLayerQuad"
+	if not ClassDB.class_exists(cls):
+		return
+
+	var w := mini(screen_width, LAYER_MAX_WIDTH)
+	var h := maxi(1, int(round(float(screen_height) * w / screen_width)))
+	_layer_viewport = SubViewport.new()
+	_layer_viewport.size = Vector2i(w, h)
+	_layer_viewport.transparent_bg = false
+	_layer_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(_layer_viewport)
+	if _using_external_texture and _ext_tex:
+		var rect := ColorRect.new()
+		var mat := ShaderMaterial.new()
+		mat.shader = load(LAYER_EXTERNAL_SHADER_PATH)
+		mat.set_shader_parameter("screen_external", _ext_tex)
+		mat.set_shader_parameter("tex_transform", Projection.IDENTITY)
+		mat.set_shader_parameter("flip_x", 1 if DISPLAY_FLIP_X else 0)
+		mat.set_shader_parameter("flip_y", 1 if DISPLAY_FLIP_Y else 0)
+		rect.material = mat
+		_layer_content = rect
+	else:
+		var tex_rect := TextureRect.new()
+		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_rect.stretch_mode = TextureRect.STRETCH_SCALE
+		tex_rect.texture = screen_texture
+		_layer_content = tex_rect
+	_layer_content.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_layer_viewport.add_child(_layer_content)
+
+	_layer = ClassDB.instantiate(cls)
+	_layer.name = "ScreenLayer%d" % get_instance_id()
+	_layer.set("layer_viewport", _layer_viewport)
+	_layer.set("enable_hole_punch", true)
+	_layer.set("sort_order", -1)  # behind Godot's layer, seen through the hole
+	_update_layer_geometry()
+	_layer_origin.add_child(_layer)
+	_sync_layer()
+	layers = 0  # the layer shows the picture; the mesh stays for ray hits
+
+func _update_layer_geometry() -> void:
+	if not _layer:
+		return
+	if _layer.get_class() == "OpenXRCompositionLayerCylinder":
+		if _arc() < 0.001:
+			return  # turning flat: set_curvature() swaps in a quad layer next
+		_layer.set("radius", _radius())
+		_layer.set("central_angle", _arc())
+		_layer.set("aspect_ratio", panel_width / panel_height)
+		_layer.set("fallback_segments", CURVE_COLUMNS)
+	else:
+		_layer.set("quad_size", Vector2(panel_width, panel_height))
+
+## The cylinder layer sits on its axis, looking at its arc along -Z: that is
+## the panel's own frame moved forward by the radius.
+func _sync_layer() -> void:
+	var offset := Vector3(0.0, 0.0, _radius()) if _arc() >= 0.001 else Vector3.ZERO
+	_layer.global_transform = global_transform * Transform3D(Basis(), offset)
+
+## Where a screen `w` x `h` metres sits flush beside this one, `gap` apart, on
+## `side`: world transform, same orientation (a curved screen continues its
+## arc on the left and right; above and below it stacks straight).
+func landing_beside(side: Side, w: float, h: float, gap: float) -> Transform3D:
+	var local := Transform3D.IDENTITY
+	if side == Side.TOP or side == Side.BOTTOM:
+		local.origin.y = (panel_height / 2.0 + gap + h / 2.0) * (1.0 if side == Side.TOP else -1.0)
+	else:
+		var along := (panel_width / 2.0 + gap + w / 2.0) * (1.0 if side == Side.RIGHT else -1.0)
+		if _arc() < 0.001:
+			local.origin.x = along
+		else:
+			var phi := along / _radius()
+			local = Transform3D(Basis(Vector3.UP, -phi),
+				Vector3(_radius() * sin(phi), 0.0, _radius() * (1.0 - cos(phi))))
+	return global_transform * local
+
+## Arc angle in radians (0 = flat).
+func get_arc() -> float:
+	return _arc()
+
+## Called every frame a pointer rests on the panel: shows the grab bar.
+func mark_hovered() -> void:
+	if grab_bar:
+		grab_bar.mark_owner_hovered()
 
 ## Update the screen texture with new video frame data.
 ## frame_data may be:
@@ -264,18 +395,22 @@ func save_debug_png(path: String) -> bool:
 		return false
 	return screen_image.save_png(path) == OK
 
-## Scale the panel up/down using thumbstick.
-## Called from vr_input.gd when thumbstick Y is held while grip is pressed.
-func scale_panel(delta_scale: float) -> void:
-	panel_width = clamp(panel_width + delta_scale, 0.4, 4.0)
+## Grow/shrink the panel by `delta_width` metres (aspect kept).
+func scale_panel(delta_width: float) -> void:
+	set_panel_width(panel_width + delta_width)
+
+func set_panel_width(width: float) -> void:
+	panel_width = clamp(width, MIN_WIDTH, MAX_WIDTH)
 	panel_height = panel_width / (float(screen_width) / float(screen_height))
-	if mesh is PlaneMesh:
-		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
-	_update_latency_label_anchor()
+	_rebuild_mesh()
 
 ## Programmatically set the panel position in world space.
 func set_panel_position(pos: Vector3) -> void:
 	global_transform.origin = pos
+
+## Place the panel at `pos`, upright, its screen facing `look_from`.
+func place_facing(pos: Vector3, look_from: Vector3) -> void:
+	global_transform = Transform3D(LaserDrag.facing_basis(pos, look_from), pos)
 
 ## Serialize panel transform/size for workspace persistence.
 func get_layout_state() -> Dictionary:
@@ -306,87 +441,161 @@ func apply_layout_state(state: Dictionary) -> void:
 		var restored_basis := Basis(
 			Vector3(basis_data[0], basis_data[1], basis_data[2]),
 			Vector3(basis_data[3], basis_data[4], basis_data[5]),
-			Vector3(basis_data[6], basis_data[7], basis_data[8]))
+			Vector3(basis_data[6], basis_data[7], basis_data[8])).orthonormalized()
 		global_transform = Transform3D(
 			restored_basis,
 			Vector3(pos_data[0], pos_data[1], pos_data[2]))
 
-	var restored_width: float = state.get("panel_width", panel_width)
-	panel_width = clamp(restored_width, 0.4, 4.0)
-	panel_height = panel_width / (float(screen_width) / float(screen_height))
-	if mesh is PlaneMesh:
-		(mesh as PlaneMesh).size = Vector2(panel_width, panel_height)
-	_update_latency_label_anchor()
-
-## Update the displayed latency value.
-func set_latency(ms: float) -> void:
-	_latency_ms = ms
+	set_panel_width(float(state.get("panel_width", panel_width)))
 
 # ---------------------------------------------------------------------------
-# Grip-based dragging — called from vr_input.gd
+# Laser drag — called from vr_input.gd
 # ---------------------------------------------------------------------------
 
-## Begin dragging this panel with the given controller.
-func start_drag(controller: Node3D) -> void:
-	_is_dragging = true
-	_drag_controller = controller
-	# Record the panel's pose relative to the controller at grab time
-	_drag_offset = controller.global_transform.affine_inverse() * global_transform
+## Grab the panel with `pointer` (ray along its -Z), which hit it
+## `hit_distance` metres away. The rest of its group (main.gd) comes along.
+func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:
+	_drag = LaserDrag.new(self, pointer, hit_distance)
+	var main := get_node_or_null("/root/Main")
+	if main and main.has_method("drag_group_for"):
+		_drag.add_followers(main.drag_group_for(self))
 
 func stop_drag() -> void:
-	_is_dragging = false
-	_drag_controller = null
+	_drag = null
 
-func _follow_controller() -> void:
-	global_transform = _drag_controller.global_transform * _drag_offset
+func is_dragging() -> bool:
+	return _drag != null
+
+## While dragging: move the grabbed point along the ray (+ = away).
+func push_pull(delta_m: float) -> void:
+	if _drag:
+		_drag.push_pull(delta_m)
+
+func get_drag_distance() -> float:
+	return _drag.distance if _drag else 0.0
+
+# ---------------------------------------------------------------------------
+# Geometry: flat quad or cylinder section
+# ---------------------------------------------------------------------------
+
+## Arc angle actually in use (0 = flat).
+func _arc() -> float:
+	return (_curvature_amount if _curved_mode else 0.0) * MAX_ARC
+
+func _radius() -> float:
+	return panel_width / _arc()
+
+## Point on the screen surface for panel UV (u right, v down), local space.
+## The screen faces +Z; a curved one bends its sides towards the viewer.
+func local_point(u: float, v: float) -> Vector3:
+	var y := (0.5 - v) * panel_height
+	var arc := _arc()
+	if arc < 0.001:
+		return Vector3((u - 0.5) * panel_width, y, 0.0)
+	var r := _radius()
+	var phi := (u - 0.5) * arc
+	return Vector3(r * sin(phi), y, r * (1.0 - cos(phi)))
+
+func _rebuild_mesh() -> void:
+	var arc := _arc()
+	var columns := CURVE_COLUMNS if arc >= 0.001 else 1
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	for i in range(columns + 1):
+		var u := float(i) / columns
+		var phi := (u - 0.5) * arc
+		var n := Vector3(-sin(phi), 0.0, cos(phi))
+		for v in [0.0, 1.0]:
+			verts.append(local_point(u, v))
+			normals.append(n)
+			uvs.append(Vector2(u, v))
+	for i in range(columns):
+		var a := i * 2      # top-left
+		var b := a + 1      # bottom-left
+		var c := a + 2      # top-right
+		var d := a + 3      # bottom-right
+		indices.append_array([a, c, b, b, c, d])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh = am
+	_apply_panel_size_to_material()
+	_place_decorations()
+	_update_layer_geometry()
 
 # ---------------------------------------------------------------------------
 # UV / pixel coordinate helpers
 # ---------------------------------------------------------------------------
 
-## Convert a 3D world position to screen UV coordinates.
-## Returns Vector2(-1, -1) if the point is not on the screen plane.
+## Convert a 3D world position on the panel to screen UV coordinates.
+## Returns Vector2(-1, -1) if the point is not on the screen surface.
 func world_to_screen_uv(world_pos: Vector3) -> Vector2:
-	var local_pos: Vector3 = global_transform.affine_inverse() * world_pos
-	return _local_to_uv(local_pos)
+	var p: Vector3 = global_transform.affine_inverse() * world_pos
+	var arc := _arc()
+	var u: float
+	if arc < 0.001:
+		if absf(p.z) > 0.02:
+			return Vector2(-1, -1)
+		u = p.x / panel_width + 0.5
+	else:
+		var r := _radius()
+		if absf(Vector2(p.x, r - p.z).length() - r) > 0.02:
+			return Vector2(-1, -1)
+		u = atan2(p.x, r - p.z) / arc + 0.5
+	var v := 0.5 - p.y / panel_height
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return Vector2(-1, -1)
+	return Vector2(u, v)
 
-## Ray/screen intersection helper used by gaze-based foveation.
+## Ray/screen intersection used by pointers.
 ## Returns { valid: bool, uv: Vector2, distance: float }.
 func ray_to_screen_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
-	var local_origin: Vector3 = global_transform.affine_inverse() * ray_origin
-	var local_dir: Vector3 = global_transform.basis.inverse() * ray_direction
+	var o: Vector3 = global_transform.affine_inverse() * ray_origin
+	var d: Vector3 = (global_transform.basis.inverse() * ray_direction).normalized()
+	var arc := _arc()
+	if arc < 0.001:
+		if absf(d.z) < 0.0001:
+			return {"valid": false}
+		var t := -o.z / d.z
+		if t < 0.0:
+			return {"valid": false}
+		var p := o + d * t
+		var uv := Vector2(p.x / panel_width + 0.5, 0.5 - p.y / panel_height)
+		if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+			return {"valid": false}
+		return {"valid": true, "uv": uv, "distance": t}
 
-	if abs(local_dir.z) < 0.0001:
+	# Cylinder around the vertical axis x=0, z=r; the screen is the part of
+	# it behind the axis (z < r) within ±arc/2.
+	var r := _radius()
+	var oz := o.z - r
+	var a := d.x * d.x + d.z * d.z
+	if a < 0.000001:
 		return {"valid": false}
-
-	var t: float = -local_origin.z / local_dir.z
-	if t < 0.0:
+	var b := 2.0 * (o.x * d.x + oz * d.z)
+	var c := o.x * o.x + oz * oz - r * r
+	var disc := b * b - 4.0 * a * c
+	if disc < 0.0:
 		return {"valid": false}
-
-	var local_hit: Vector3 = local_origin + local_dir * t
-	var uv := _local_to_uv(local_hit)
-	if uv.x < 0.0:
-		return {"valid": false}
-
-	return {
-		"valid": true,
-		"uv": uv,
-		"distance": t
-	}
-
-func _local_to_uv(local_pos: Vector3) -> Vector2:
-
-	# The panel faces -Z (FACE_Z orientation); points on the panel have z ≈ 0
-	if abs(local_pos.z) > 0.02:
-		return Vector2(-1.0, -1.0)
-
-	var u: float = (local_pos.x / panel_width) + 0.5
-	var v: float = 0.5 - (local_pos.y / panel_height)
-
-	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
-		return Vector2(-1.0, -1.0)
-
-	return Vector2(u, v)
+	var sq := sqrt(disc)
+	for t in [(-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)]:
+		if t < 0.0:
+			continue
+		var p: Vector3 = o + d * t
+		if p.z >= r:
+			continue
+		var uv := Vector2(atan2(p.x, r - p.z) / arc + 0.5, 0.5 - p.y / panel_height)
+		if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+			continue
+		return {"valid": true, "uv": uv, "distance": t}
+	return {"valid": false}
 
 ## Convert panel UV coordinates to desktop pixel coordinates for mouse input.
 ## This is a pure geometric mapping: the panel is set up so panel-UV (0,0) is the
@@ -398,8 +607,8 @@ func _local_to_uv(local_pos: Vector3) -> Vector2:
 ## pixel from where the controller points.
 func uv_to_pixel(uv: Vector2) -> Vector2i:
 	return Vector2i(
-		int(uv.x * screen_width),
-		int(uv.y * screen_height)
+		clampi(int(uv.x * screen_width), 0, screen_width - 1),
+		clampi(int(uv.y * screen_height), 0, screen_height - 1)
 	)
 
 # ---------------------------------------------------------------------------
@@ -408,19 +617,45 @@ func uv_to_pixel(uv: Vector2) -> Vector2i:
 
 func _create_placeholder_texture() -> void:
 	screen_image = Image.create(screen_width, screen_height, false, Image.FORMAT_RGBA8)
-	screen_image.fill(Color(0.05, 0.05, 0.08, 1.0))
-
-	var border_color := Color(0.3, 0.3, 0.5, 1.0)
-	screen_image.fill_rect(Rect2i(0, 0, screen_width, 1), border_color)
-	screen_image.fill_rect(Rect2i(0, screen_height - 1, screen_width, 1), border_color)
-	screen_image.fill_rect(Rect2i(0, 0, 1, screen_height), border_color)
-	screen_image.fill_rect(Rect2i(screen_width - 1, 0, 1, screen_height), border_color)
-
+	screen_image.fill(Color(0.075, 0.075, 0.068, 1.0))
 	screen_texture = ImageTexture.create_from_image(screen_image)
 	_texture_has_mipmaps = screen_image.has_mipmaps()
 	_apply_texture()
 
-	_create_placeholder_label()
+	_placeholder_label = Label3D.new()
+	_placeholder_label.text = "Waiting for the picture…"
+	_placeholder_label.font_size = 40
+	_placeholder_label.pixel_size = 0.0008
+	_placeholder_label.modulate = Color(0.72, 0.71, 0.66, 0.9)
+	_placeholder_label.outline_size = 0
+	_placeholder_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_placeholder_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	add_child(_placeholder_label)
+	_place_decorations()
+
+## The grab bar sits over the top edge instead (another screen is right
+## under this one, where the bar would be hidden). main.gd decides.
+var bar_on_top := false
+
+func set_bar_on_top(on: bool) -> void:
+	if on != bar_on_top:
+		bar_on_top = on
+		_place_decorations()
+
+## Keep the label on the surface and the grab bar under the bottom edge (or over the top one).
+func _place_decorations() -> void:
+	if _placeholder_label:
+		# The text is flat and ~0.4 m wide: lift it clear of the curve's bulge.
+		var bulge := local_point(0.5 + 0.22 / panel_width, 0.5).z
+		_placeholder_label.position = Vector3(0.0, 0.0, bulge + 0.004)
+	if grab_bar:
+		grab_bar.position = local_point(0.5, 0.0) + Vector3(0.0, 0.06, 0.0) if bar_on_top \
+			else local_point(0.5, 1.0) + Vector3(0.0, -0.06, 0.0)
+	for h in resize_handles:
+		var u := 0.5 + 0.5 * h.corner.x
+		# Tilted with the surface, so the bracket lies in the screen's plane.
+		h.transform = Transform3D(Basis(Vector3.UP, -(u - 0.5) * _arc()),
+			local_point(u, 0.5 - 0.5 * h.corner.y))
 
 func _apply_texture() -> void:
 	var mat := material_override
@@ -429,7 +664,6 @@ func _apply_texture() -> void:
 		# NV12 path samples the same texture through a point-sampled uniform.
 		(mat as ShaderMaterial).set_shader_parameter("screen_texture_nv12", screen_texture)
 	else:
-		# Create shader-based material so curved mode can be toggled at runtime.
 		var shader := load(SCREEN_SHADER_PATH) as Shader
 		var new_mat := ShaderMaterial.new()
 		if shader:
@@ -439,63 +673,12 @@ func _apply_texture() -> void:
 		new_mat.set_shader_parameter("is_yuv", 0)
 		material_override = new_mat
 
-	_apply_curvature_to_material()
-	_apply_foveation_to_material()
+	_apply_panel_size_to_material()
+	if _layer_content is TextureRect:
+		(_layer_content as TextureRect).texture = screen_texture
 
-func _apply_curvature_to_material() -> void:
+## The shader rounds the corners in metres, so it needs the panel size.
+func _apply_panel_size_to_material() -> void:
 	if material_override is ShaderMaterial:
-		var mat := material_override as ShaderMaterial
-		var value := _curvature_amount if _curved_mode else 0.0
-		mat.set_shader_parameter("curvature", value)
-
-func _apply_foveation_to_material() -> void:
-	if material_override is ShaderMaterial:
-		var mat := material_override as ShaderMaterial
-		mat.set_shader_parameter("foveation_enabled", 1 if _foveation_enabled else 0)
-		mat.set_shader_parameter("foveation_strength", _foveation_strength)
-		mat.set_shader_parameter("gaze_uv", _foveation_focus_uv)
-
-func _create_latency_label() -> void:
-	_latency_label = Label3D.new()
-	_latency_label.text = ""
-	_latency_label.font_size = 24
-	_latency_label.modulate = Color(0.3, 1.0, 0.3)
-	_latency_label.no_depth_test = true
-	_latency_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-
-	_update_latency_label_anchor()
-	_latency_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	add_child(_latency_label)
-
-func _create_placeholder_label() -> void:
-	_placeholder_label = Label3D.new()
-	_placeholder_label.text = "Immersive-2 · Waiting for stream"
-	_placeholder_label.font_size = 28
-	_placeholder_label.modulate = Color(0.5, 0.5, 0.7, 0.8)
-	_placeholder_label.no_depth_test = true
-	_placeholder_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_placeholder_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_placeholder_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_placeholder_label.position = Vector3(0, 0, 0.002)
-	add_child(_placeholder_label)
-
-func _update_latency_label_anchor() -> void:
-	if _latency_label:
-		_latency_label.position = Vector3(panel_width * 0.5 - 0.05, panel_height * 0.5 - 0.03, 0.001)
-
-func _update_latency_label() -> void:
-	if not _latency_label:
-		return
-	if _latency_ms <= 0.0 or not is_active:
-		_latency_label.text = ""
-		return
-
-	var label_text := "%.0f ms" % _latency_ms
-	var color := Color(0.3, 1.0, 0.3)
-	if _latency_ms > 30.0:
-		color = Color(1.0, 0.8, 0.2)
-	if _latency_ms > 60.0:
-		color = Color(1.0, 0.3, 0.3)
-
-	_latency_label.text = label_text
-	_latency_label.modulate = color
+		(material_override as ShaderMaterial).set_shader_parameter(
+			"panel_size_m", Vector2(panel_width, panel_height))

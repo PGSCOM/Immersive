@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Immersive-2</title>
+<style>
+/* Same system as the web bridge (web/client/styles.css) and the VR menu
+   (client/project/scripts/ui_theme.gd): a warm charcoal desk, bone ink, and
+   one saturated colour, the red tally, which only ever means "live". */
+@font-face {
+  font-family: "Grotesk";
+  src: url("/grotesk.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+
+:root {
+  --ground: #13110f;
+  --surface: #1c1a17;
+  --surface-hi: #25221e;
+  --surface-hover: #302c27;
+  --well: #0b0a09;
+  --edge: rgba(236, 230, 220, 0.06);
+  --edge-hi: rgba(236, 230, 220, 0.14);
+  --ink: #ece6dc;
+  --ink-2: #b4ac9f;
+  --ink-3: #8f877b;
+  --tally: #d9533b;
+  --clay: #e39a7f;
+
+  --display: "Grotesk", system-ui, sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --data: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --gutter: 20px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+/* Controls take the host's state on the first render without sliding into
+   it; transitions only apply to changes after that. */
+body:not(.ready) *,
+body:not(.ready) *::before,
+body:not(.ready) *::after { transition: none !important; }
+
+html {
+  /* Fine grain on the substrate only, never over the content. */
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .95 0 0 0 0 .9 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E"),
+    var(--ground);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: transparent;
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.sheet {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 22px var(--gutter) 40px;
+}
+
+/* --- Bar -------------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 26px;
+}
+
+.mark {
+  width: 34px;
+  height: 24px;
+  flex: none;
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wordmark {
+  font: 700 22px/1 var(--display);
+  letter-spacing: 0.015em;
+}
+
+.role {
+  color: var(--ink-3);
+  font-size: 15px;
+}
+
+/* --- The alert a Wayland desktop earns --------------------------------- */
+
+.alert {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 18px;
+  align-items: center;
+  margin: 0 0 22px;
+  padding: 16px 18px;
+  border-radius: 6px;
+  background: #2a1f1a;
+  box-shadow: inset 0 1px 0 rgba(227, 154, 127, 0.22);
+}
+
+.alert-text { margin: 0; color: var(--clay); }
+.alert-text strong { color: var(--ink); font-weight: 600; }
+
+/* --- The frame: what matters now ------------------------------------- */
+
+.frame {
+  position: relative;
+  padding: 34px 32px 26px;
+}
+
+/* Broadcast crop marks, as on the web bridge. While nobody is connected
+   they hunt slowly, like a camera looking for focus; when a headset pairs
+   they close in and hold. */
+.frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.7;
+  transition: inset 480ms cubic-bezier(0.2, 0.7, 0.1, 1), opacity 480ms ease;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M2 20V9a7 7 0 0 1 7-7h11' fill='none' stroke='%238f877b' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") top left no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M20 20V9a7 7 0 0 0-7-7H2' fill='none' stroke='%238f877b' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") top right no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M2 2v11a7 7 0 0 0 7 7h11' fill='none' stroke='%238f877b' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") bottom left no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22'%3E%3Cpath d='M20 2v11a7 7 0 0 1-7 7H2' fill='none' stroke='%238f877b' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") bottom right no-repeat;
+}
+
+.frame[data-state="waiting"]::before {
+  animation: hunt 2.8s ease-in-out infinite alternate;
+}
+
+.frame[data-state="live"]::before {
+  inset: 10px;
+  opacity: 1;
+}
+
+@keyframes hunt {
+  from { inset: 0; }
+  to { inset: -7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frame::before { animation: none !important; transition: none; }
+}
+
+/* The PIN is the page while no headset is paired; its one action sits on
+   the digits' baseline. */
+.pin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 26px;
+}
+
+.pin-row .btn { margin-bottom: 0.55em; }
+
+.pin {
+  display: flex;
+  gap: 0.34em;
+  margin: 0;
+  font: 700 clamp(60px, 14vw, 104px)/0.95 var(--display);
+  letter-spacing: 0.035em;
+  font-variant-numeric: tabular-nums;
+}
+
+.open-title {
+  margin: 0;
+  font: 700 clamp(34px, 8vw, 52px)/1.05 var(--display);
+  letter-spacing: 0.01em;
+}
+
+.caption {
+  max-width: 40ch;
+  margin: 16px 0 0;
+  color: var(--ink-2);
+  font-size: 16px;
+}
+
+.caption b { color: var(--ink); font-weight: 600; }
+
+.frame-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 22px;
+  margin-top: 24px;
+}
+
+/* Label/value pairs: labels in the body face, values as data. */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.facts div { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.facts dt { color: var(--ink-3); font-size: 14px; }
+.facts dd {
+  margin: 0;
+  font: 14px/1.4 var(--data);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* --- Headsets ------------------------------------------------------------ */
+
+.headsets {
+  display: grid;
+  gap: 30px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.headset-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.tally {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
+  transition: background-color 200ms ease;
+}
+
+.tally[data-on="true"] { background: var(--tally); box-shadow: none; }
+
+.headset-name {
+  margin: 0;
+  min-width: 0;
+  font: 700 clamp(30px, 7vw, 44px)/1.05 var(--display);
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+
+.headset-link {
+  margin: 8px 0 0 26px;
+  color: var(--ink-2);
+}
+
+.headset-link .addr { font: 14px var(--data); color: var(--ink); }
+
+.streams {
+  display: grid;
+  grid-template-columns: repeat(5, auto);
+  justify-content: start;
+  gap: 4px 22px;
+  margin: 14px 0 0 26px;
+  font: 14px/1.5 var(--data);
+  font-variant-numeric: tabular-nums;
+}
+
+.streams .screen { font-family: var(--body); color: var(--ink-3); }
+.streams .idle { grid-column: 1 / -1; font-family: var(--body); color: var(--ink-3); }
+
+/* --- Buttons: one quiet style, one filled for the single primary action -- */
+
+.btn {
+  padding: 7px 13px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-hi);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  color: var(--ink);
+  font: 600 14px/1.2 var(--body);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.btn:hover { background: var(--surface-hover); }
+.btn:disabled { color: var(--ink-3); cursor: default; background: var(--surface-hi); }
+
+.btn-primary {
+  background: var(--ink);
+  color: var(--ground);
+  box-shadow: none;
+}
+
+.btn-primary:hover { background: #fffaf2; }
+
+.btn:focus-visible,
+.switch:focus-visible,
+.seg label:has(input:focus-visible),
+.range:focus-visible {
+  outline: 2px solid var(--ink-2);
+  outline-offset: 3px;
+}
+
+/* --- Settings ------------------------------------------------------------ */
+
+.rack {
+  margin: 34px 0 0;
+  padding: 8px 22px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+}
+
+.rack:disabled { opacity: 0.55; }
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 20px;
+  padding: 16px 0;
+}
+
+.row + .row { border-top: 0; margin-top: 2px; }
+
+.row-label { display: block; font-weight: 600; }
+.row-help { display: block; color: var(--ink-3); font-size: 14px; }
+.row-help.warn { color: var(--clay); }
+.row-help .data { font-family: var(--data); color: var(--ink-2); }
+.row-wide { grid-column: 1 / -1; }
+
+/* A switch: a well with a knob. Off is a dim knob in the dark, on is bone. */
+.switch {
+  appearance: none;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  border-radius: 12px;
+  background: var(--well);
+  box-shadow: inset 0 0 0 1px var(--edge-hi);
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  transition: transform 180ms cubic-bezier(0.3, 0.7, 0.2, 1), background-color 160ms ease;
+}
+
+.switch:checked { background: var(--ink); box-shadow: none; }
+.switch:checked::after { transform: translateX(18px); background: var(--ground); }
+.switch:disabled { cursor: default; opacity: 0.45; }
+
+/* Codec: a segmented well with a sliding selection. */
+.seg {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 12px 0 0;
+  padding: 3px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--well);
+  box-shadow: inset 0 0 0 1px var(--edge);
+  --i: 2;
+}
+
+.seg::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 4);
+  border-radius: 4px;
+  background: var(--surface-hi);
+  box-shadow: inset 0 1px 0 var(--edge-hi);
+  transform: translateX(calc(var(--i) * 100%));
+  transition: transform 220ms cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+
+.seg label {
+  position: relative;
+  padding: 8px 4px;
+  border-radius: 4px;
+  text-align: center;
+  color: var(--ink-2);
+  font: 600 14px/1.2 var(--body);
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.seg label:hover { color: var(--ink); }
+.seg label:has(input:checked) { color: var(--ink); }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+
+.quality {
+  display: grid;
+  grid-template-columns: auto 1fr 3ch;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+
+.quality output { font: 14px var(--data); color: var(--ink); text-align: right; }
+
+.range {
+  appearance: none;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--well); box-shadow: inset 0 0 0 1px var(--edge-hi); }
+.range::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; background: var(--ink); }
+.range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--well); }
+.range::-moz-range-thumb { width: 16px; height: 16px; border: 0; border-radius: 50%; background: var(--ink); }
+
+.vlist { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.vlist li { display: flex; align-items: center; gap: 16px; }
+.vlist .data { font: 14px var(--data); }
+.vlist .btn { margin-left: auto; }
+
+/* --- Foot ---------------------------------------------------------------- */
+
+.foot { margin-top: 22px; }
+
+.quit {
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: 14px var(--body);
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.quit:hover, .quit[data-armed="true"] { color: var(--clay); }
+.quit:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 3px; border-radius: 2px; }
+
+.notice {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  max-width: calc(100% - 2 * var(--gutter));
+  margin: 0;
+  padding: 10px 16px;
+  border-radius: 5px;
+  background: var(--surface-hi);
+  box-shadow: inset 0 1px 0 var(--edge-hi), 0 2px 3px rgba(11, 10, 9, 0.5);
+  color: var(--ink);
+  font-size: 14px;
+  transform: translateX(-50%);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  :root { --gutter: 16px; }
+  .frame { padding: 28px 22px 22px; }
+  .headset-head { grid-template-columns: auto 1fr; }
+  .headset-head .btn { grid-column: 2; justify-self: start; }
+  .streams { grid-template-columns: repeat(3, auto); }
+  .rack { padding: 4px 16px; }
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header class="bar">
+    <svg class="mark" viewBox="0 0 40 28" aria-hidden="true">
+      <path d="M5 3.5h22a2.5 2.5 0 0 1 2.5 2.5v11" />
+      <path d="M2.5 17V6A2.5 2.5 0 0 1 5 3.5" />
+      <path d="M2 21.5c6 5 30 5 36 0" />
+      <path d="M16 12.5c3-2.2 9-2.2 12 0" />
+    </svg>
+    <span class="wordmark">Immersive-2</span>
+    <span class="role" id="role">host</span>
+  </header>
+
+  <main>
+    <div class="alert" id="inputAlert" role="alert" hidden>
+      <p class="alert-text"><strong>Headsets can only watch.</strong> This desktop did not allow remote control. Ask again and allow it in the sharing dialog on this screen.</p>
+      <button class="btn btn-primary" id="askInput" type="button">Ask again</button>
+    </div>
+
+    <section class="frame" id="frame" data-state="waiting" aria-live="polite">
+      <div id="pinView">
+        <div class="pin-row">
+          <p class="pin" id="pin" aria-label="Pairing PIN"><span id="pinA">&#8211;&#8211;&#8211;</span><span id="pinB">&#8211;&#8211;&#8211;</span></p>
+          <button class="btn" id="newPin" type="button">New PIN</button>
+        </div>
+        <p class="caption">Type this PIN in the headset when it asks. The headset finds <b class="pc-name">this PC</b> by itself.</p>
+      </div>
+      <div id="openView" hidden>
+        <p class="open-title">Open to this network</p>
+        <p class="caption">Any headset on this network can connect to <b class="pc-name">this PC</b> without a PIN.</p>
+      </div>
+      <div id="stoppedView" hidden>
+        <p class="open-title" id="stoppedTitle">Immersive-2 stopped</p>
+        <p class="caption" id="stoppedText">Start it again from your apps.</p>
+      </div>
+      <ul class="headsets" id="headsets" hidden></ul>
+
+      <div class="frame-foot" id="frameFoot">
+        <dl class="facts">
+          <div id="pcFact"><dt>PC</dt><dd class="pc-name">&#8211;</dd></div>
+          <div><dt>Address</dt><dd id="address">&#8211;</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <fieldset class="rack" id="rack">
+      <legend class="visually-hidden">Settings</legend>
+
+      <div class="row">
+        <label for="control">
+          <span class="row-label">Let headsets control this PC</span>
+          <span class="row-help">Off: they can watch but not click or type.</span>
+        </label>
+        <input class="switch" id="control" type="checkbox" role="switch">
+      </div>
+
+      <div class="row">
+        <label for="pinOn">
+          <span class="row-label">Ask for a PIN</span>
+          <span class="row-help" id="pinHelp">Once per headset.</span>
+        </label>
+        <input class="switch" id="pinOn" type="checkbox" role="switch">
+      </div>
+
+      <div class="row">
+        <label for="audio">
+          <span class="row-label">Sound</span>
+          <span class="row-help" id="audioHelp">Play this PC's sound in the headset.</span>
+        </label>
+        <input class="switch" id="audio" type="checkbox" role="switch">
+      </div>
+
+      <div class="row">
+        <label for="usb">
+          <span class="row-label">USB cable</span>
+          <span class="row-help" id="usbHelp">Reach a headset plugged into this PC.</span>
+        </label>
+        <input class="switch" id="usb" type="checkbox" role="switch">
+      </div>
+
+      <div class="row">
+        <label for="autostart">
+          <span class="row-label">Start with this PC</span>
+          <span class="row-help">Waits in the tray after you sign in.</span>
+        </label>
+        <input class="switch" id="autostart" type="checkbox" role="switch">
+      </div>
+
+      <div class="row">
+        <div class="row-wide" role="group" aria-labelledby="codecLabel">
+          <span class="row-label" id="codecLabel">Video</span>
+          <span class="row-help">Used when a headset leaves the choice to the PC.</span>
+          <div class="seg" id="codec">
+            <label><input type="radio" name="codec" value="mjpeg">MJPEG</label>
+            <label><input type="radio" name="codec" value="h264">H.264</label>
+            <label><input type="radio" name="codec" value="h265">HEVC</label>
+            <label><input type="radio" name="codec" value="av1">AV1</label>
+          </div>
+          <label class="quality" id="qualityRow" for="quality">
+            <span>JPEG quality</span>
+            <input class="range" id="quality" type="range" min="10" max="95" step="5">
+            <output id="qualityOut" for="quality">&#8211;</output>
+          </label>
+        </div>
+      </div>
+
+      <div class="row" id="virtualRow" hidden>
+        <div class="row-wide">
+          <span class="row-label">Virtual screens</span>
+          <span class="row-help" id="virtualEmpty">None. Add one from the headset's Screens tab.</span>
+          <ul class="vlist" id="virtualList"></ul>
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="foot">
+      <button class="quit" id="quit" type="button">Quit Immersive-2</button>
+    </div>
+  </main>
+</div>
+<p class="notice" id="notice" role="status" hidden></p>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const CODECS = ["mjpeg", "h264", "h265", "av1"];
+const CODEC_LABEL = { mjpeg: "MJPEG", h264: "H.264", h265: "HEVC", av1: "AV1" };
+let state = null;
+let stopped = false;
+let pinScramble = false;
+const samples = new Map();   // "headset:monitor" -> {frames, bytes, t, fps, mbps}
+
+class ApiError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+async function api(path, body) {
+  const init = body === undefined ? { cache: "no-store" } : {
+    method: "POST",
+    headers: { "X-Im2-Panel": "1", "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(body),
+  };
+  const r = await fetch(path, init);
+  if (!r.ok) {
+    let msg = "The host refused that.";
+    try { msg = (await r.clone().json()).error || msg; } catch (_) { msg = (await r.text()).trim() || msg; }
+    throw new ApiError(r.status, msg);
+  }
+  return r.json();
+}
+
+let noticeTimer = 0;
+function notice(text) {
+  const n = $("notice");
+  n.textContent = text;
+  n.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { n.hidden = true; }, 4200);
+}
+
+function splitPin(pin) { return [pin.slice(0, 3), pin.slice(3)]; }
+
+function showPin(pin) {
+  const [a, b] = pin ? splitPin(pin) : ["–––", "–––"];
+  $("pinA").textContent = a;
+  $("pinB").textContent = b;
+  $("pin").setAttribute("aria-label", pin ? `Pairing PIN ${pin.split("").join(" ")}` : "Pairing PIN");
+}
+
+// A new PIN rolls through random digits for a moment, then lands.
+function rollPin(pin) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { showPin(pin); return; }
+  pinScramble = true;
+  const start = performance.now();
+  const step = (now) => {
+    const t = (now - start) / 420;
+    if (t >= 1) { pinScramble = false; showPin(pin); return; }
+    const settled = Math.floor(t * 6);
+    const digits = pin.split("").map((d, i) => (i < settled ? d : String(Math.floor(Math.random() * 10))));
+    $("pinA").textContent = digits.slice(0, 3).join("");
+    $("pinB").textContent = digits.slice(3).join("");
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function rate(key, frames, bytes) {
+  const now = performance.now();
+  const prev = samples.get(key);
+  const cur = { frames, bytes, t: now, fps: prev ? prev.fps : null, mbps: prev ? prev.mbps : null };
+  if (prev && now - prev.t > 300 && frames >= prev.frames) {
+    const dt = (now - prev.t) / 1000;
+    cur.fps = (frames - prev.frames) / dt;
+    cur.mbps = ((bytes - prev.bytes) * 8) / dt / 1e6;
+  } else if (prev) {
+    cur.t = prev.t; cur.frames = prev.frames; cur.bytes = prev.bytes;
+  }
+  samples.set(key, cur);
+  return cur;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderHeadsets(list) {
+  const ul = $("headsets");
+  const keep = new Set(list.map((h) => String(h.id)));
+  for (const li of [...ul.children]) if (!keep.has(li.dataset.id)) li.remove();
+  for (const h of list) {
+    let li = ul.querySelector(`li[data-id="${h.id}"]`);
+    if (!li) {
+      li = el("li");
+      li.dataset.id = String(h.id);
+      const head = el("div", "headset-head");
+      const tally = el("span", "tally");
+      tally.setAttribute("aria-hidden", "true");
+      const name = el("p", "headset-name");
+      const btn = el("button", "btn", "Disconnect");
+      btn.type = "button";
+      btn.addEventListener("click", () => act("/api/disconnect", { id: h.id },
+        "Disconnected. The headset needs the PIN to come back."));
+      head.append(tally, name, btn);
+      const link = el("p", "headset-link");
+      const streams = el("div", "streams");
+      li.append(head, link, streams);
+      ul.append(li);
+    }
+    const live = h.streams.length > 0;
+    li.querySelector(".tally").dataset.on = String(live);
+    li.querySelector(".headset-name").textContent = h.name || "Headset";
+    const link = li.querySelector(".headset-link");
+    link.replaceChildren(el("span", "addr", h.usb ? "USB cable" : h.address), document.createTextNode(h.usb ? "" : " over the network"));
+    if (h.usb) link.firstChild.className = "";
+    const grid = li.querySelector(".streams");
+    const cells = [];
+    if (!live) cells.push(el("span", "idle", "Connected, not showing any screen yet."));
+    for (const s of h.streams) {
+      const r = rate(`${h.id}:${s.monitor}`, s.frames, s.bytes);
+      cells.push(
+        el("span", "screen", s.name || `Screen ${s.monitor}`),
+        el("span", "", `${s.width}×${s.height}`),
+        el("span", "", CODEC_LABEL[s.codec] || s.codec),
+        el("span", "", r.fps === null ? "– fps" : `${Math.round(r.fps)} fps`),
+        el("span", "", r.mbps === null ? "– Mb/s" : `${r.mbps.toFixed(r.mbps < 10 ? 1 : 0)} Mb/s`),
+      );
+    }
+    grid.replaceChildren(...cells);
+  }
+}
+
+function setSwitch(id, on, disabled) {
+  const sw = $(id);
+  if (sw.dataset.busy) return;
+  sw.checked = on;
+  sw.disabled = Boolean(disabled);
+}
+
+function render(s) {
+  state = s;
+  stopped = false;
+  $("rack").disabled = false;
+  $("quit").hidden = false;
+  document.querySelectorAll(".pc-name").forEach((e) => { e.textContent = s.pc.name; });
+  $("role").textContent = s.stub ? "host, test mode" : "host";
+  const port = s.pc.port === 19800 ? "" : `:${s.pc.port}`;
+  $("address").textContent = s.pc.address ? s.pc.address + port : "No network";
+  $("inputAlert").hidden = !s.input_denied;
+
+  const paired = s.headsets.length > 0;
+  const frame = $("frame");
+  frame.dataset.state = paired ? "live" : "waiting";
+  $("stoppedView").hidden = true;
+  $("headsets").hidden = !paired;
+  $("pinView").hidden = paired || !s.pin.enabled;
+  $("openView").hidden = paired || s.pin.enabled;
+  $("pcFact").hidden = !paired;
+  $("frameFoot").hidden = false;
+  if (!pinScramble) showPin(s.pin.value);
+  if (paired) renderHeadsets(s.headsets);
+
+  const st = s.settings;
+  setSwitch("control", !st.view_only);
+  setSwitch("pinOn", s.pin.enabled);
+  $("pinHelp").replaceChildren(s.pin.enabled
+    ? Object.assign(el("span", "data", s.pin.value.replace(/^(\d{3})/, "$1 ")), {})
+    : document.createTextNode("Off: any device on this network can connect."));
+  if (s.pin.enabled) $("pinHelp").append(document.createTextNode(", asked once per headset."));
+  setSwitch("audio", st.audio, !st.audio_available);
+  $("audioHelp").textContent = st.audio_available ? "Play this PC's sound in the headset."
+    : (s.stub ? "No sound in test mode." : "Off for this run (--no-audio).");
+  setSwitch("usb", st.usb);
+  $("usbHelp").textContent = st.usb_note || "Reach a headset plugged into this PC.";
+  $("usbHelp").classList.toggle("warn", Boolean(st.usb_note));
+  setSwitch("autostart", st.autostart);
+
+  const seg = $("codec");
+  if (!seg.dataset.busy) {
+    seg.querySelector(`input[value="${st.codec}"]`).checked = true;
+    seg.style.setProperty("--i", String(CODECS.indexOf(st.codec)));
+  }
+  $("qualityRow").hidden = st.codec !== "mjpeg";
+  if (!$("quality").dataset.busy && document.activeElement !== $("quality")) {
+    $("quality").value = st.jpeg_quality;
+    $("qualityOut").textContent = st.jpeg_quality;
+  }
+
+  $("virtualRow").hidden = !s.virtual_supported;
+  $("virtualEmpty").hidden = s.virtual.length > 0;
+  const vl = $("virtualList");
+  const ids = s.virtual.map((v) => v.id).join(",");
+  if (vl.dataset.ids !== ids) {
+    vl.dataset.ids = ids;
+    vl.replaceChildren(...s.virtual.map((v) => {
+      const li = el("li");
+      const b = el("button", "btn", "Remove");
+      b.type = "button";
+      b.addEventListener("click", () => act("/api/remove-virtual", { id: v.id }, "Virtual screen removed."));
+      li.append(el("span", "", `Screen ${v.id}`), el("span", "data", `${v.width}×${v.height}`), b);
+      return li;
+    }));
+  }
+}
+
+function renderStopped(title, text) {
+  stopped = true;
+  const frame = $("frame");
+  frame.dataset.state = "stopped";
+  for (const id of ["pinView", "openView", "headsets", "frameFoot"]) $(id).hidden = true;
+  $("inputAlert").hidden = true;
+  $("stoppedView").hidden = false;
+  $("stoppedTitle").textContent = title;
+  $("stoppedText").textContent = text;
+  $("rack").disabled = true;
+  $("quit").hidden = true;
+}
+
+async function refresh() {
+  try {
+    render(await api("/api/state"));
+    if (!document.body.classList.contains("ready")) setTimeout(() => document.body.classList.add("ready"), 60);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) {
+      renderStopped("This window is out of date", "Immersive-2 restarted. Open it again from its icon.");
+    } else {
+      renderStopped("Immersive-2 is not running", "Start it again from your apps.");
+    }
+  }
+}
+
+async function act(path, body, done) {
+  try {
+    const s = await api(path, body);
+    render(s);
+    if (done) notice(done);
+    return s;
+  } catch (e) {
+    notice(e.message || "That did not work.");
+    refresh();
+    return null;
+  }
+}
+
+function bindSwitch(id, key, invert) {
+  const sw = $(id);
+  sw.addEventListener("change", async () => {
+    sw.dataset.busy = "1";
+    const on = invert ? !sw.checked : sw.checked;
+    await act("/api/set", { key, value: on ? "1" : "0" });
+    delete sw.dataset.busy;
+    if (state) render(state);
+  });
+}
+
+bindSwitch("control", "view_only", true);
+bindSwitch("pinOn", "pin");
+bindSwitch("audio", "audio");
+bindSwitch("usb", "usb");
+bindSwitch("autostart", "autostart");
+
+$("codec").addEventListener("change", async (ev) => {
+  const seg = $("codec");
+  seg.style.setProperty("--i", String(CODECS.indexOf(ev.target.value)));
+  seg.dataset.busy = "1";
+  await act("/api/set", { key: "codec", value: ev.target.value });
+  delete seg.dataset.busy;
+  if (state) render(state);
+});
+
+$("quality").addEventListener("input", () => { $("qualityOut").textContent = $("quality").value; });
+$("quality").addEventListener("change", async () => {
+  const q = $("quality");
+  q.dataset.busy = "1";
+  await act("/api/set", { key: "jpeg_quality", value: q.value });
+  delete q.dataset.busy;
+});
+
+$("newPin").addEventListener("click", async () => {
+  const before = state && state.pin.value;
+  const s = await act("/api/new-pin", {});
+  if (s && s.pin.value !== before) rollPin(s.pin.value);
+});
+
+$("askInput").addEventListener("click", () =>
+  act("/api/ask-input", {}, "Answer the sharing dialog on this screen, and allow remote control."));
+
+// Quitting takes a second click, so a stray one never ends a session.
+let quitTimer = 0;
+$("quit").addEventListener("click", async () => {
+  const q = $("quit");
+  if (q.dataset.armed !== "true") {
+    q.dataset.armed = "true";
+    q.textContent = "Click again to quit";
+    quitTimer = setTimeout(() => { q.dataset.armed = "false"; q.textContent = "Quit Immersive-2"; }, 3000);
+    return;
+  }
+  clearTimeout(quitTimer);
+  quitDone = true;
+  try { await api("/api/quit", {}); } catch (_) { /* it may be gone already */ }
+  renderStopped("Immersive-2 stopped", "Start it again from your apps.");
+});
+
+let quitDone = false;
+refresh();
+setInterval(() => { if (!quitDone) refresh(); }, 1000);
+</script>
+</body>
+</html>
