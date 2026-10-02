@@ -69,6 +69,8 @@ const MSG_PING: int                  = 0xFF
 const PROTOCOL_VERSION: int   = 1
 const MAX_UDP_PAYLOAD: int    = 1400
 const VIDEO_HEADER_SIZE: int  = 9  # 1 + 4 + 2 + 2 bytes
+## A parity chunk's payload starts with frame_size (u32) and parity_count (u16).
+const PARITY_HEADER_SIZE: int = 6
 const HELLO_FLAG_TCP_MEDIA: int = 0x01
 const REJECT_PIN_REQUIRED: int = 1
 const REJECT_WRONG_PIN: int = 2
@@ -103,8 +105,11 @@ var _stat_frames: int = 0
 var _stat_bytes: int = 0
 var _stat_since_ms: int = 0
 
-## Frame reassembly buffer: frame_number -> { chunks: Dictionary, total: int }
+## Frame reassembly buffer: frame_number -> { chunks: Dictionary, total: int,
+## parity: Dictionary (FEC, see _rebuild_chunk) }
 var _frame_buffer: Dictionary = {}
+## Chunks lost on the way and rebuilt from parity (FEC), for the log.
+var _chunks_rebuilt: int = 0
 
 ## Stream resolution per monitor id -> Vector2i. One shared pair of globals was
 ## wrong as soon as a second monitor started: the latest STREAM_START overwrote
@@ -485,50 +490,110 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 
 func _read_udp_packets() -> void:
 	while udp_client.get_available_packet_count() > 0:
-		var packet: PackedByteArray = udp_client.get_packet()
-		if packet.size() < VIDEO_HEADER_SIZE:
-			continue
-
-		# Parse video packet header
-		var monitor_id: int = packet[0]
-		var frame_num: int = packet.decode_u32(1)
-		var chunk_idx: int = packet.decode_u16(5)
-		var chunk_cnt: int = packet.decode_u16(7)
-		var chunk_data: PackedByteArray = packet.slice(VIDEO_HEADER_SIZE)
-
-		# Validate chunk index to avoid corrupting the frame buffer
-		if frame_num < 0 or chunk_idx < 0 or chunk_idx >= chunk_cnt:
-			continue
-		# Late chunks of a stream that was stopped, or of a frame older than
-		# the last one shown: nothing can use them.
-		if not _stream_size.has(monitor_id) or \
-				(_first_frame.has(monitor_id) and frame_num <= int(_last_completed_frame[monitor_id])):
-			continue
-
-		# Store chunk in frame buffer (key combines monitor and frame number
-		# so simultaneous monitor streams cannot collide)
-		var frame_key: int = (monitor_id << 32) | frame_num
-		# A restarted stream reuses low frame numbers; if a late chunk from the
-		# previous stream shares a key but reports a different chunk count, the
-		# stale entry would never complete. Start over on a mismatch.
-		if _frame_buffer.has(frame_key) and int(_frame_buffer[frame_key]["total"]) != chunk_cnt:
-			_frame_buffer.erase(frame_key)
-		if not _frame_buffer.has(frame_key):
-			_frame_buffer[frame_key] = {
-				"chunks": {},
-				"total": chunk_cnt,
-				"monitor_id": monitor_id,
-				"frame_num": frame_num,
-				"created_ms": Time.get_ticks_msec()
-			}
-
-		_frame_buffer[frame_key]["chunks"][chunk_idx] = chunk_data
-
-		# Check if frame is complete
-		if _frame_buffer[frame_key]["chunks"].size() == chunk_cnt:
-			_assemble_frame(frame_key)
-
+		_on_video_packet(udp_client.get_packet())
 	_cleanup_old_frames()
+
+## One UDP video packet: a data chunk of a frame, or a parity chunk
+## (chunk_idx >= chunk_cnt, protocol.h VideoParityHeader).
+func _on_video_packet(packet: PackedByteArray) -> void:
+	if packet.size() < VIDEO_HEADER_SIZE:
+		return
+
+	# Parse video packet header
+	var monitor_id: int = packet[0]
+	var frame_num: int = packet.decode_u32(1)
+	var chunk_idx: int = packet.decode_u16(5)
+	var chunk_cnt: int = packet.decode_u16(7)
+	if chunk_cnt == 0:
+		return
+	# Late chunks of a stream that was stopped, or of a frame older than
+	# the last one shown: nothing can use them.
+	if not _stream_size.has(monitor_id) or \
+			(_first_frame.has(monitor_id) and frame_num <= int(_last_completed_frame[monitor_id])):
+		return
+
+	# Store chunk in frame buffer (key combines monitor and frame number
+	# so simultaneous monitor streams cannot collide)
+	var frame_key: int = (monitor_id << 32) | frame_num
+	# A restarted stream reuses low frame numbers; if a late chunk from the
+	# previous stream shares a key but reports a different chunk count, the
+	# stale entry would never complete. Start over on a mismatch.
+	if _frame_buffer.has(frame_key) and int(_frame_buffer[frame_key]["total"]) != chunk_cnt:
+		_frame_buffer.erase(frame_key)
+	if not _frame_buffer.has(frame_key):
+		_frame_buffer[frame_key] = {
+			"chunks": {},
+			"parity": {},
+			"parity_count": 0,
+			"frame_size": 0,
+			"total": chunk_cnt,
+			"monitor_id": monitor_id,
+			"frame_num": frame_num,
+			"created_ms": Time.get_ticks_msec()
+		}
+	var entry: Dictionary = _frame_buffer[frame_key]
+
+	var group := -1
+	if chunk_idx >= chunk_cnt:
+		if packet.size() < VIDEO_HEADER_SIZE + PARITY_HEADER_SIZE:
+			return
+		var parity_count: int = packet.decode_u16(VIDEO_HEADER_SIZE + 4)
+		group = chunk_idx - chunk_cnt
+		if group >= parity_count:
+			return
+		entry["parity_count"] = parity_count
+		entry["frame_size"] = packet.decode_u32(VIDEO_HEADER_SIZE)
+		entry["parity"][group] = packet.slice(VIDEO_HEADER_SIZE + PARITY_HEADER_SIZE)
+	else:
+		entry["chunks"][chunk_idx] = packet.slice(VIDEO_HEADER_SIZE)
+		if entry["parity_count"] > 0:
+			group = chunk_idx % int(entry["parity_count"])
+	if group >= 0:
+		_rebuild_chunk(entry, group)
+
+	# Check if frame is complete
+	if entry["chunks"].size() == chunk_cnt:
+		_assemble_frame(frame_key)
+
+## FEC: if exactly one data chunk of parity group `group` (chunks group,
+## group + p, group + 2p...) is missing and its parity chunk is here, the XOR
+## of the parity and the others is that chunk. 8 bytes at a time: a group is
+## ~5 chunks of 175 words.
+func _rebuild_chunk(entry: Dictionary, group: int) -> void:
+	if not entry["parity"].has(group):
+		return
+	var chunks: Dictionary = entry["chunks"]
+	var total: int = entry["total"]
+	var step: int = entry["parity_count"]
+	var missing := -1
+	for i in range(group, total, step):
+		if not chunks.has(i):
+			if missing >= 0:
+				return  # two lost in this group: the frame is gone
+			missing = i
+	if missing < 0:
+		return
+	# Copies: packed arrays are shared, and padding the stored ones would corrupt the frame.
+	var parity: PackedByteArray = entry["parity"][group].duplicate()
+	var length := MAX_UDP_PAYLOAD if missing < total - 1 \
+		else int(entry["frame_size"]) - (total - 1) * MAX_UDP_PAYLOAD
+	if length <= 0 or length > parity.size():
+		return
+	var words := (parity.size() + 7) / 8 * 8
+	parity.resize(words)
+	var acc := parity.to_int64_array()
+	for i in range(group, total, step):
+		if i == missing:
+			continue
+		var c: PackedByteArray = chunks[i].duplicate()
+		if c.size() > words:
+			return
+		c.resize(words)
+		var w := c.to_int64_array()
+		for k in w.size():
+			acc[k] ^= w[k]
+	chunks[missing] = acc.to_byte_array().slice(0, length)
+	_chunks_rebuilt += 1
 
 var _frames_assembled: int = 0
 
@@ -571,8 +636,9 @@ func _deliver_frame(monitor_id: int, frame_num: int, frame_data: PackedByteArray
 		print("[Net] LARGE frame assembled: mon=%d frame=%d size=%d" % [
 				monitor_id, frame_num, frame_data.size()])
 	elif _frames_assembled % 120 == 0:
-		print("[Net] frames assembled=%d last: mon=%d frame=%d size=%d buf_entries=%d" % [
-				_frames_assembled, monitor_id, frame_num, frame_data.size(), _frame_buffer.size()])
+		print("[Net] frames assembled=%d last: mon=%d frame=%d size=%d buf_entries=%d rebuilt_chunks=%d" % [
+				_frames_assembled, monitor_id, frame_num, frame_data.size(), _frame_buffer.size(),
+				_chunks_rebuilt])
 
 	var size: Vector2i = _stream_size.get(monitor_id, Vector2i.ZERO)
 	video_frame_received.emit(monitor_id, frame_data, size.x, size.y)

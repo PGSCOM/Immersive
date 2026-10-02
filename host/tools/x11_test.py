@@ -95,6 +95,8 @@ def recv_frames(udp, want, seconds):
         except socket.timeout:
             continue
         mon, num, idx, cnt = struct.unpack_from("<BIHH", pkt, 0)
+        if idx >= cnt:
+            continue  # FEC parity
         c = chunks.setdefault((mon, num), {})
         c[idx] = pkt[9:]
         if len(c) == cnt and mon in want and mon not in out:

@@ -280,11 +280,11 @@ private:
     void apply_rate() {
         const double fps = std::max<uint32_t>(1, config_.fps);
         const double bps = static_cast<double>(config_.bitrate_kbps) * 1000.0;
-        // Same small VBV as mf_encoder.cpp (~50 ms, at most 600 kbit), as a
-        // leaky bucket over one frame: an IDR stays a few dozen UDP chunks.
-        const double vbv_bits = std::min(bps * 0.05, 600000.0);
+        // The VBV main.cpp sizes for the link (EncoderConfig::vbv_kbit), as a
+        // leaky bucket over one frame: the most one frame, an IDR, may take.
+        const double vbv = vbv_bits(config_);
         NSArray* data_rate_limits =
-            @[ @(static_cast<int64_t>((vbv_bits + bps / fps) / 8.0)), @(1.0 / fps) ];
+            @[ @(static_cast<int64_t>((vbv + bps / fps) / 8.0)), @(1.0 / fps) ];
         set_property(kVTCompressionPropertyKey_AverageBitRate, @(static_cast<int32_t>(bps)));
         set_property(kVTCompressionPropertyKey_DataRateLimits, data_rate_limits);
         set_property(kVTCompressionPropertyKey_ExpectedFrameRate, @(fps));

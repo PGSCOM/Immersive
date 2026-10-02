@@ -277,7 +277,8 @@ struct AudioStart {
     uint16_t audio_port;   ///< UDP port on which audio packets are sent
 };
 
-/// Video packet header for video channel (UDP)
+/// Video packet header for video channel (UDP). chunk_index >= chunk_count is
+/// a parity chunk (see VideoParityHeader).
 struct VideoPacketHeader {
     uint8_t  monitor_id;
     uint32_t frame_number;
@@ -285,6 +286,21 @@ struct VideoPacketHeader {
     uint16_t chunk_count;
     // Followed by payload bytes
 };
+
+/// Forward error correction on UDP video: after a frame's chunk_count data
+/// chunks the host sends parity chunks, numbered chunk_count ..
+/// chunk_count + parity_count - 1 (older clients drop them: chunk_index >=
+/// chunk_count). Parity chunk j is the XOR of every data chunk i with
+/// i % parity_count == j, each zero-padded to the first chunk's length, so a
+/// client rebuilds one lost chunk per group, or any burst of up to
+/// parity_count consecutive ones. Its payload: this header, then the XOR.
+struct VideoParityHeader {
+    uint32_t frame_size;    ///< the whole frame's bytes (sizes a rebuilt last chunk)
+    uint16_t parity_count;
+};
+
+/// Parity chunks per 100 data chunks (at least one per frame); Sunshine's default share.
+constexpr uint32_t FEC_PERCENT = 20;
 
 /// VIDEO_FRAME payload header (TCP media mode). Followed by the whole encoded
 /// frame — the same bytes the UDP chunks of that frame would reassemble to.

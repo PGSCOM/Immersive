@@ -34,7 +34,14 @@ struct EncoderConfig {
     VideoCodec   codec         = VideoCodec::H264;
     uint32_t     gop_size      = 60;     // keyframe interval
     uint32_t     jpeg_quality  = 35;     // MJPEG quality (10-95)
+    uint32_t     vbv_kbit      = 0;      // rate-control buffer: the largest frame; 0 = one frame's share
 };
+
+/// The rate control's buffer (VBV / HRD) in bits. It alone decides how big an
+/// IDR may get, so how sharp a desktop is the moment it (re)starts.
+inline uint32_t vbv_bits(const EncoderConfig& c) {
+    return c.vbv_kbit ? c.vbv_kbit * 1000u : c.bitrate_kbps * 1000u / (c.fps ? c.fps : 1u);
+}
 
 /// An encoded video packet
 struct EncodedPacket {
@@ -99,8 +106,8 @@ public:
 ///    decoding at any IDR;
 ///  - request_keyframe() makes the next encoded frame an IDR;
 ///  - BT.601 limited-range colour, tagged in the VUI / colour config;
-///  - CBR-ish rate control at EncoderConfig::bitrate_kbps with a small VBV
-///    (~50 ms) so a single IDR stays a few dozen UDP chunks.
+///  - rate control capped at EncoderConfig::bitrate_kbps with a VBV of
+///    vbv_bits(config), starting full, so the first IDR may use all of it.
 std::unique_ptr<IVideoEncoder> create_hw_encoder();
 
 /// True if create_hw_encoder() can encode `codec` on this machine (probed

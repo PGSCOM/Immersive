@@ -26,7 +26,8 @@ Checks, in order:
      via client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
   10. Headless unit checks: hand tracking (a pinch clicks where the hand
      points), controllers (clicks, grip right-click vs grab, idle hiding),
-     curved-screen ray hits, grabbing and the VR keyboard.
+     curved-screen ray hits, grabbing and the VR keyboard, and the video
+     FEC (lost UDP chunks rebuilt from parity, client/tests/fec_test.gd).
 """
 import os
 import re
@@ -375,9 +376,9 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("11/11 hand tracking, controllers, screens and keyboard")
+    step("11/11 hand tracking, controllers, screens and keyboard, video FEC")
     for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd",
-                 "groups_test.gd", "virtual_match_test.gd"):
+                 "groups_test.gd", "virtual_match_test.gd", "fec_test.gd"):
         run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")
 
