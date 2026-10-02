@@ -194,6 +194,59 @@ def check_virtual_displays(s, udp):
         fail("removing a virtual display that is gone should fail (2)")
     print(f"[client] OK: virtual displays {made} made and removed, 5th refused")
 
+def screen_off_msgs(s, seconds, renew=False):
+    """SCREEN_OFF states the host sends within `seconds`, re-sending off = 1
+    every 2 s meanwhile if `renew` (as the client does)."""
+    states, end, next_renew = [], time.time() + seconds, time.time() + 2
+    while time.time() < end:
+        if renew and time.time() >= next_renew:
+            s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+            next_renew += 2
+        try:
+            mtype, payload = recv_msg(s)
+        except (TimeoutError, socket.timeout):
+            continue
+        if mtype == 0x25:
+            states.append(payload[0])
+    return states
+
+def check_screen_off(s):
+    """SCREEN_OFF: dark while the client renews it, lit when it stops or asks."""
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(s, 1.5) != [1]:
+        fail("SCREEN_OFF 1 should be answered with 1")
+    if screen_off_msgs(s, 12, renew=True):
+        fail("a renewed screen-off lease must hold past 10 s, quietly")
+    if screen_off_msgs(s, 13) != [0]:
+        fail("the main screen should light again when the lease runs out")
+    print("[client] screen off: held while renewed, lit again once the renewals stopped")
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    s.sendall(struct.pack("<BIB", 0x25, 1, 0))
+    if screen_off_msgs(s, 1.5) != [1, 0]:
+        fail("SCREEN_OFF 1 then 0 should be answered with 1, 0")
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(s, 1.5) != [1]:
+        fail("SCREEN_OFF 1 should be answered with 1")
+    other = socket.create_connection((HOST, TCP_PORT), timeout=3, source_address=(CLIENT_IP, 0))
+    other.sendall(hello("SmokeTestOther", pin=PIN))
+    if screen_off_msgs(s, 1.5) != [0]:
+        fail("a new headset connection should light the main screen again")
+    print("[client] screen off: a new connection starts with the main screen lit")
+    other.settimeout(0.5)
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(s, 1.5) != [1]:
+        fail("SCREEN_OFF 1 should be answered with 1")
+    other.sendall(struct.pack("<BIB", 0x25, 1, 0) + struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(other, 1.5) != [0, 0]:
+        fail("a headset that does not drive the PC should be refused (answer 0)")
+    if screen_off_msgs(s, 1.5, renew=True):
+        fail("a headset that does not drive the PC must not touch the main screen")
+    send_multi_select(other, [0])
+    if screen_off_msgs(s, 1.5) != [0]:
+        fail("the main screen should light again when another headset takes the PC over")
+    other.close()
+    print("[client] screen off: only the headset driving the PC, lit when another takes over")
+
 def send_multi_select(s, ids):
     body = bytes([len(ids)]) + bytes((ids + [0xFF, 0xFF, 0xFF])[:3]) + b"\x00"
     s.sendall(struct.pack("<BI", 0x20, len(body)) + body)
@@ -372,8 +425,8 @@ def main():
             host_name = payload[4:68].split(b"\x00")[0].decode("utf-8", "replace")
             host_flags = payload[68] if len(payload) >= 69 else None
             print(f"[client]    host name {host_name!r} flags {host_flags}")
-            if host_flags is None or host_flags & 0x01 or not host_flags & 0x02:
-                fail(f"--stub host should say virtual displays yes, view-only no: {host_flags}")
+            if host_flags is None or host_flags & 0x01 or not host_flags & 0x02 or not host_flags & 0x04:
+                fail(f"--stub host should say virtual displays and screen off yes, view-only no: {host_flags}")
         if mtype == 0x03 and payload:  # MONITOR_LIST
             for mon_id, w, h, nm, flags in parse_monitor_list(payload):
                 print(f"[client]    monitor {mon_id}: {w}x{h} {nm} flags={flags}")
@@ -493,6 +546,7 @@ def main():
         sys.exit(1)
 
     check_virtual_displays(s, udp)
+    check_screen_off(s)
     s.close()
     print("[client] OK: handshake, multi-monitor streaming and stop all verified")
     check_idle_dropped(idle)

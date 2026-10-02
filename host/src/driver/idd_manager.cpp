@@ -18,6 +18,8 @@
 #include <cwchar>
 
 #ifdef _WIN32
+#include <future>
+#include <thread>
 #include <windows.h>
 #include <setupapi.h>
 #include <devguid.h>
@@ -166,6 +168,81 @@ void install_idd_signing_certificate() {
 // stable ids the capture needs, so the protocol reports "unsupported".
 class VirtualDisplayManagerImpl : public IVirtualDisplayManager {
 public:
+    ~VirtualDisplayManagerImpl() override { set_primary_off(false); }
+
+    /// The main screen goes dark under a black, click-through, topmost window
+    /// that WGC and DXGI duplication leave out (WDA_EXCLUDEFROMCAPTURE,
+    /// Windows 10 2004+; before that it would stream black too). It dies with
+    /// the process. The pointer and the Start menu still show over it.
+    bool can_turn_off_primary() const override {
+        using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+        auto get = reinterpret_cast<RtlGetVersionFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+        OSVERSIONINFOW v{sizeof(v)};
+        return get && get(&v) == 0 && (v.dwMajorVersion > 10 || v.dwBuildNumber >= 19041);
+    }
+
+    bool set_primary_off(bool off) override {
+        if (!off) {
+            if (curtain_.joinable()) {
+                PostThreadMessageW(curtain_tid_, WM_QUIT, 0, 0);
+                curtain_.join();
+            }
+            return true;
+        }
+        if (curtain_.joinable()) return true;
+        if (!can_turn_off_primary()) return false;
+        std::promise<bool> ready;
+        auto shown = ready.get_future();
+        curtain_ = std::thread([this, &ready] { run_curtain(ready); });
+        if (shown.get()) return true;
+        curtain_.join();
+        return false;
+    }
+
+    /// The curtain window's thread: it must pump messages or Windows swaps
+    /// the window for a "not responding" ghost, which capture would see.
+    void run_curtain(std::promise<bool>& ready) {
+#ifndef WDA_EXCLUDEFROMCAPTURE
+        constexpr DWORD WDA_EXCLUDEFROMCAPTURE = 0x11;
+#endif
+        curtain_tid_ = GetCurrentThreadId();
+        WNDCLASSW wc{};
+        wc.lpfnWndProc   = DefWindowProcW;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        wc.lpszClassName = L"Immersive2ScreenOff";
+        RegisterClassW(&wc);  // fails harmlessly once registered
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+        const RECT r = mi.rcMonitor;
+        HWND w = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                                     WS_EX_LAYERED | WS_EX_TRANSPARENT,  // clicks fall through
+                                 wc.lpszClassName, L"", WS_POPUP, r.left, r.top,
+                                 r.right - r.left, r.bottom - r.top, nullptr, nullptr,
+                                 wc.hInstance, nullptr);
+        DWORD affinity = 0;
+        if (!w || !SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA) ||
+            !SetWindowDisplayAffinity(w, WDA_EXCLUDEFROMCAPTURE) ||
+            !GetWindowDisplayAffinity(w, &affinity) || affinity != WDA_EXCLUDEFROMCAPTURE) {
+            std::cerr << "[Display] Could not darken the main screen (error " << GetLastError() << ")\n";
+            if (w) DestroyWindow(w);
+            ready.set_value(false);
+            return;
+        }
+        ShowWindow(w, SW_SHOWNOACTIVATE);
+        SetTimer(w, 1, 500, nullptr);
+        ready.set_value(true);
+        MSG m;
+        while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+            // Back over the taskbar once it has been clicked to the front.
+            if (m.message == WM_TIMER)
+                SetWindowPos(w, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            DispatchMessageW(&m);
+        }
+        DestroyWindow(w);
+    }
+
     bool is_driver_installed() const override {
 #ifdef _WIN32
         // NOTE: this is a query and nothing else. It used to install a
@@ -317,6 +394,8 @@ private:
     };
     uint8_t                          next_id_ = 1;
     std::vector<VirtualDisplayRecord> active_displays_;
+    std::thread curtain_;      // while the main screen is off
+    DWORD       curtain_tid_ = 0;
 };
 
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {

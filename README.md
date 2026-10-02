@@ -317,6 +317,18 @@ creates them on X11 (an extra RandR monitor), on GNOME Wayland (Mutter's
 virtual monitors) and on macOS (a virtual display, not yet tried on a real
 Mac); other desktops answer that they can't. They are removed again when the host quits.
 
+### Main screen off
+
+Connect tab → **Turn off this PC's main screen** darkens the PC's main monitor
+while you keep working on it in the headset (it still streams). It is never
+saved: every connection starts with the screen on, and it comes back on by
+itself when you switch it off, disconnect, take the headset off (the headset
+stops renewing it and the PC waits 10 s) or quit the host. Works on X11 (gamma),
+GNOME Wayland (gamma, and a laptop panel's backlight down to its minimum),
+macOS (gamma, not yet tried on a real Mac) and Windows 10 2004+ (a black window
+left out of the capture; the pointer and the Start menu still show over it).
+Other Wayland desktops and view-only hosts don't offer it.
+
 ### Sharper text
 
 Space tab → **Sharper text** draws each screen as an OpenXR compositor layer:
@@ -361,6 +373,7 @@ shows the screens wrong.
 - [x] Live status: delay, received fps and Mbps, connection details
 - [x] Virtual screens (X11, GNOME Wayland, macOS) created from the headset
 - [x] OpenXR compositor layers for sharper text (opt-in)
+- [x] Turn the PC's main screen off from the headset (lit again without it)
 - [x] Controller vibration on clicks and grabs
 - [x] Remote control switch in the headset, and `--view-only` on the host
 - [x] Host tray icon + settings window (PIN, headsets, live switches, start at login)

@@ -186,6 +186,13 @@ public:
         for (const auto& [id, m] : g_virtual) ids.push_back(id);
         return ids;
     }
+
+    bool can_turn_off_primary() const override { return true; }
+
+    bool set_primary_off(bool off) override {
+        std::cout << "[StubVirtual] Main screen " << (off ? "off" : "on") << "\n";
+        return true;
+    }
 };
 
 class StubInputInjector : public IInputInjector {

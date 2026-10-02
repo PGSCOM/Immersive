@@ -567,6 +567,10 @@ public:
     void set_on_pin_requested(PinRequestedCallback cb) override {
         on_pin_requested_ = std::move(cb);
     }
+    void set_on_screen_off(ScreenOffCallback cb) override {
+        on_screen_off_ = std::move(cb);
+    }
+
     void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) override {
         on_vdisplay_remove_ = std::move(cb);
     }
@@ -991,6 +995,12 @@ private:
                 }
                 break;
             }
+            case protocol::MessageType::SCREEN_OFF: {
+                if (payload.size() >= sizeof(protocol::ScreenOff) && on_screen_off_) {
+                    on_screen_off_(client_id, payload[0] != 0);
+                }
+                break;
+            }
             case protocol::MessageType::LATENCY_PROBE: {
                 if (payload.size() >= sizeof(protocol::LatencyProbe)) {
                     protocol::LatencyProbe probe;
@@ -1304,6 +1314,7 @@ private:
 
     ClientConnectedCallback      on_connected_;
     ClientDisconnectedCallback   on_disconnected_;
+    ScreenOffCallback            on_screen_off_;
     MonitorSelectCallback        on_monitor_select_;
     MultiMonitorSelectCallback   on_multi_monitor_select_;
     StreamConfigCallback         on_stream_config_;

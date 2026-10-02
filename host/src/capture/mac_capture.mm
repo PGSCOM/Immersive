@@ -428,7 +428,26 @@ std::unique_ptr<IScreenCapture> create_screen_capture() {
 /// lives as long as its CGVirtualDisplay object (and dies with the process).
 class MacVirtualDisplayManager : public IVirtualDisplayManager {
 public:
-    ~MacVirtualDisplayManager() override { remove_all_displays(); }
+    ~MacVirtualDisplayManager() override {
+        set_primary_off(false);
+        remove_all_displays();
+    }
+
+    /// A zero transfer formula blacks out the main display at scanout, after
+    /// ScreenCaptureKit reads it. macOS also restores it when the process
+    /// exits, crash or not. (Untested: CI only compiles macOS.)
+    bool can_turn_off_primary() const override { return true; }
+
+    bool set_primary_off(bool off) override {
+        if (!off) {
+            if (dark_) CGDisplayRestoreColorSyncSettings();
+            dark_ = false;
+            return true;
+        }
+        dark_ = dark_ || CGSetDisplayTransferByFormula(CGMainDisplayID(), 0, 0, 1, 0, 0, 1, 0, 0, 1)
+                             == kCGErrorSuccess;
+        return dark_;
+    }
 
     bool can_create_displays() const override {
         return NSClassFromString(@"CGVirtualDisplay") &&
@@ -516,6 +535,7 @@ public:
 
 private:
     std::map<int, CGVirtualDisplay*> displays_;  // n → display (strong, ARC)
+    bool dark_ = false;
 };
 
 std::unique_ptr<IVirtualDisplayManager> create_virtual_display_manager() {

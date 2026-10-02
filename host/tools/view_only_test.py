@@ -4,7 +4,8 @@
 
 Starts the host with --stub --view-only (IM2_TCP_PORT / IM2_UDP_PORT choose
 the ports) and checks that LAN discovery and HELLO_ACK say so, that a stream
-still starts, and that mouse and keyboard events never reach the injector.
+still starts, that mouse and keyboard events never reach the injector, and
+that a headset cannot turn the PC's main screen off.
 """
 import os
 import socket
@@ -15,7 +16,8 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from smoke_client import CLIENT_IP, HOST, TCP_PORT, UDP_PORT, hello, recv_msg, send_multi_select  # noqa: E402
+from smoke_client import (CLIENT_IP, HOST, TCP_PORT, UDP_PORT, hello, recv_msg,  # noqa: E402
+                          screen_off_msgs, send_multi_select)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -36,7 +38,9 @@ def main():
     text = log.read()
     if "View-only: ignoring" not in text or "[StubInput]" in text:
         fail("input reached the injector:\n" + text[-2000:])
-    print("[view-only] OK: advertised in discovery and HELLO_ACK, input ignored")
+    if "Main screen off" in text:
+        fail("a view-only host turned its main screen off")
+    print("[view-only] OK: advertised in discovery and HELLO_ACK, input ignored, screen stays on")
 
 
 def fail(msg):
@@ -68,6 +72,10 @@ def run():
         fail("no STREAM_START: view-only must still share the screens")
     s.sendall(struct.pack("<BIBHHBhh", 0x10, 10, 0, 100, 50, 1, 0, 0))  # left button down
     s.sendall(struct.pack("<BIBHBB", 0x11, 5, 0, 0x41, 1, 0))           # 'A' down
+    s.settimeout(0.5)
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))                          # screen off
+    if screen_off_msgs(s, 1.5) != [0]:
+        fail("SCREEN_OFF on a view-only host should be refused (answer 0)")
     s.close()
 
 

@@ -43,6 +43,9 @@ using VirtualDisplayCreateCallback =
     std::function<void(uint32_t client_id, const protocol::VirtualDisplayCreate& request)>;
 using VirtualDisplayRemoveCallback = std::function<void(uint32_t client_id, uint8_t monitor_id)>;
 
+/// SCREEN_OFF from a client (off = darken the main screen).
+using ScreenOffCallback = std::function<void(uint32_t client_id, bool off)>;
+
 /// A headset at `peer_ip` was refused for a missing or wrong PIN: the host
 /// shows the PIN to the person at the PC.
 using PinRequestedCallback = std::function<void(const std::string& peer_ip)>;
@@ -115,6 +118,7 @@ public:
     virtual void set_on_virtual_display_create(VirtualDisplayCreateCallback cb) = 0;
     virtual void set_on_virtual_display_remove(VirtualDisplayRemoveCallback cb) = 0;
     virtual void set_on_pin_requested(PinRequestedCallback cb) = 0;
+    virtual void set_on_screen_off(ScreenOffCallback cb) = 0;
 
     /// Settings panel (host/src/ui): change the pairing PIN (0 = none) and
     /// the HOST_FLAG_* bits while running. New flags are re-sent in a fresh

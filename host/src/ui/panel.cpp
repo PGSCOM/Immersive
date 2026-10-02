@@ -420,7 +420,8 @@ private:
 
     uint8_t host_flags() const {
         return (s_.view_only ? protocol::HOST_FLAG_VIEW_ONLY : 0) |
-               (opt_.virtual_supported ? protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0);
+               (opt_.virtual_supported ? protocol::HOST_FLAG_VIRTUAL_DISPLAYS : 0) |
+               (opt_.screen_off_supported ? protocol::HOST_FLAG_SCREEN_OFF : 0);
     }
 
     template <typename Arg>

@@ -78,6 +78,7 @@ struct Options {
     uint16_t audio_port = 0;
     bool     audio_available = false;  ///< false with --no-audio / --stub
     bool     virtual_supported = false;
+    bool     screen_off_supported = false;  ///< HOST_FLAG_SCREEN_OFF
     bool     stub = false;             ///< never touch the desktop portal
 };
 

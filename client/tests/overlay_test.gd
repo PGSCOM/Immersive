@@ -31,6 +31,7 @@ func _initialize() -> void:
 	ov.virtual_screen_match_requested.connect(func(id, w, h): events.append(["match", id, w, h]))
 	ov.virtual_page_requested.connect(func(id): events.append(["vpage", id]))
 	ov.control_toggled.connect(func(on): events.append(["control", on]))
+	ov.screen_off_toggled.connect(func(off): events.append(["screen_off", off]))
 	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
 	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
 	ov.pointer_settings_changed.connect(func(h, a, f): events.append(["pointer", h, a, f]))
@@ -313,7 +314,20 @@ func _run() -> void:
 	check(events.back() == ["control", false] and ov._lbl_control_note.visible,
 		"the switch turns control off and says what that means -> %s" % [events.back()])
 	await _step("connected")
-	ov.set_host_capabilities(true, false)
+	check(not ov._chk_screen_off.visible, "no screen-off switch when the PC can't do it")
+	ov.set_host_capabilities(false, false, true)
+	await _frames(3)  # the switch appears and takes its place
+	check(ov._chk_screen_off.visible and not ov._chk_screen_off.button_pressed
+		and not ov._lbl_screen_off_note.visible, "the PC's main screen starts on")
+	await _click(ov._chk_screen_off)
+	check(events.back() == ["screen_off", true] and ov._lbl_screen_off_note.visible,
+		"the switch turns the main screen off and says when it comes back -> %s" % [events.back()])
+	await _step("screen_off")
+	ov.set_screen_off(false)  # the host lit it (lease ran out, refused)
+	check(not ov._chk_screen_off.button_pressed and not ov._lbl_screen_off_note.visible,
+		"the switch follows the host")
+	ov.set_host_capabilities(true, false, true)
+	check(not ov._chk_screen_off.visible, "a view-only PC: no screen-off switch")
 	check(ov._chk_control.disabled and not ov._chk_control.button_pressed, "a view-only PC: control off and locked")
 	await _step("viewonly")
 	ov.set_host_capabilities(false, false)
