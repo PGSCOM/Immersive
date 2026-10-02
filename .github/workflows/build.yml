@@ -300,24 +300,26 @@ jobs:
         timeout-minutes: 15
         run: python3 host/tools/e2e_test.py
 
-      # A short video of the real client streaming the --stub host, rendered
-      # under Xvfb with Godot's Movie Maker (--write-movie). Recorded even when
-      # the e2e test failed, to see what the client showed.
+      # The real client streaming the --stub host, driven by
+      # client/tests/demo_video_test.gd (move, pull, resize, snap, menu) and
+      # rendered under Xvfb with Godot's Movie Maker (--write-movie). Fails on
+      # a failed check; the video is uploaded either way.
       - name: Record client video
         if: ${{ !cancelled() }}
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           ./host/build/immersive2_host --stub --no-ui --no-usb --no-audio --pin 246810 &
-          HOST_PID=$!
+          trap "kill $!" EXIT
           sleep 1
+          status=0
           xvfb-run -a -s "-screen 0 1280x720x24" godot --rendering-driver opengl3 \
             --xr-mode off --audio-driver Dummy --resolution 1280x720 \
-            --path client/project --write-movie "$RUNNER_TEMP/client.avi" \
-            --fixed-fps 30 --quit-after 300 -- \
-            --im2-host=127.0.0.1 --im2-monitors=0,1,2
-          kill "$HOST_PID"
+            --path client/project --write-movie "$RUNNER_TEMP/client.avi" --fixed-fps 30 \
+            -s "$PWD/client/tests/demo_video_test.gd" -- \
+            --im2-host=127.0.0.1 --im2-monitors=0,1,2 || status=$?
           ffmpeg -v error -y -i "$RUNNER_TEMP/client.avi" -c:v libx264 -pix_fmt yuv420p client-e2e.mp4
+          exit "$status"
 
       - name: Upload client video
         if: ${{ !cancelled() }}
