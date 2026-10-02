@@ -63,6 +63,12 @@ const RAY_ORIGIN := Transform3D(
 	Basis(Vector3(1, 0, 0), Vector3(0, 0.76604444, -0.6427876), Vector3(0, 0.6427876, 0.76604444)),
 	Vector3(0, 0, 0.1))
 const POINTER_COLOR := Color(0.93, 0.92, 0.88)
+## The controller model's frame in the grip pose (the controller as the
+## runtime tracks it in the hand): the Pico 4's handle tilts 26° up toward its
+## head, so the model's front end and ring land on the real one's head.
+const MODEL_IN_GRIP := Transform3D(
+	Basis(Vector3(1, 0, 0), Vector3(0, 0.89879405, 0.43837115), Vector3(0, -0.43837115, 0.89879405)),
+	Vector3(0, 0.014, -0.003))
 
 enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
 
@@ -217,6 +223,8 @@ func _beam_mesh() -> ArrayMesh:
 
 ## The runtime's own controller model when it provides one; otherwise a
 ## simple dark grip with a light ring, hidden once a real model shows up.
+## _process() keeps it on the grip pose (MODEL_IN_GRIP); it hangs under the
+## aim-posed controller only to show and hide with it.
 func _build_visual() -> void:
 	_visual = controller.get_node_or_null("ControllerVisual")
 	if _visual == null:
@@ -267,6 +275,11 @@ func _process(delta: float) -> void:
 	var shown := in_use()
 	var has_model := is_instance_valid(_render_models) and _render_models.get_child_count() > 0
 	_visual.visible = shown and not has_model
+	var tracker := XRServer.get_tracker(controller.tracker) as XRPositionalTracker
+	var aim: XRPose = tracker.get_pose(&"aim") if tracker else null
+	var grip: XRPose = tracker.get_pose(&"grip") if tracker else null
+	if aim and grip and grip.has_tracking_data:
+		_visual.transform = aim.get_adjusted_transform().affine_inverse() * grip.get_adjusted_transform() * MODEL_IN_GRIP
 	if is_instance_valid(_render_models):
 		_render_models.visible = shown
 
