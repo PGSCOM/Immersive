@@ -416,12 +416,14 @@ its own ramp back when the monitors change; macOS: zero display transfer formula
 window left out of capture). `off = 1` is a lease: the client re-sends it every
 2 s while it wants the screen dark, and the host lights it again 10 s
 (`SCREEN_OFF_LEASE_MS`) after the last one, when that client disconnects, when
-the host turns view-only and when it exits. So the screen is never dark without
-a headset on it, and every connection starts with it lit.
+another headset takes the PC over (streams from it), when the host turns
+view-only and when it exits. So the screen is never dark without a headset on
+it, and every new connection lights it. Only the client that drives the PC (the
+one streaming from it) is obeyed.
 
 Host → client: the screen's state each time it changes for that client, and
-`off = 0` right after a request it could not honour (view-only, the backend
-failed). The client's switch follows these.
+`off = 0` right after a request it could not honour (view-only, a client that
+does not drive the PC, the backend failed). The client's switch follows these.
 
 ---
 

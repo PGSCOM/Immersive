@@ -1106,7 +1106,9 @@ int main(int argc, char* argv[]) {
     // (it keeps streaming). Never without a headset: the client that turned
     // it off holds a lease it renews every 2 s (protocol::ScreenOff), and the
     // screen is lit again when that lease runs out, when that client leaves,
-    // in view-only and on exit. Each connection starts with it lit.
+    // when another headset takes the PC over, in view-only and on exit. Each
+    // connection starts with it lit. Only the headset that drives the PC
+    // (input_client_id) can turn it off or on.
     // screen_off_client (0 = lit) changes under ops_mutex.
     std::atomic<uint32_t> screen_off_client{0};
     std::atomic<int64_t>  screen_off_until_ms{0};
@@ -1128,6 +1130,10 @@ int main(int argc, char* argv[]) {
     };
     server->set_on_screen_off([&](uint32_t client_id, bool off) {
         std::lock_guard<std::mutex> ops(ops_mutex);
+        if (client_id != input_client_id) {  // a second headset, or one not streaming yet
+            send_screen_off(client_id, false);  // its switch goes back
+            return;
+        }
         const uint32_t owner = screen_off_client;
         if (!off) {
             if (owner) light_screen_locked("asked by the headset");
@@ -1611,9 +1617,11 @@ int main(int argc, char* argv[]) {
     };
     while (g_running) {
         reap_graveyard(false);
-        if (screen_off_client && (view_only || steady_ms() > screen_off_until_ms)) {
+        if (screen_off_client && (view_only || screen_off_client != input_client_id ||
+                                  steady_ms() > screen_off_until_ms)) {
             std::lock_guard<std::mutex> ops(ops_mutex);
             if (view_only) light_screen_locked("view-only");
+            else if (screen_off_client != input_client_id) light_screen_locked("another headset took over");
             else if (steady_ms() > screen_off_until_ms) light_screen_locked("the headset went quiet");
         }
         if (ui) ui->pump(std::chrono::milliseconds(100));  // runs the macOS menu bar

@@ -183,10 +183,11 @@ struct VirtualDisplayResult {
 /// Client → host: off = 1 darkens the PC's main (primary) monitor, which
 /// keeps streaming; 0 lights it again. off = 1 is a lease the client re-sends
 /// every 2 s while it wants the screen dark: the host lights it again
-/// SCREEN_OFF_LEASE_MS after the last one, when that client leaves, when the
-/// host turns view-only and when it exits, so a PC never stays dark with no
-/// headset on it. Host → client: the screen's state after it changed (or
-/// off = 0 when it could not darken it).
+/// SCREEN_OFF_LEASE_MS after the last one, when that client leaves, when
+/// another headset connects or takes the PC over, when the host turns
+/// view-only and when it exits, so a PC never stays dark with no headset on
+/// it. Only the client streaming from the PC is obeyed. Host → client: the
+/// screen's state after it changed (or off = 0 when it refused).
 struct ScreenOff {
     uint8_t off;
 };

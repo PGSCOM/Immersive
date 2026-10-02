@@ -231,8 +231,21 @@ def check_screen_off(s):
     other.sendall(hello("SmokeTestOther", pin=PIN))
     if screen_off_msgs(s, 1.5) != [0]:
         fail("a new headset connection should light the main screen again")
-    other.close()
     print("[client] screen off: a new connection starts with the main screen lit")
+    other.settimeout(0.5)
+    s.sendall(struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(s, 1.5) != [1]:
+        fail("SCREEN_OFF 1 should be answered with 1")
+    other.sendall(struct.pack("<BIB", 0x25, 1, 0) + struct.pack("<BIB", 0x25, 1, 1))
+    if screen_off_msgs(other, 1.5) != [0, 0]:
+        fail("a headset that does not drive the PC should be refused (answer 0)")
+    if screen_off_msgs(s, 1.5, renew=True):
+        fail("a headset that does not drive the PC must not touch the main screen")
+    send_multi_select(other, [0])
+    if screen_off_msgs(s, 1.5) != [0]:
+        fail("the main screen should light again when another headset takes the PC over")
+    other.close()
+    print("[client] screen off: only the headset driving the PC, lit when another takes over")
 
 def send_multi_select(s, ids):
     body = bytes([len(ids)]) + bytes((ids + [0xFF, 0xFF, 0xFF])[:3]) + b"\x00"
