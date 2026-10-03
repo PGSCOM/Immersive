@@ -50,6 +50,7 @@ signal lock_toggled(enabled: bool)
 ## ray tilt in degrees · face_me: grabbed screens turn to the head.
 signal pointer_settings_changed(hand: String, ray_angle: float, face_me: bool)
 signal compositor_layers_toggled(enabled: bool)
+signal passthrough_hands_toggled(enabled: bool)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -106,6 +107,7 @@ var _pointer_hand := "right"
 var _ray_angle := 40.0
 var _face_me := false
 var _layers_enabled := false
+var _hands_enabled := true
 var _pin_visible := false
 var _last_pointer_uv := Vector2(0.5, 0.5)
 var _finger := FingerTouch.new()
@@ -192,6 +194,7 @@ var _vs_tween: Tween
 # Space tab
 var _look_buttons: Dictionary = {}
 var _chk_layers: CheckButton
+var _chk_hands: CheckButton
 
 # Quality tab
 var _codec_buttons: Dictionary = {}
@@ -331,6 +334,11 @@ func set_pointer_settings(hand: String, ray_angle: float, face_me: bool) -> void
 	_ray_angle = ray_angle
 	_face_me = face_me
 	_refresh_input_tab()
+
+func set_passthrough_hands(enabled: bool) -> void:
+	_hands_enabled = enabled
+	if _chk_hands:
+		_chk_hands.set_pressed_no_signal(enabled)
 
 func set_compositor_layers(enabled: bool, _supported: bool = true) -> void:
 	_layers_enabled = enabled
@@ -881,6 +889,7 @@ func _build_ui() -> void:
 	_panel_mesh.material_override = mat
 	_panel_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_panel_mesh)
+	_panel_mesh.add_to_group(&"covers_hands")  # main.gd::_apply_hand_mask
 	grab_bar = GrabBar.new()
 	grab_bar.always_shown = true
 	grab_bar.position = Vector3(0.0, -panel_height / 2.0 - 0.045, 0.0)
@@ -1633,6 +1642,14 @@ func _build_space_tab(body: VBoxContainer) -> void:
 	var note := _label("Passthrough shows your room around the screens, on headsets that allow it.", 17, UiTheme.INK_3)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(note)
+	_chk_hands = CheckButton.new()
+	_chk_hands.text = "In passthrough, draw my hands over the screens"
+	_chk_hands.focus_mode = Control.FOCUS_NONE
+	_chk_hands.button_pressed = _hands_enabled
+	_chk_hands.toggled.connect(func(on):
+		_hands_enabled = on
+		passthrough_hands_toggled.emit(on))
+	body.add_child(_chk_hands)
 
 	var sp := Control.new()
 	sp.custom_minimum_size.y = 6

@@ -18,6 +18,9 @@ extends SceneTree
 ##   - a fingertip on a panel (main.finger_touch) rests the ray;
 ##   - the other hand's palm turned to the face shows the menu mark and a short
 ##     pinch toggles the menu (a long one or a palm turned away does not);
+##   - the hand's silhouette sits on the palm joint; in passthrough it takes
+##     the stencil-masked material, or hides with passthrough_hands off; it
+##     hides while a controller is in use;
 ##   - the Pico case, with real vr_input.gd controllers: hand joints reported
 ##     (source unknown) while a controller is held and moving do nothing, and
 ##     the controller clicks; controllers put down (still, or untracked) give
@@ -37,6 +40,8 @@ extends Node3D
 var sent: Array = []
 var ui: Array = []
 var pointer_hand := "right"
+var passthrough_enabled := false
+var passthrough_hands := true
 var grabbed := 0
 var released := 0
 var toggles := 0
@@ -262,6 +267,34 @@ func _run() -> void:
 	var aim := _last()
 	check(aim[2] == 0 and _near(aim, [1113, 553]), "open hand points straight ahead -> %s" % [aim])
 	check(_beam_on(KNUCKLE), "the beam runs from the index knuckle to the cursor")
+
+	# --- The hand's silhouette ----------------------------------------------
+	var palm_basis := Basis(Vector3.UP, 0.4)
+	_palm_turn(palm_basis)
+	await _frames(2)
+	var shape: Node3D = input._hands[1]
+	check(is_instance_valid(shape) and shape.visible and not is_instance_valid(input._hands[0])
+		and shape.global_transform.is_equal_approx(Transform3D(palm_basis, Vector3.ZERO)),
+		"the right hand's silhouette sits on its palm joint (no left hand tracked: none drawn)")
+	main.passthrough_enabled = true
+	await _frames(2)
+	var mat: ShaderMaterial = input._hand_meshes[1].material_override
+	check(shape.visible and mat == input._hand_material(true) and mat.shader.code.contains("stencil_mode read")
+		and mat.next_pass.shader == mat.shader,
+		"passthrough: drawn only where the stencil is marked (both passes)")
+	main.passthrough_hands = false
+	await _frames(2)
+	check(not shape.visible, "passthrough with the hands switched off: not drawn")
+	main.passthrough_enabled = false
+	await _frames(2)
+	check(shape.visible and input._hand_meshes[1].material_override == input._hand_material(false),
+		"back in VR: drawn everywhere again, switch or not")
+	main.passthrough_hands = true
+	input._show_hands(false)
+	check(not shape.visible, "a controller in use hides it")
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_PALM, XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID)
+	await _frames(2)
+	check(not shape.visible, "no palm orientation: not drawn")
 
 	# --- Looking around does not move the ray ------------------------------
 	for turn in [[0.4, 0.0, 0.0], [-0.35, -0.3, 0.0], [0.2, 0.25, 0.15]]:
@@ -656,12 +689,14 @@ func _run() -> void:
 		if round == 0:  # lifted by a hand, 1.5 cm a frame: 3 cm is not a pick-up yet
 			for i in 2:
 				ctrl.position += Vector3(0.0, 0.015, 0.0)
+				ctrl.rotate_object_local(Vector3.RIGHT, 0.01)  # a hand tilts what it lifts
 				await process_frame
 			check(input._owns, "round 0: lifted 3 cm: still the hand's")
 		mark = main.sent.size()
 		match round:
 			0:
 				ctrl.position += Vector3(0.0, 0.015, 0.0)
+				ctrl.rotate_object_local(Vector3.RIGHT, 0.01)
 			1:
 				vr._set_trigger_state(true)
 			2:

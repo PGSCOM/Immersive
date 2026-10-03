@@ -287,6 +287,8 @@ func _run(main: Node3D) -> void:
 	main.add_child(origin)
 	panel.set_curvature(true, 0.5)
 	panel.place_facing(Vector3(0.2, 1.5, -1.3), head.position)
+	var mark := ShaderMaterial.new()  # main.gd's stencil mark for the passthrough hands
+	panel.material_overlay = mark
 	panel.set_compositor_layer(true, origin)
 	await _frames(2)
 	var layer: Node3D = panel._layer
@@ -302,6 +304,15 @@ func _run(main: Node3D) -> void:
 			"the layer's arc is centred where the screen is")
 		check(panel.layers == 0 and layer.get("enable_hole_punch") and layer.get("sort_order") < 0,
 			"the mesh hides; a hole is punched so the menu still draws in front")
+		var stand_in: MeshInstance3D = panel._layer_mask
+		check(stand_in != null and stand_in.layers != 0 and stand_in.mesh == panel.mesh
+			and stand_in.material_overlay == mark and stand_in.is_in_group(&"covers_hands")
+			and (stand_in.material_override as StandardMaterial3D).albedo_color.a == 0.0,
+			"an invisible copy of the hidden mesh still carries the hands' stencil mark")
+		panel.scale_panel(0.2)
+		await _frames(1)
+		check(stand_in.mesh == panel.mesh, "resized, the copy takes the new mesh")
+		panel.scale_panel(-0.2)
 		check(panel._layer_viewport.size == Vector2i(1920, 1080)
 			and (panel._layer_content as TextureRect).texture == panel.screen_texture,
 			"the layer is fed the screen's picture at its size")
@@ -317,8 +328,9 @@ func _run(main: Node3D) -> void:
 		"flat screen -> a quad layer of its size")
 	panel.set_compositor_layer(false, origin)
 	await _frames(1)
-	check(panel._layer == null and panel.layers == 1 and origin.get_child_count() == 0,
-		"switching layers off gives the mesh back")
+	check(panel._layer == null and panel.layers == 1 and origin.get_child_count() == 0
+		and panel.find_children("*", "MeshInstance3D", false, false).all(func(m): return not m.is_in_group(&"covers_hands")),
+		"switching layers off gives the mesh back (and drops its invisible copy)")
 	panel.set_compositor_layer(true, origin)
 	await _frames(1)
 	panel.queue_free()

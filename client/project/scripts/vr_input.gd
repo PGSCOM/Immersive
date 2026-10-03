@@ -49,7 +49,11 @@ const IDLE_TURN_RAD := 0.05
 ## over WAKE_SMOOTH_S, so a slow drift of the tracking never wakes it. One
 ## frame jumping more than JUMP_M / JUMP_TURN_RAD is the tracking finding it
 ## again (it lies on the desk), not a hand: it moves the rest pose instead.
+## Nor is a move without the least turn: a hand always tilts what it lifts,
+## while the Pico (in passthrough) freezes the orientation of a controller its
+## cameras lost and lets the position wander, 3-4 cm at a time.
 const WAKE_MOVE_M := 0.03
+const WAKE_MIN_TURN_RAD := 0.017  # 1°
 const WAKE_TURN_RAD := 0.35
 const WAKE_SMOOTH_S := 0.3
 const JUMP_M := 0.04
@@ -624,7 +628,8 @@ func _update_idle(delta: float) -> void:
 			print("[VRInput] %s controller: its pose jumped %.1f cm / %.0f° while put down, ignored" % [
 				_side(), _moved(now, _last_pose) * 100.0, rad_to_deg(_turned(now, _last_pose))])
 		_rest = now
-	elif _moved(now, _rest) > WAKE_MOVE_M or _turned(now, _rest) > WAKE_TURN_RAD:
+	elif _turned(now, _rest) > WAKE_TURN_RAD \
+			or (_moved(now, _rest) > WAKE_MOVE_M and _turned(now, _rest) > WAKE_MIN_TURN_RAD):
 		print("[VRInput] %s controller: picked up (moved %.1f cm, turned %.0f°)" % [
 			_side(), _moved(now, _rest) * 100.0, rad_to_deg(_turned(now, _rest))])
 		woke = true

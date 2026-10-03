@@ -18,6 +18,7 @@
 ##   • Other hand — turn its palm towards your face and a menu mark shows next
 ##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
 ##     left to the headset's own gestures.
+##   • Both hands are drawn as silhouettes while they point (see _show_hands).
 ##
 ## Everything comes from the finger joints (XR_EXT_hand_tracking, Godot's
 ## XRHandTracker, looked up every frame). The ray runs from an estimated
@@ -89,6 +90,10 @@ const PALM_FACING_COS := 0.6
 const PALM_LOOK_COS := 0.75
 const PALM_MARK_OFFSET_M := 0.05
 const MENU_TAP_MAX_S := 0.7
+## Silhouettes: a rigged hand per side (Godot's hand tracking demo, MIT; see
+## hands/LICENSE.txt), posed joint by joint by XRHandModifier3D.
+const HAND_SCENES := [preload("res://hands/LeftHandHumanoid.gltf"), preload("res://hands/RightHandHumanoid.gltf")]
+const HAND_SHADER := preload("res://shaders/hand.gdshader")
 
 @onready var main_scene: Node = get_node_or_null("/root/Main")
 @onready var xr_origin: XROrigin3D = get_node_or_null("/root/Main/XROrigin3D")
@@ -142,6 +147,9 @@ var _laser: MeshInstance3D = null
 var _cursor: MeshInstance3D = null
 var _palm_mark: Node3D = null
 var _palm_mark_mat: StandardMaterial3D = null
+var _hands: Array = [null, null]        # silhouettes (left, right), made when first seen
+var _hand_meshes: Array = [null, null]
+var _hand_mats: Dictionary = {}         # masked (bool) -> two-pass material
 
 var _logged: Dictionary = {}  # what was last printed, per key
 
@@ -149,7 +157,7 @@ func _ready() -> void:
 	set_process(true)
 
 func _exit_tree() -> void:
-	for n in [_laser, _cursor, _ray_node, _palm_mark]:
+	for n in [_laser, _cursor, _ray_node, _palm_mark] + _hands:
 		if is_instance_valid(n):
 			n.queue_free()
 
@@ -168,6 +176,7 @@ func _process(delta: float) -> void:
 	if owns != _owns:
 		_owns = owns
 		print("[HandInput] %s" % ("Controllers put down: hands point" if owns else "Controller in use: hands ignored"))
+	_show_hands(owns)
 	if not owns:
 		_let_go()
 		_point_tracked = false
@@ -539,6 +548,71 @@ func _show_palm_mark(palm: Dictionary, pressed: bool) -> void:
 	var pos: Vector3 = palm.center + palm.normal * PALM_MARK_OFFSET_M
 	var eyes := get_viewport().get_camera_3d().global_position
 	_palm_mark.global_transform = Transform3D(Basis.looking_at(eyes - pos), pos)
+
+# ---------------------------------------------------------------------------
+# Hand silhouettes
+# ---------------------------------------------------------------------------
+
+## Each tracked hand is drawn where it is while the hands, not controllers,
+## are in use. In passthrough the room already shows the real hand, so the
+## silhouette covers only the screens and panels hiding it (they mark the
+## stencil, main.gd), and only with main.gd's passthrough_hands on.
+func _show_hands(owns: bool) -> void:
+	var masked: bool = main_scene != null and main_scene.get("passthrough_enabled") == true
+	var wanted: bool = owns and not (masked and main_scene.get("passthrough_hands") == false)
+	for i in 2:
+		var tracker := hand_tracker(i == 0)
+		var on: bool = wanted and _has_hand(i == 0) and tracker.get_hand_joint_flags(XRHandTracker.HAND_JOINT_PALM) \
+			& XRHandTracker.HAND_JOINT_FLAG_ORIENTATION_VALID != 0
+		if on and not is_instance_valid(_hands[i]):
+			_make_hand(i)
+		if not is_instance_valid(_hands[i]):
+			continue
+		_hands[i].visible = on
+		if not on:
+			continue
+		# The skeleton sits on the palm joint; XRHandModifier3D poses the rest from it.
+		var palm := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM)
+		_hands[i].global_transform = _to_world(palm)
+		var wrist := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
+		_hand_meshes[i].set_instance_shader_parameter(&"wrist_y", (palm.affine_inverse() * wrist).y)
+		var mat := _hand_material(masked)
+		if _hand_meshes[i].material_override != mat:
+			_hand_meshes[i].material_override = mat
+
+func _make_hand(i: int) -> void:
+	if not (main_scene is Node3D):
+		return
+	var hand: Node3D = HAND_SCENES[i].instantiate()
+	var skeleton: Skeleton3D = hand.find_children("*", "Skeleton3D")[0]
+	skeleton.add_bone(("Left" if i == 0 else "Right") + "Palm")  # unused; spares a warning per hand
+	var modifier := XRHandModifier3D.new()
+	modifier.hand_tracker = &"/user/hand_tracker/left" if i == 0 else &"/user/hand_tracker/right"
+	skeleton.add_child(modifier)
+	var mesh: MeshInstance3D = hand.find_children("*", "MeshInstance3D")[0]
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	main_scene.add_child(hand)
+	_hands[i] = hand
+	_hand_meshes[i] = mesh
+
+## The two-pass silhouette (see hand.gdshader). `masked`: only where the
+## stencil is marked, for passthrough.
+func _hand_material(masked: bool) -> ShaderMaterial:
+	if not _hand_mats.has(masked):
+		var shader: Shader = HAND_SHADER
+		if masked:
+			shader = Shader.new()
+			shader.code = HAND_SHADER.code.replace("shader_type spatial;",
+				"shader_type spatial;\nstencil_mode read, compare_equal, 1;")
+		var solid := ShaderMaterial.new()
+		solid.shader = shader
+		solid.render_priority = -1  # after the stencil marks (-2), before other see-through things
+		var fringe := ShaderMaterial.new()
+		fringe.shader = shader
+		fringe.set_shader_parameter("fringe", true)
+		solid.next_pass = fringe
+		_hand_mats[masked] = solid
+	return _hand_mats[masked]
 
 # ---------------------------------------------------------------------------
 # Ray / pinch math

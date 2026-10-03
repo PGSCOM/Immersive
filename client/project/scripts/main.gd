@@ -55,6 +55,9 @@ var host_udp_port: int = 19801
 var curved_screen_enabled: bool = true
 var curved_screen_amount: float = 0.5
 var passthrough_enabled: bool = false
+## In passthrough, draw the bare hands over the screens and panels that hide
+## the real ones (hand_input.gd); elsewhere the room shows them.
+var passthrough_hands: bool = true
 var look: String = "night"
 ## Draw the screens as OpenXR compositor layers (sharper text) when the
 ## runtime supports them.
@@ -211,6 +214,7 @@ var _linked: Dictionary = {}
 ## dropped anywhere else, a screen is free again.
 var _snapped_to: Dictionary = {}
 var _save_timer: Timer
+var _hand_mask: ShaderMaterial = null
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -503,6 +507,7 @@ func _apply_panel_visual_settings(panel: MeshInstance3D) -> void:
 		panel.set_curvature(curved_screen_enabled, curved_screen_amount)
 	if panel and panel.has_method("set_compositor_layer"):
 		panel.set_compositor_layer(compositor_layers and layers_supported(), xr_origin)
+	_apply_hand_mask()
 
 ## Whether the OpenXR runtime composites layers itself (Quest, Pico and
 ## SteamVR do); otherwise the screens stay ordinary meshes.
@@ -946,10 +951,15 @@ func _init_ui_overlay() -> void:
 		compositor_layers = on
 		_apply_visual_settings_to_all_panels()
 		_save_config())
+	ui_overlay.passthrough_hands_toggled.connect(func(on: bool):
+		passthrough_hands = on
+		_apply_hand_mask()
+		_save_config())
 
 	ui_overlay.set_host_address(host_ip, host_tcp_port, host_udp_port)
 	ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
 	ui_overlay.set_look("passthrough" if passthrough_enabled else look, _is_passthrough_supported())
+	ui_overlay.set_passthrough_hands(passthrough_hands)
 	ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
 		stream_jpeg_quality, stream_res_percent, stream_fps)
 	ui_overlay.set_input_settings(control_enabled, haptics_enabled)
@@ -2001,6 +2011,17 @@ func _apply_passthrough_settings() -> void:
 		world.set_passthrough(passthrough_enabled)
 	if ui_overlay:
 		ui_overlay.set_look("passthrough" if passthrough_enabled else look, supported)
+	_apply_hand_mask()
+
+## Screens and panels hide the real hands in passthrough: each marks its
+## pixels in the stencil (hand_mask.gdshader) so the hands are drawn there.
+func _apply_hand_mask() -> void:
+	if _hand_mask == null:
+		_hand_mask = ShaderMaterial.new()
+		_hand_mask.shader = preload("res://shaders/hand_mask.gdshader")
+		_hand_mask.render_priority = -2  # before the hands (hand_input.gd)
+	get_tree().call_group(&"covers_hands", &"set_material_overlay",
+		_hand_mask if passthrough_enabled and passthrough_hands else null)
 
 # ---------------------------------------------------------------------------
 # Config persistence (this script is the only writer)
@@ -2025,6 +2046,7 @@ func _save_config() -> void:
 	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
 	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
+	cfg.set_value("display", "passthrough_hands", passthrough_hands)
 	cfg.set_value("display", "look", look)
 	cfg.set_value("display", "compositor_layers", compositor_layers)
 	cfg.set_value("input", "control", control_enabled)
@@ -2082,6 +2104,7 @@ func _load_config() -> void:
 		# Curvature used to be a 0-0.5 texture warp; it is now 0-1 of a real arc.
 		curved_screen_amount = clamp(float(cfg.get_value("display", "curved_amount", 0.5)), 0.0, 1.0)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
+		passthrough_hands = cfg.get_value("display", "passthrough_hands", true)
 		look = cfg.get_value("display", "look", "night")
 		compositor_layers = cfg.get_value("display", "compositor_layers", false)
 		control_enabled = cfg.get_value("input", "control", true)

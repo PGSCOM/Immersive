@@ -85,6 +85,9 @@ var _layer_origin: Node3D = null
 var _layer: Node3D = null            ## OpenXRCompositionLayerQuad / Cylinder
 var _layer_viewport: SubViewport = null
 var _layer_content: Control = null   ## TextureRect, or ColorRect + OES shader
+## The hidden mesh's invisible stand-in, still marking the screen for the
+## passthrough hands (main.gd::_apply_hand_mask).
+var _layer_mask: MeshInstance3D = null
 var _ext_tex: ExternalTexture = null
 
 # ---------------------------------------------------------------------------
@@ -92,6 +95,7 @@ var _ext_tex: ExternalTexture = null
 # ---------------------------------------------------------------------------
 
 func _ready() -> void:
+	add_to_group(&"covers_hands")  # main.gd::_apply_hand_mask
 	_rebuild_mesh()
 	_create_placeholder_texture()
 	grab_bar = GrabBar.new()
@@ -222,9 +226,12 @@ func _free_layer() -> void:
 		_layer.queue_free()
 	if is_instance_valid(_layer_viewport):
 		_layer_viewport.queue_free()
+	if is_instance_valid(_layer_mask):
+		_layer_mask.queue_free()
 	_layer = null
 	_layer_viewport = null
 	_layer_content = null
+	_layer_mask = null
 	layers = 1  # the mesh draws the screen again
 
 func _rebuild_layer() -> void:
@@ -269,8 +276,19 @@ func _rebuild_layer() -> void:
 	_layer.set("sort_order", -1)  # behind Godot's layer, seen through the hole
 	_update_layer_geometry()
 	_layer_origin.add_child(_layer)
-	_sync_layer()
 	layers = 0  # the layer shows the picture; the mesh stays for ray hits
+	var clear := StandardMaterial3D.new()
+	clear.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	clear.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	clear.cull_mode = BaseMaterial3D.CULL_DISABLED
+	clear.albedo_color = Color(0, 0, 0, 0)
+	_layer_mask = MeshInstance3D.new()
+	_layer_mask.mesh = mesh
+	_layer_mask.material_override = clear
+	_layer_mask.material_overlay = material_overlay
+	_layer_mask.add_to_group(&"covers_hands")
+	add_child(_layer_mask)
+	_sync_layer()
 
 func _update_layer_geometry() -> void:
 	if not _layer:
@@ -290,6 +308,8 @@ func _update_layer_geometry() -> void:
 func _sync_layer() -> void:
 	var offset := Vector3(0.0, 0.0, _radius()) if _arc() >= 0.001 else Vector3.ZERO
 	_layer.global_transform = global_transform * Transform3D(Basis(), offset)
+	if _layer_mask.mesh != mesh:
+		_layer_mask.mesh = mesh
 
 ## Where a screen `w` x `h` metres sits flush beside this one, `gap` apart, on
 ## `side`: world transform, same orientation (a curved screen continues its

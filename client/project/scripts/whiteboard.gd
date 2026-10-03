@@ -354,6 +354,7 @@ func _build() -> void:
 	_quad.material_override = mat
 	_quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_quad)
+	_quad.add_to_group(&"covers_hands")  # main.gd::_apply_hand_mask
 	grab_bar = GrabBar.new()
 	grab_bar.always_shown = true
 	add_child(grab_bar)

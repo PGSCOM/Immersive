@@ -34,6 +34,7 @@ func _initialize() -> void:
 	ov.screen_off_toggled.connect(func(off): events.append(["screen_off", off]))
 	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
 	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
+	ov.passthrough_hands_toggled.connect(func(on): events.append(["hands", on]))
 	ov.pointer_settings_changed.connect(func(h, a, f): events.append(["pointer", h, a, f]))
 	_run()
 
@@ -338,6 +339,9 @@ func _run() -> void:
 	check(events.back() == ["look", "dusk"], "Space: pick Dusk")
 	await _click(ov._chk_layers)
 	check(events.back() == ["layers", true], "Space: sharper-text switch")
+	await _click(ov._chk_hands)
+	check(events.back() == ["hands", false], "Space: passthrough-hands switch")
+	await _click(ov._chk_hands)
 	await _step("space")
 
 	await _click(ov._tab_buttons[3])

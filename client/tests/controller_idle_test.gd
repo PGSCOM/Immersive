@@ -16,8 +16,9 @@ extends SceneTree
 ##     laser, no model, no clicks, not in use) and is back when tracked again;
 ##   - a trigger press wakes a put-down controller at once, without moving it,
 ##     and a controller held still with the trigger down stays in use;
-##   - put down, a slow drift of its tracking or a one-frame jump (the cameras
-##     finding it again) does not wake it, a hand lifting it does;
+##   - put down, a slow drift of its tracking, a one-frame jump (the cameras
+##     finding it again) or its position wandering with the orientation frozen
+##     (the Pico in passthrough) does not wake it, a hand lifting it does;
 ##   - with a grip pose the model sits on it and the ray starts at the model's
 ##     tip, still at the ray angle.
 ##
@@ -291,8 +292,14 @@ func _run() -> void:
 	right.rotate_y(0.4)
 	await _frames(3)
 	check(not model.visible, "nor does a 23° turn in one frame")
-	for i in 4:  # a hand lifting it: 5 cm in 4 frames
+	await _frames(72)
+	for i in 3:  # the Pico extrapolating it: 3.6 cm, orientation bit for bit the same
+		right.position.x -= 0.012
+		await process_frame
+	check(not model.visible, "nor does its position wandering with the orientation frozen")
+	for i in 4:  # a hand lifting it: 5 cm and 2.3° in 4 frames
 		right.position.y += 0.012
+		right.rotate_object_local(Vector3.RIGHT, 0.01)
 		await process_frame
 	check(model.visible, "picked up: back at once")
 
