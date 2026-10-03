@@ -4,10 +4,11 @@ extends Node
 ## right); both work the same way and the one whose trigger was pressed last
 ## drives the pointer (the other hides its laser), like the system UI.
 ##
-##   Trigger          click (desktop, menu, keyboard); on the bar under a
-##                    screen, the menu or the keyboard: hold to move it
+##   Trigger          click (desktop, menu, keyboard), draw on the whiteboard;
+##                    on the bar under a screen, the menu, the keyboard or the
+##                    whiteboard: hold to move it
 ##   Grip, tap        right click on a screen
-##   Grip, hold       move the screen / menu / keyboard under the pointer;
+##   Grip, hold       move the screen / menu / keyboard / whiteboard under the pointer;
 ##                    while moving, stick up/down (or reaching out / pulling
 ##                    the hand in) pushes it away / pulls it in and stick
 ##                    left/right resizes a screen
@@ -74,7 +75,7 @@ const MODEL_IN_GRIP := Transform3D(
 ## places the model.
 const MODEL_TIP := Vector3(0, -0.01, -0.03)
 
-enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
+enum Target { NONE, OVERLAY, KEYBOARD, BOARD, PANEL, BAR }
 
 ## The instance whose controller drives the pointer.
 static var active: Node = null
@@ -336,6 +337,8 @@ func _update_pointer() -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 	_hit_distance = hit.get("distance", MAX_RAY_M)
 	match kind:
 		"overlay":
@@ -345,6 +348,10 @@ func _update_pointer() -> void:
 		"keyboard":
 			_set_target(Target.KEYBOARD, null)
 			main_scene.send_keyboard_pointer(origin, dir, _trigger_pressed)
+			return
+		"whiteboard":
+			_set_target(Target.BOARD, null)
+			main_scene.send_whiteboard_pointer(origin, dir, _trigger_pressed)
 			return
 		"bar":
 			_set_target(Target.BAR, null)
@@ -551,7 +558,7 @@ func _set_trigger_state(pressed: bool) -> void:
 			Target.BAR:
 				_start_drag(_bar_target, true)
 			_:
-				pass  # the keyboard reads the trigger in _update_pointer()
+				pass  # the keyboard and whiteboard read the trigger in _update_pointer()
 	else:
 		if _drag_by_trigger:
 			_stop_drag()
@@ -580,6 +587,8 @@ func _set_grip_state(pressed: bool) -> void:
 				_start_drag(main_scene.get("ui_overlay"))
 			Target.KEYBOARD:
 				_start_drag(main_scene.get("virtual_keyboard"))
+			Target.BOARD:
+				_start_drag(main_scene.get("whiteboard"))
 			Target.BAR:
 				_start_drag(_bar_target)
 			Target.PANEL:

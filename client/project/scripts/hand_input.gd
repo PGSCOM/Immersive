@@ -8,6 +8,9 @@
 ##     the keyboard moves it until the pinch opens; reaching out / pulling the
 ##     hand in pushes it away / brings it closer (LaserDrag). A pinch on a
 ##     screen itself always stays a mouse click or drag, however long.
+##   • Either hand — touch the whiteboard with the index fingertip to draw on
+##     it (main.gd's whiteboard_touch); while it does, the pointing hand's ray
+##     rests.
 ##   • Other hand — turn its palm towards your face and a menu mark shows next
 ##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
 ##     left to the headset's own gestures.
@@ -146,12 +149,25 @@ func _process(delta: float) -> void:
 	if tracked != _point_tracked:
 		_point_tracked = tracked
 		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
-	if tracked:
+	if tracked and _touch_board(_point_left):
+		_let_go()  # the fingertip draws: no ray meanwhile
+	elif tracked:
 		_process_pointing_hand(delta)
 	else:
 		_let_go()
+	if _has_hand(not _point_left):
+		_touch_board(not _point_left)
 
 	_process_menu_hand(not _point_left, delta)
+
+## The index fingertip of one hand on (or just in front of) the whiteboard.
+func _touch_board(left: bool) -> bool:
+	var tracker := hand_tracker(left)
+	var tip := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	if not main_scene or not main_scene.has_method("whiteboard_touch") \
+			or not _joint_has_valid_position(tracker, tip):
+		return false
+	return main_scene.whiteboard_touch(int(left), _joint_world_position(tracker, tip))
 
 ## The joint tracker of one hand. Looked up every time: Godot replaces it when
 ## the OpenXR session restarts, and a kept reference would go silently stale.
@@ -238,6 +254,8 @@ func _process_pointing_hand(delta: float) -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 
 	if kind == "overlay":
 		_handle_overlay_hit(hit, should_press, origin, direction)
@@ -253,6 +271,10 @@ func _process_pointing_hand(delta: float) -> void:
 		"keyboard":
 			main_scene.send_keyboard_pointer(origin, direction, should_press)
 			_pinch_active = should_press
+			_update_pointer_visual(origin, direction, hit.distance, true)
+		"whiteboard":
+			_end_pinch_if_active()
+			main_scene.send_whiteboard_pointer(origin, direction, should_press)
 			_update_pointer_visual(origin, direction, hit.distance, true)
 		"bar":
 			_end_pinch_if_active()
