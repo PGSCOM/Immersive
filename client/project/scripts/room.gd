@@ -25,6 +25,8 @@ signal changed
 ## Rooms answering on this network: HostDiscovery entries (ip, port, name,
 ## and the number of people in `monitors`).
 signal rooms_found(rooms: Array)
+## A voice packet from someone (client/tests/room_bot.gd repeats them).
+signal voice_heard(peer_id: int, pcm: PackedByteArray)
 
 enum State { OFF, JOINING, IN }
 
@@ -52,8 +54,9 @@ var mic_on := true
 ## The last thing worth telling the person ("" = nothing): could not open,
 ## wrong PIN, the room closed.
 var notice := ""
-## A 440 Hz tone instead of the microphone (--im2-tone, tests).
-var test_tone := false
+## Where our voice comes from: "mic", "tone" (440 Hz, --im2-tone, tests) or
+## "" (none: --im2-no-mic; a test bot speaks with say()).
+var voice_from := "mic"
 ## Voice packets sent, for the test harness.
 var voice_out := 0
 
@@ -305,6 +308,13 @@ func _take_voice(pcm: PackedByteArray) -> void:
 	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
 	if who:
 		who.push_voice(pcm)
+		voice_heard.emit(who.peer_id, pcm)
+
+## Send one voice packet (16-bit PCM at VOICE_RATE) as it is, ungated.
+func say(pcm: PackedByteArray) -> void:
+	if state == State.IN and not _people.is_empty():
+		_take_voice.rpc(pcm)
+		voice_out += 1
 
 ## Everyone's peer id, ours included, in seat order.
 func _ids() -> Array:
@@ -393,7 +403,7 @@ func _hand(i: int, o: Transform3D) -> Variant:
 ## The microphone runs only in a room with it switched on. Android asks for
 ## the permission first and comes back here once it is granted.
 func _update_mic() -> void:
-	var want := state == State.IN and mic_on and not test_tone
+	var want := state == State.IN and mic_on and voice_from == "mic"
 	if want and _mic == null:
 		if OS.has_feature("android") and not OS.request_permission("RECORD_AUDIO"):
 			return
@@ -421,7 +431,7 @@ func _update_mic() -> void:
 		_gate_s = 0.0
 
 func _capture_voice(delta: float) -> void:
-	if test_tone and mic_on:
+	if voice_from == "tone" and mic_on:
 		_tone_due += delta * VOICE_RATE
 		for i in int(_tone_due):
 			_mic_buf.append(0.25 * sin(TAU * 440.0 * _tone_t))

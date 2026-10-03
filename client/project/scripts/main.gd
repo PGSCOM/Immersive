@@ -203,7 +203,8 @@ var _cmdline_virtual := Vector2i.ZERO
 var _cmdline_room := ""
 var _cmdline_room_pin := 0
 var _cmdline_name := ""
-var _cmdline_tone := false
+## --im2-tone / --im2-no-mic: the room hears a tone / nothing from us (Room.voice_from).
+var _cmdline_voice := "mic"
 ## Driven from the command line (tests, adb): settings and layout stay as
 ## the user left them.
 var _ephemeral: bool = false
@@ -984,7 +985,7 @@ func _init_room() -> void:
 	room.name = "Room"  # the same path on every headset: the room's RPCs need it
 	room.port = _room_port
 	room.mic_on = _room_mic
-	room.test_tone = _cmdline_tone
+	room.voice_from = _cmdline_voice
 	room.my_name = _person_name()
 	room.setup(xr_origin, xr_camera, left_controller, right_controller)
 	add_child(room)
@@ -2205,7 +2206,7 @@ func _load_config() -> void:
 ## --im2-virtual=WxH (ask the host for a virtual screen once connected),
 ## --im2-room=open|IP (open / join a room), --im2-room-port=N, --im2-room-pin=N,
 ## --im2-name=NAME (in the room), --im2-share (share the screens there),
-## --im2-tone (a tone instead of the microphone).
+## --im2-tone (a tone instead of the microphone), --im2-no-mic (nothing).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
@@ -2244,7 +2245,9 @@ func _apply_cmdline_overrides() -> void:
 		elif arg == "--im2-share":
 			share_screens = true
 		elif arg == "--im2-tone":
-			_cmdline_tone = true
+			_cmdline_voice = "tone"
+		elif arg == "--im2-no-mic":
+			_cmdline_voice = ""
 		elif arg.begins_with("--im2-virtual="):
 			var wh := arg.get_slice("=", 1).split("x")
 			if wh.size() == 2:
