@@ -24,6 +24,7 @@ signal monitor_selected(monitor_id: int)
 signal arrange_requested
 signal recenter_requested
 signal keyboard_toggle_requested
+signal whiteboard_toggle_requested
 signal screen_curvature_changed(enabled: bool, amount: float)
 ## "night" / "dusk" / "void" / "passthrough"
 signal look_changed(look: String)
@@ -107,6 +108,8 @@ var _face_me := false
 var _layers_enabled := false
 var _pin_visible := false
 var _last_pointer_uv := Vector2(0.5, 0.5)
+var _finger := FingerTouch.new()
+var _finger_down := false  ## the menu's button is held by a fingertip
 var _tab := 0
 var _drag: LaserDrag = null
 ## The bar under the menu; main.gd::pick() tests it.
@@ -225,6 +228,8 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _drag:
 		_drag.update(delta)
+	if _finger.tick():
+		_finger_up()
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -242,6 +247,8 @@ func set_shown(show_it: bool) -> void:
 		_reposition_in_front_of_camera()
 	else:
 		hide()
+		_finger_up()
+		_finger.release()
 		_drag = null
 	# A SubViewport is not a Node3D: hiding this node does not stop it
 	# rendering, so switch it off explicitly while nobody looks at it.
@@ -447,7 +454,38 @@ func ray_to_overlay_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictiona
 		return {"valid": false}
 	return {"valid": true, "uv": uv, "distance": t}
 
+## A fingertip at `tip` (world) on the menu; `who` tells the hands apart.
+## True while this hand owns it (see FingerTouch); rays wait meanwhile.
+func touch(who: int, tip: Vector3) -> bool:
+	if not visible or not _panel_mesh:
+		return false
+	var p := _panel_mesh.global_transform.affine_inverse() * tip
+	var uv := Vector2(p.x / panel_width + 0.5, 0.5 - p.y / panel_height)
+	var was := _finger.owner
+	if not _finger.touch(who, p.z, uv.x >= 0.0 and uv.x <= 1.0 and uv.y >= 0.0 and uv.y <= 1.0):
+		if was == who:
+			_finger_up()
+		return false
+	_inject_move(uv)
+	if _finger.pressed != _finger_down:
+		_finger_down = _finger.pressed
+		_inject_button(_finger_down, MOUSE_BUTTON_LEFT)
+	return true
+
+func _finger_up() -> void:
+	if _finger_down:
+		_finger_down = false
+		_inject_button(false, MOUSE_BUTTON_LEFT)
+
 func inject_pointer_move(uv: Vector2) -> void:
+	if _finger.owner < 0:
+		_inject_move(uv)
+
+func inject_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT) -> void:
+	if _finger.owner < 0:
+		_inject_button(pressed, button_index)
+
+func _inject_move(uv: Vector2) -> void:
 	_last_pointer_uv = uv
 	var px := uv * Vector2(VIEW_SIZE)
 	var ev := InputEventMouseMotion.new()
@@ -455,7 +493,7 @@ func inject_pointer_move(uv: Vector2) -> void:
 	ev.global_position = px
 	_viewport.push_input(ev)
 
-func inject_pointer_button(pressed: bool, button_index: int = MOUSE_BUTTON_LEFT) -> void:
+func _inject_button(pressed: bool, button_index: int) -> void:
 	var px := _last_pointer_uv * Vector2(VIEW_SIZE)
 	var ev := InputEventMouseButton.new()
 	ev.button_index = button_index
@@ -1168,6 +1206,9 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	_btn_keyboard = _button("Keyboard")
 	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
 	actions.add_child(_btn_keyboard)
+	var btn_board := _button("Whiteboard")
+	btn_board.pressed.connect(func(): whiteboard_toggle_requested.emit())
+	actions.add_child(btn_board)
 	# An extra screen that exists only in the headset (the PC makes it).
 	_btn_add_virtual = _button("New virtual screen")
 	_btn_add_virtual.pressed.connect(func(): virtual_page_requested.emit(-1))
@@ -1643,7 +1684,7 @@ func _build_input_tab(body: VBoxContainer) -> void:
 		_emit_pointer_settings())
 	_slider_ray = r[0]
 	_lbl_ray_value = r[1]
-	var note := _label("Bare hands: put the controllers down and point. Look at the palm of your other hand and pinch to open this menu. Controller ray: 40° suits the Pico 4.", 17, UiTheme.INK_3)
+	var note := _label("Bare hands: put the controllers down and point. Pinch thumb and middle finger to right-click, or hold and move to scroll. Type on the keyboard with your fingertips. Look at the palm of your other hand and pinch to open this menu. Controller ray: 40° suits the Pico 4.", 17, UiTheme.INK_3)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(note)
 

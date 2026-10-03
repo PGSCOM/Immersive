@@ -8,6 +8,11 @@
 ## it closer, amplified like the Quest system UI. A screen that comes within
 ## LEVEL_DEG of upright / vertical eases flat, so it is easy to leave level.
 ##
+## A hand has no rigid pose to lock to (its ray runs from the shoulder through
+## the knuckle), so hand_input.gd sets a "twist" meta on its ray node: how far
+## the palm has turned since the grab, which turns the object about the point
+## held, just as turning a controller would.
+##
 ## With `face_me` on, the grabbed point stays on the ray instead and the
 ## object turns to face the head (yaw and pitch only, never roll).
 ## A light filter takes the hand's tremor out, and followers (the rest of a
@@ -111,7 +116,9 @@ func update(delta: float = 0.0) -> void:
 	else:
 		var rel := _rel
 		rel.origin.z -= distance - _d0  # pushed along the ray
-		want = pointer.global_transform.orthonormalized() * rel
+		var twist: Basis = pointer.get_meta("twist", Basis.IDENTITY)
+		var held := Vector3(0.0, 0.0, -distance)
+		want = pointer.global_transform.orthonormalized() * Transform3D(twist, held - twist * held) * rel
 		want.basis = level_basis(want.basis)
 	var t := target.global_transform.interpolate_with(want, k)
 	target.global_transform = Transform3D(facing_basis(t.origin, t.origin + t.basis.z) if face_me \

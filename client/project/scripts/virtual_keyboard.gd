@@ -63,6 +63,7 @@ var _pointer_px := Vector2(-100, -100)
 var _held_vk := -1
 var _repeat_s := 0.0
 var _drag: LaserDrag = null
+var _finger := FingerTouch.new()
 ## The bar under the keyboard; main.gd::pick() tests it.
 var grab_bar: GrabBar = null
 
@@ -80,6 +81,8 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _drag:
 		_drag.update(delta)
+	if _finger.tick():
+		_leave()
 	if _held_vk >= 0:
 		_repeat_s += delta
 		var interval := 1.0 / REPEAT_RATE_HZ
@@ -103,6 +106,7 @@ func set_shown(show_it: bool) -> void:
 		_reposition_in_front_of_camera()
 	else:
 		_leave()
+		_finger.release()
 		_drag = null
 
 ## Where a ray meets the keyboard, touching nothing: { uv, distance }, or {}
@@ -123,14 +127,35 @@ func ray_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 
 ## Point at the keyboard with a ray. Returns the hit distance, or -1 when the
 ## ray misses (the caller then routes it to the screens instead). `pressing`
-## is the trigger / pinch state; its changes press and release keys.
+## is the trigger / pinch state; its changes press and release keys. A
+## fingertip typing on it wins.
 func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
 	var hit := ray_hit(ray_origin, ray_direction)
 	if hit.is_empty():
-		_leave()
+		if _finger.owner < 0:
+			_leave()
 		return -1.0
-	var t: float = hit.distance
-	_pointer_px = hit.uv * Vector2(VIEW_SIZE)
+	if _finger.owner < 0:
+		_point(hit.uv, pressing)
+	return hit.distance
+
+## A fingertip at `tip` (world) typing on the keys; `who` tells the hands
+## apart. True while this hand owns the keyboard (see FingerTouch).
+func touch(who: int, tip: Vector3) -> bool:
+	if not visible:
+		return false
+	var p: Vector3 = _quad.global_transform.affine_inverse() * tip
+	var uv := Vector2(p.x / WIDTH_M + 0.5, 0.5 - p.y / HEIGHT_M)
+	var was := _finger.owner
+	if not _finger.touch(who, p.z, uv.x >= 0.0 and uv.x <= 1.0 and uv.y >= 0.0 and uv.y <= 1.0):
+		if was == who:
+			_leave()
+		return false
+	_point(uv, _finger.pressed)
+	return true
+
+func _point(uv: Vector2, pressing: bool) -> void:
+	_pointer_px = uv * Vector2(VIEW_SIZE)
 	var motion := InputEventMouseMotion.new()
 	motion.position = _pointer_px
 	motion.global_position = _pointer_px
@@ -138,7 +163,6 @@ func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) ->
 	_viewport.push_input(motion)
 	if pressing != _pointer_pressed:
 		_push_button(pressing)
-	return t
 
 ## Legacy name kept for main.gd callers.
 func pointer_update(world_pos: Vector3, is_pressing: bool) -> void:
@@ -158,7 +182,8 @@ func is_dragging() -> bool:
 
 ## The pointer went elsewhere: release a held key, clear the hover.
 func pointer_leave() -> void:
-	_leave()
+	if _finger.owner < 0:
+		_leave()
 
 func push_pull(delta_m: float) -> void:
 	if _drag:

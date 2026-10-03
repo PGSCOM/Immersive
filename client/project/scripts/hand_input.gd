@@ -6,8 +6,15 @@
 ##     on the screens, the menu and the keyboard, whichever is nearest along
 ##     the ray (main.gd::pick). A pinch on the bar under a screen, the menu or
 ##     the keyboard moves it until the pinch opens; reaching out / pulling the
-##     hand in pushes it away / brings it closer (LaserDrag). A pinch on a
-##     screen itself always stays a mouse click or drag, however long.
+##     hand in pushes it away / brings it closer, and turning the hand turns
+##     it (LaserDrag, see _twist). A pinch on a screen itself always stays a
+##     mouse click or drag, however long. While a pinch opens the pointer
+##     holds still, so letting go drops things where they were.
+##     Thumb + middle finger: a short pinch right-clicks; held, moving the hand
+##     drags the page (wheel), on the screens and the menu.
+##   • Either hand — touch the keyboard, the menu or the whiteboard with the
+##     index fingertip to type, press or draw (main.gd's finger_touch,
+##     FingerTouch); while it does, the pointing hand's ray rests.
 ##   • Other hand — turn its palm towards your face and a menu mark shows next
 ##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
 ##     left to the headset's own gestures.
@@ -61,6 +68,19 @@ const FILTER_BETA := 10.0
 ## A pinch holds the ray still until the hand moves this far (~1.5°), so a click
 ## never turns into a tiny drag (breaks double-clicks, selects text).
 const CLICK_SLOP_RAD := 0.026
+## Something held by a pinch turns as the palm turns against the ray (so an
+## arm sweep, where both turn together, swings it round as before). One Euro
+## filtered like the ray: still when the hand is, quick when it turns.
+const TWIST_MIN_CUTOFF := 1.0
+const TWIST_BETA := 5.0
+## Middle pinch: wheel units (120 = a notch) per metre the hand moves, once it
+## has moved SCROLL_SLOP_M; shorter than RIGHT_CLICK_MAX_S and unmoved, it
+## right-clicks.
+const SCROLL_PER_M := 12000.0
+const SCROLL_SLOP_M := 0.012
+const RIGHT_CLICK_MAX_S := 0.6
+const INDEX_TIP := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+const MIDDLE_TIP := XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP
 const MAX_RAY_LENGTH := 8.0
 ## Palm menu: the palm faces the eyes within ~53° and the eyes look at it
 ## within ~41°; the mark floats this far off the palm; a pinch held longer
@@ -83,6 +103,15 @@ var _owns: bool = false             # no controller in use: the hands point
 var _knuckle: Vector3 = Vector3.ZERO  # where the beam starts this frame
 var _press_origin: Vector3 = Vector3.ZERO
 var _press_dir: Vector3 = Vector3.FORWARD
+var _hold_origin: Vector3 = Vector3.ZERO   # the ray last frame (kept while a pinch opens)
+var _hold_dir: Vector3 = Vector3.FORWARD
+# Middle-finger pinch: right click, or scroll once moved.
+var _mid_pinching: bool = false
+var _mid_s: float = 0.0
+var _mid_from: Vector3 = Vector3.ZERO
+var _mid_last: Vector3 = Vector3.ZERO
+var _scrolling: bool = false
+var _scroll_acc: Vector2 = Vector2.ZERO
 var _dragging: bool = false
 var _on_overlay: bool = false
 var _last_monitor_id: int = 0
@@ -91,6 +120,11 @@ var _last_pixel: Vector2i = Vector2i.ZERO
 ## carries the ray for LaserDrag.
 var _grab: Node = null
 var _ray_node: Node3D = null
+## The palm in the ray's frame when the grab began (null: no palm orientation),
+## and the filtered turn since, handed to LaserDrag as the ray node's "twist".
+var _twist0: Variant = null
+var _twist: Quaternion = Quaternion.IDENTITY
+var _twist_rate: float = 0.0
 
 # One Euro filter state for the ray direction (ZERO = start over).
 var _dir_filtered: Vector3 = Vector3.ZERO
@@ -146,12 +180,25 @@ func _process(delta: float) -> void:
 	if tracked != _point_tracked:
 		_point_tracked = tracked
 		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
-	if tracked:
+	if tracked and _touch(_point_left):
+		_let_go()  # the fingertip touches a panel: no ray meanwhile
+	elif tracked:
 		_process_pointing_hand(delta)
 	else:
 		_let_go()
+	if _has_hand(not _point_left):
+		_touch(not _point_left)
 
 	_process_menu_hand(not _point_left, delta)
+
+## The index fingertip of one hand on (or just in front of) the keyboard, the
+## menu or the whiteboard.
+func _touch(left: bool) -> bool:
+	var tracker := hand_tracker(left)
+	if not main_scene or not main_scene.has_method("finger_touch") \
+			or not _joint_has_valid_position(tracker, INDEX_TIP):
+		return false
+	return main_scene.finger_touch(int(left), _joint_world_position(tracker, INDEX_TIP))
 
 ## The joint tracker of one hand. Looked up every time: Godot replaces it when
 ## the OpenXR session restarts, and a kept reference would go silently stale.
@@ -171,6 +218,7 @@ func _has_hand(left: bool) -> bool:
 func _let_go() -> void:
 	_point_pinching = false
 	_point_armed = false
+	_mid_pinching = false
 	_torso_yaw = NAN
 	_drop_grab()
 	_end_pinch_if_active()
@@ -199,9 +247,22 @@ func _process_pointing_hand(delta: float) -> void:
 	# view) is not a click: the Pico reports a pinched hand for a controller
 	# lying on the desk. It must open first.
 	var pinching := _is_pinching(_point_left, _point_pinching, delta)
-	if not pinching:
+	var mid := _is_pinching(_point_left, _mid_pinching, delta, MIDDLE_TIP)
+	# One pinch at a time: the finger nearer the thumb, until it opens.
+	if _point_pinching:
+		mid = false
+	elif _mid_pinching:
+		pinching = false
+	elif pinching and mid:
+		if _pinch_distance(tracker, MIDDLE_TIP) < _pinch_distance(tracker):
+			pinching = false
+		else:
+			mid = false
+	if not pinching and not mid:
 		_point_armed = true
 	var should_press := pinching and _point_armed
+	var mid_press := mid and _point_armed
+	var mid_was := _mid_pinching
 	var pressed_now := should_press and not _point_pinching
 	if should_press != _point_pinching:
 		print("[HandInput] Pinch %s (%d mm)" % ["DOWN" if should_press else "UP", _pinch_distance(tracker) * 1000.0])
@@ -209,23 +270,49 @@ func _process_pointing_hand(delta: float) -> void:
 			_press_origin = origin
 			_press_dir = direction
 			_dragging = false
-	# Hold the ray where the pinch started (release frame included) until the
-	# hand clearly moves away: that is a drag, not a shaky click.
-	if (should_press or _point_pinching) and not _dragging:
+	if mid_press != mid_was:
+		print("[HandInput] Middle pinch %s" % ("DOWN" if mid_press else "UP"))
+		if mid_press:
+			_press_origin = origin
+			_press_dir = direction
+			_mid_s = 0.0
+			_mid_from = origin
+			_mid_last = origin
+			_scrolling = false
+			_scroll_acc = Vector2.ZERO
+	elif mid_press:
+		_mid_s += delta
+	_mid_pinching = mid_press
+	var opening: bool = (should_press or _point_pinching) \
+		and _open_s.get(Vector2i(int(_point_left), INDEX_TIP), 0.0) > 0.0
+	if mid_press or mid_was:
+		# A right click or a scroll happens where the middle pinch began.
+		origin = _press_origin
+		direction = _press_dir
+	elif (should_press or _point_pinching) and not _dragging:
+		# Hold the ray where the pinch started (release frame included) until
+		# the hand clearly moves away: that is a drag, not a shaky click.
 		if direction.angle_to(_press_dir) > CLICK_SLOP_RAD:
 			_dragging = true
 		else:
 			origin = _press_origin
 			direction = _press_dir
+	elif opening:
+		# The fingers parting jolt the hand: a drag or a grab ends where it was.
+		origin = _hold_origin
+		direction = _hold_dir
+	_hold_origin = origin
+	_hold_dir = direction
 	_point_pinching = should_press
 	_ensure_pointer_visual()
 	if is_instance_valid(_ray_node):
-		var up := Vector3.RIGHT if absf(direction.dot(Vector3.UP)) > 0.99 else Vector3.UP
-		_ray_node.global_transform = Transform3D(Basis.looking_at(direction, up), origin)
+		_ray_node.global_transform = Transform3D(_ray_basis(direction), origin)
 
-	# A pinch that grabbed a bar moves that thing until the fingers open.
+	# A pinch that grabbed a bar moves (and turns) that thing until the fingers open.
 	if _grab != null:
 		if should_press and is_instance_valid(_grab):
+			if not opening:
+				_update_twist(tracker, direction, delta)
 			var held: float = _grab.get_drag_distance() if _grab.has_method("get_drag_distance") else 1.0
 			_update_pointer_visual(origin, direction, held, true)
 			return
@@ -238,7 +325,11 @@ func _process_pointing_hand(delta: float) -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 
+	if mid_press or mid_was:
+		_middle_pinch(hit, mid_press)
 	if kind == "overlay":
 		_handle_overlay_hit(hit, should_press, origin, direction)
 		return
@@ -254,6 +345,10 @@ func _process_pointing_hand(delta: float) -> void:
 			main_scene.send_keyboard_pointer(origin, direction, should_press)
 			_pinch_active = should_press
 			_update_pointer_visual(origin, direction, hit.distance, true)
+		"whiteboard":
+			_end_pinch_if_active()
+			main_scene.send_whiteboard_pointer(origin, direction, should_press)
+			_update_pointer_visual(origin, direction, hit.distance, true)
 		"bar":
 			_end_pinch_if_active()
 			if is_instance_valid(hit.get("bar")):
@@ -261,6 +356,10 @@ func _process_pointing_hand(delta: float) -> void:
 			if pressed_now and LaserDrag.grab(hit.target, _ray_node, hit.distance, main_scene):
 				_grab = hit.target
 				_dragging = true  # from now on the ray follows the hand: no click slop
+				_twist0 = _palm_in_ray(tracker, direction)
+				_twist = Quaternion.IDENTITY
+				_twist_rate = 0.0
+				_ray_node.set_meta("twist", Basis.IDENTITY)
 			_update_pointer_visual(origin, direction, hit.distance, true)
 		"panel":
 			_point_at_panel(hit, should_press, origin, direction)
@@ -293,6 +392,40 @@ func _point_at_panel(hit: Dictionary, should_press: bool, origin: Vector3, direc
 	_last_monitor_id = monitor_id
 	_last_pixel = pixel
 	_update_pointer_visual(origin, direction, hit.get("distance", MAX_RAY_LENGTH), true)
+
+## Middle pinch: once the hand has moved, the page under the pointer follows
+## it (wheel); a short one that never moved right-clicks there as it opens.
+func _middle_pinch(hit: Dictionary, held: bool) -> void:
+	var kind: String = hit.get("kind", "")
+	var panel = hit.get("panel", null) if kind == "panel" else null
+	if not held:
+		if not _scrolling and _mid_s < RIGHT_CLICK_MAX_S and panel != null:
+			var at: Vector2i = panel.uv_to_pixel(hit.uv)
+			main_scene.send_mouse_input(hit.get("monitor_id", 0), at.x, at.y, 0x02, 0)
+			main_scene.send_mouse_input(hit.get("monitor_id", 0), at.x, at.y, 0, 0)
+		return
+	var moved := _knuckle - _mid_last
+	_mid_last = _knuckle
+	if not _scrolling:
+		_scrolling = _knuckle.distance_to(_mid_from) > SCROLL_SLOP_M
+		return
+	var cam := get_viewport().get_camera_3d()
+	var right := cam.global_basis.x if cam else Vector3.RIGHT
+	# Touch-like: hand up drags the page up (wheel down), right drags it right.
+	_scroll_acc += Vector2(moved.dot(right), -moved.y) * SCROLL_PER_M
+	if panel != null:
+		var step := Vector2i(int(_scroll_acc.x), int(_scroll_acc.y))
+		if step != Vector2i.ZERO:
+			_scroll_acc -= Vector2(step)
+			var at: Vector2i = panel.uv_to_pixel(hit.uv)
+			main_scene.send_mouse_input(hit.get("monitor_id", 0), at.x, at.y, 0, step.y, step.x)
+	elif kind == "overlay":
+		_scroll_acc.x = 0.0
+		if absf(_scroll_acc.y) >= 120.0:
+			main_scene.send_ui_pointer_scroll(signf(_scroll_acc.y))
+			_scroll_acc.y -= 120.0 * signf(_scroll_acc.y)
+	else:
+		_scroll_acc = Vector2.ZERO
 
 ## Drive the in-VR overlay menu with the hand pointer.
 func _handle_overlay_hit(ui_hit: Dictionary, should_press: bool, origin: Vector3, direction: Vector3) -> void:
@@ -444,6 +577,32 @@ func _update_torso_yaw(head_basis: Basis) -> float:
 			_torso_yaw = wrapf(_torso_yaw + d - signf(d) * TORSO_FOLLOW_RAD, -PI, PI)
 	return 0.0 if is_nan(_torso_yaw) else _torso_yaw
 
+## Upright frame looking along `direction` (the ray node's, no roll).
+static func _ray_basis(direction: Vector3) -> Basis:
+	var up := Vector3.RIGHT if absf(direction.dot(Vector3.UP)) > 0.99 else Vector3.UP
+	return Basis.looking_at(direction, up)
+
+## The palm's orientation in the frame of a ray along `direction`, or null
+## when the runtime gives none.
+func _palm_in_ray(tracker: XRHandTracker, direction: Vector3) -> Variant:
+	var palm := XRHandTracker.HAND_JOINT_PALM
+	if tracker == null or not tracker.has_tracking_data \
+			or not (tracker.get_hand_joint_flags(palm) & XRHandTracker.HAND_JOINT_FLAG_ORIENTATION_VALID):
+		return null
+	var b := _to_world(tracker.get_hand_joint_transform(palm)).basis.orthonormalized()
+	return Quaternion(_ray_basis(direction).inverse() * b)
+
+## How far the palm has turned against the ray since the grab, filtered, for
+## LaserDrag to turn the held thing by (about the point held).
+func _update_twist(tracker: XRHandTracker, direction: Vector3, delta: float) -> void:
+	var now: Variant = _palm_in_ray(tracker, direction)
+	if _twist0 == null or now == null or delta <= 0.0:
+		return
+	var raw: Quaternion = now * (_twist0 as Quaternion).inverse()
+	_twist_rate = lerpf(_twist_rate, _twist.angle_to(raw) / delta, _euro_alpha(1.0, delta))
+	_twist = _twist.slerp(raw, _euro_alpha(TWIST_MIN_CUTOFF + TWIST_BETA * _twist_rate, delta)).normalized()
+	_ray_node.set_meta("twist", Basis(_twist))
+
 ## One Euro filter (Casiez et al. 2012) on the ray direction: the cutoff rises
 ## with speed, so slow aiming is smoothed hard and fast sweeps barely lag.
 func _filter_direction(direction: Vector3, delta: float) -> Vector3:
@@ -459,26 +618,26 @@ func _filter_direction(direction: Vector3, delta: float) -> Vector3:
 static func _euro_alpha(cutoff: float, delta: float) -> float:
 	return 1.0 / (1.0 + 1.0 / (TAU * cutoff * delta))
 
-## Thumb and index tips together, with hysteresis on `was_pinching` and a
+## Thumb and `finger` tips together, with hysteresis on `was_pinching` and a
 ## short hold before letting go (see PINCH_RELEASE_HOLD_S).
-func _is_pinching(left: bool, was_pinching: bool, delta: float) -> bool:
-	var dist := _pinch_distance(hand_tracker(left))
+func _is_pinching(left: bool, was_pinching: bool, delta: float, finger: int = INDEX_TIP) -> bool:
+	var dist := _pinch_distance(hand_tracker(left), finger)
 	if dist < 0.0:
 		return was_pinching  # tips not tracked this frame: keep what we had
+	var key := Vector2i(int(left), finger)
 	if dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M):
-		_open_s[left] = 0.0
+		_open_s[key] = 0.0
 		return true
-	_open_s[left] = _open_s.get(left, 0.0) + delta
-	return was_pinching and _open_s[left] < PINCH_RELEASE_HOLD_S
+	_open_s[key] = _open_s.get(key, 0.0) + delta
+	return was_pinching and _open_s[key] < PINCH_RELEASE_HOLD_S
 
-## Thumb-tip to index-tip distance in metres, or -1 when either is not tracked.
-func _pinch_distance(tracker: XRHandTracker) -> float:
+## Thumb-tip to `finger`-tip distance in metres, or -1 when either is not tracked.
+func _pinch_distance(tracker: XRHandTracker, finger: int = INDEX_TIP) -> float:
 	var thumb := XRHandTracker.HAND_JOINT_THUMB_TIP
-	var index := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
-	if not (_joint_has_valid_position(tracker, thumb) and _joint_has_valid_position(tracker, index)):
+	if not (_joint_has_valid_position(tracker, thumb) and _joint_has_valid_position(tracker, finger)):
 		return -1.0
 	return tracker.get_hand_joint_transform(thumb).origin.distance_to(
-		tracker.get_hand_joint_transform(index).origin)
+		tracker.get_hand_joint_transform(finger).origin)
 
 func _joint_has_valid_position(tracker: XRHandTracker, joint: int) -> bool:
 	if tracker == null or not tracker.has_tracking_data:
