@@ -12,7 +12,8 @@ extends SceneTree
 ##     size clamped) without stealing the desktop's own corner pixels;
 ##   - main.gd::pick() returns the NEAREST of menu, keyboard, screens and the
 ##     grab bars under them;
-##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only.
+##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only;
+##     two index fingertips type on it in turn, and the ray waits meanwhile.
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/workspace_test.gd"
@@ -339,12 +340,39 @@ func _run(main: Node3D) -> void:
 	await _type(kb, "Return")
 	check(main.keys == [[0x41, 1], [0x42, 0], [0x43, 2], [0x56, 0], [0x0D, 0]],
 		"Shift and Ctrl hold for one key only -> %s" % [main.keys])
+	main.keys.clear()
+	await _poke(kb, "x", 0)
+	await _poke(kb, "y", 1)
+	await _poke(kb, "z", 0)
+	check(main.keys == [[0x58, 0], [0x59, 0], [0x5A, 0]],
+		"two fingertips type in turn, without lifting away -> %s" % [main.keys])
+	kb.pointer_ray(head.position, (_key_point(kb, "q") - head.position).normalized(), true)
+	await _frames(1)
+	kb.pointer_ray(head.position, (_key_point(kb, "q") - head.position).normalized(), false)
+	check(main.keys.size() == 3, "a ray pressing a key while a fingertip hovers types nothing")
+	kb.touch(0, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
+	kb.touch(1, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
 	var miss_d: float = kb.pointer_ray(head.position, Vector3.UP, false)
 	check(miss_d < 0.0, "a ray above the keyboard misses it")
 	var kb_bar: float = kb.grab_bar.hit(head.position, (kb.grab_bar.global_position - head.position).normalized())
 	check(kb_bar > 0.0 and kb.grab_bar.visible, "the keyboard shows a grab bar under it")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
+
+## The centre of the key labelled `label`, in the world.
+func _key_point(kb: Node3D, label: String) -> Vector3:
+	for k in kb._keys:
+		if k.button.text == label or k.def[0] == label:
+			var c: Vector2 = k.button.get_global_rect().get_center() / Vector2(kb.VIEW_SIZE)
+			return kb._quad.to_global(Vector3((c.x - 0.5) * kb.WIDTH_M, (0.5 - c.y) * kb.HEIGHT_M, 0.0))
+	return Vector3.ZERO
+
+## Hand `who` hovers 3 cm over the key, taps it (4 mm) and lifts to 3 cm.
+func _poke(kb: Node3D, label: String, who: int) -> void:
+	var p := _key_point(kb, label)
+	for depth in [0.03, 0.004, 0.03]:
+		kb.touch(who, p + kb._quad.global_basis.z * depth)
+		await _frames(1)
 
 ## Press and release the key labelled `label` with a ray from the head.
 func _type(kb: Node3D, label: String) -> void:

@@ -588,10 +588,14 @@ func leave_whiteboard() -> void:
 func send_whiteboard_pointer(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
 	return whiteboard.pointer_ray(ray_origin, ray_direction, pressing) if is_instance_valid(whiteboard) else -1.0
 
-## A fingertip of hand `who` at `tip` (world): true while it draws on (or
-## hovers just in front of) the whiteboard, and the hand's ray should rest.
-func whiteboard_touch(who: int, tip: Vector3) -> bool:
-	return is_instance_valid(whiteboard) and whiteboard.touch(who, tip)
+## A fingertip of hand `who` at `tip` (world): true while it touches (or
+## hovers just in front of) the keyboard, the menu or the whiteboard, and the
+## hand's ray should rest.
+func finger_touch(who: int, tip: Vector3) -> bool:
+	for surface in [virtual_keyboard, ui_overlay, whiteboard]:
+		if is_instance_valid(surface) and surface.touch(who, tip):
+			return true
+	return false
 
 ## Show/hide the whiteboard (the menu, or B on desktop).
 func toggle_whiteboard() -> void:

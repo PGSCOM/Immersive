@@ -299,6 +299,9 @@ pick one up and it has the pointer again.
 | A / X | Show / hide the VR keyboard |
 | B / Y | Show / hide the menu |
 | Right hand pinch (controllers down) | Pointer click/drag via hand tracking |
+| Pinch on a bar, then turn the hand | Move the screen, menu or keyboard, and turn it |
+| Thumb + middle finger pinch | Right click; hold and move the hand to scroll |
+| Fingertip on the keyboard, menu or whiteboard | Type, press, draw |
 | Left palm to your face, then pinch | Toggle the menu (its Keyboard button opens the keyboard) |
 
 The VR keyboard is a full US layout (Esc, Tab, symbols, arrows, Ctrl, Alt,

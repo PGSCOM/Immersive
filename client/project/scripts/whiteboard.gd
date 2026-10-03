@@ -2,9 +2,9 @@
 ## hand tracking), or point and press (trigger / pinch). A 2D canvas in a
 ## SubViewport on a quad, like the VR keyboard.
 ##
-## A fingertip within HOVER_M in front of the board owns it and shows a ring
-## where it will land, shrinking as the finger closes in; within CONTACT_M it
-## draws. The tool row along the bottom picks the ink, the width, the eraser,
+## A fingertip close in front of the board owns it and shows a ring where it
+## will land, shrinking as the finger closes in; touching it draws (depths in
+## FingerTouch; the other hand takes over by touching between strokes). The tool row along the bottom picks the ink, the width, the eraser,
 ## undo and clear (clear can be undone too). The bar under it moves it, the
 ## corner brackets resize it (ResizeHandle, as on the screens), the grip and
 ## stick move and size it. Strokes live as long as the app does.
@@ -15,12 +15,6 @@ class_name Whiteboard
 const VIEW_SIZE := Vector2i(1600, 1040)
 const MIN_WIDTH := 0.5
 const MAX_WIDTH := 3.0
-## Fingertip depth in front of the board (metres): hover ring, press, release.
-const HOVER_M := 0.08
-const CONTACT_M := 0.008
-const RELEASE_M := 0.02
-## Pushed this far through the board it still draws; further is reaching round.
-const BEHIND_M := 0.06
 const INKS := [UiTheme.INK, UiTheme.CLAY, UiTheme.SAGE, UiTheme.OCHRE]
 const WIDTHS := [5.0, 12.0, 30.0]
 const ERASER_PX := 56.0
@@ -49,8 +43,7 @@ var _btn_eraser: Button
 var _pointer_pressed := false
 var _pointer_px := Vector2(-100, -100)
 var _ring := -1.0          ## hover depth 0..1 of the fingertip, -1 = none
-var _toucher := -1         ## which hand owns the board (-1 none)
-var _touch_frames := 0
+var _finger := FingerTouch.new()
 var _drag: LaserDrag = null
 
 func _ready() -> void:
@@ -60,11 +53,8 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _drag:
 		_drag.update(delta)
-	if _touch_frames > 0:
-		_touch_frames -= 1
-		if _touch_frames == 0:
-			_toucher = -1
-			_leave()
+	if _finger.tick():
+		_leave()
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -82,6 +72,7 @@ func set_shown(show_it: bool) -> void:
 		_reposition_in_front_of_camera()
 	else:
 		_leave()
+		_finger.release()
 		_drag = null
 
 ## Where a ray meets the board: { uv, distance }, or {} on a miss.
@@ -103,36 +94,33 @@ func ray_hit(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 func pointer_ray(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
 	var hit := ray_hit(ray_origin, ray_direction)
 	if hit.is_empty():
-		if _toucher < 0:
+		if _finger.owner < 0:
 			_leave()
 		return -1.0
-	if _toucher < 0:
+	if _finger.owner < 0:
 		_ring = 0.0
 		_point(hit.uv, pressing)
 	return hit.distance
 
-## A fingertip at `tip` (world). `who` tells the hands apart: the first one in
-## front of the board owns it until it leaves. True while this hand owns it.
+## A fingertip at `tip` (world); `who` tells the hands apart. True while this
+## hand owns the board (see FingerTouch).
 func touch(who: int, tip: Vector3) -> bool:
-	if not visible or (_toucher >= 0 and _toucher != who):
+	if not visible:
 		return false
 	var p := to_local(tip)
 	var uv := _uv(p)
-	if not _inside(uv) or p.z > HOVER_M or p.z < -BEHIND_M:
-		if _toucher == who:
-			_toucher = -1
-			_touch_frames = 0
+	var was := _finger.owner
+	if not _finger.touch(who, p.z, _inside(uv)):
+		if was == who:
 			_leave()
 		return false
-	_toucher = who
-	_touch_frames = 3
-	_ring = clampf(p.z / HOVER_M, 0.0, 1.0)
-	_point(uv, p.z < (RELEASE_M if _pointer_pressed else CONTACT_M))
+	_ring = clampf(p.z / FingerTouch.HOVER_M, 0.0, 1.0)
+	_point(uv, _finger.pressed)
 	return true
 
 ## The pointer went elsewhere: end the stroke, hide the ring.
 func pointer_leave() -> void:
-	if _toucher < 0:
+	if _finger.owner < 0:
 		_leave()
 
 func start_drag(pointer: Node3D, hit_distance: float = -1.0) -> void:

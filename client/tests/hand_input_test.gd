@@ -10,6 +10,12 @@ extends SceneTree
 ##   - a hand tracker replaced by a new one (session restart) still works;
 ##   - a pinch on the grab bar under the screen moves it (no click reaches the
 ##     PC) while a long pinch on the screen stays a click; pinches click the menu;
+##   - turning the hand turns what it holds, about the point held, and an arm
+##     sweep (hand and ray turning together) does not turn it twice;
+##   - fingers parting with a jolt end a drag where it was;
+##   - thumb + middle finger: a short pinch right-clicks, held and moved it
+##     scrolls the screen (touch-like) or the menu, the pointer holding still;
+##   - a fingertip on a panel (main.finger_touch) rests the ray;
 ##   - the other hand's palm turned to the face shows the menu mark and a short
 ##     pinch toggles the menu (a long one or a palm turned away does not);
 ##   - the Pico case, with real vr_input.gd controllers: hand joints reported
@@ -52,7 +58,15 @@ func pick(o: Vector3, d: Vector3) -> Dictionary:
 		return {"kind": "overlay", "distance": t, "uv": Vector2(0.5, 0.5)}
 	return {}
 func uv_to_pixel(uv: Vector2) -> Vector2i: return Vector2i(uv * Vector2(1920, 1080))
-func send_mouse_input(_m, x, y, b, _s, _h = 0): sent.append([x, y, b])
+var wheel: Array = []
+var ui_scroll := 0.0
+var touching := false
+func send_mouse_input(_m, x, y, b, s, h = 0):
+	sent.append([x, y, b])
+	if s or h:
+		wheel.append([s, h])
+func send_ui_pointer_scroll(d): ui_scroll += d
+func finger_touch(_who, _tip) -> bool: return touching
 func send_ui_pointer_move(_uv): pass
 func send_ui_pointer_button(pressed, _b): ui.append(pressed)
 func start_drag(p, dist):
@@ -132,6 +146,20 @@ func _pose(knuckle: Vector3, gap: float) -> void:
 	var tip := knuckle + (Vector3(0, 0, -0.08) if gap > 0.04 else Vector3(-0.03, -0.04, -0.05))
 	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL, knuckle)
 	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP, tip)
+	_joint(hand, XRHandTracker.HAND_JOINT_THUMB_TIP, tip + Vector3(0, -gap, 0))
+
+## The palm joint turned to `b` (orientation reported, as on a headset).
+func _palm_turn(b: Basis) -> void:
+	hand.set_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM, Transform3D(b, Vector3.ZERO))
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_PALM,
+		XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID | XRHandTracker.HAND_JOINT_FLAG_ORIENTATION_VALID)
+
+## Index straight, thumb and middle tips `gap` apart.
+func _pose_mid(knuckle: Vector3, gap: float) -> void:
+	var tip := knuckle + Vector3(-0.01, -0.05, -0.04)
+	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL, knuckle)
+	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP, knuckle + Vector3(0, 0, -0.08))
+	_joint(hand, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP, tip)
 	_joint(hand, XRHandTracker.HAND_JOINT_THUMB_TIP, tip + Vector3(0, -gap, 0))
 
 ## A hand whose palm (centre `c`) faces along `n`, fingers up, built from joint
@@ -346,6 +374,113 @@ func _run() -> void:
 	_pose(MENU_KNUCKLE, 0.08)
 	await _frames(15)
 	check(main.ui == [true, false], "a pinch on the menu presses and releases its button -> %s" % [main.ui])
+
+	# --- Turning the hand turns what it holds -------------------------------
+	_pose(BAR_KNUCKLE, 0.08)
+	_palm_turn(Basis())
+	await _frames(40)
+	_pose(BAR_KNUCKLE, 0.005)
+	await _frames(3)
+	check(main.grabbed == 2, "a pinch on the bar grabs the screen again")
+	var held_at := Vector3(0.16, 0.5, -1.5)  # where the ray meets the bar
+	var held_local: Vector3 = main.box.to_local(held_at)
+	var b0: Basis = main.box.global_basis
+	for i in 10:  # a 30° turn of the wrist over 140 ms
+		_palm_turn(Basis(Vector3.UP, deg_to_rad(3.0 * (i + 1))))
+		await _frames(1)
+	await _frames(40)
+	var yaw := rad_to_deg(b0.z.signed_angle_to(main.box.global_basis.z, Vector3.UP))
+	check(absf(yaw - 30.0) < 2.0, "turning the hand 30° turns the held screen 30° -> %.1f°" % yaw)
+	check(main.box.to_global(held_local).distance_to(held_at) < 0.02,
+		"about the point held -> %.3f m off" % main.box.to_global(held_local).distance_to(held_at))
+	var shoulder := NECK + Vector3(0.16, -0.14, 0.0)
+	var sweep := Basis(Vector3.UP, deg_to_rad(20.0))
+	_pose(shoulder + sweep * (BAR_KNUCKLE - shoulder), 0.005)
+	_palm_turn(sweep * Basis(Vector3.UP, deg_to_rad(30.0)))
+	await _frames(60)
+	yaw = rad_to_deg(b0.z.signed_angle_to(main.box.global_basis.z, Vector3.UP))
+	check(absf(yaw - 50.0) < 3.0, "sweeping the arm 20° (hand turning with it) adds 20°, not 40° -> %.1f°" % yaw)
+	_palm_turn(sweep * Basis(Vector3.UP, deg_to_rad(30.0)) * Basis(Vector3.FORWARD, deg_to_rad(20.0)))
+	await _frames(40)
+	var roll := rad_to_deg(asin(main.box.global_basis.x.normalized().y))
+	check(absf(absf(roll) - 20.0) < 3.0, "rolling the hand 20° rolls it -> %.1f°" % roll)
+	_pose(shoulder + sweep * (BAR_KNUCKLE - shoulder), 0.08)
+	await _frames(15)
+	check(main.released == 2, "opening the pinch drops it")
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_PALM, 0)
+
+	# --- Letting go of a drag does not jolt it ---------------------------------
+	_pose(KNUCKLE, 0.08)
+	await _frames(40)
+	_pose(KNUCKLE, 0.005)
+	await _frames(3)
+	var dragged_to := KNUCKLE + Vector3(0.1, 0, 0)
+	for i in 10:
+		_pose(KNUCKLE + Vector3(0.01 * (i + 1), 0, 0), 0.005)
+		await _frames(2)
+	await _frames(30)
+	var before: Array = _last()
+	mark = main.sent.size()
+	for i in 6:  # the fingers part while the hand jolts 2 cm
+		_pose(dragged_to + Vector3(0.02 * (i + 1) / 6.0, 0.0, 0.0), 0.08)
+		await _frames(1)
+	await _frames(15)
+	release = main.sent.slice(mark).filter(func(e): return e[2] == 0)
+	check(before[2] == 1 and release.slice(0, 1) == [[before[0], before[1], 0]],
+		"the drag ends where it was, not where the parting fingers jolt it -> %s, %s" % [before, release.slice(0, 1)])
+
+	# --- Middle finger: right click and scroll -------------------------------
+	_pose(KNUCKLE, 0.08)
+	await _frames(40)
+	mark = main.sent.size()
+	_pose_mid(KNUCKLE, 0.005)
+	await _frames(5)
+	_pose_mid(KNUCKLE, 0.08)
+	await _frames(15)
+	var tapped: Array = main.sent.slice(mark)
+	check(tapped.any(func(e): return _near(e, aim) and e[2] == 2) and not tapped.any(func(e): return e[2] == 1)
+		and _last()[2] == 0, "a short middle pinch right-clicks where the hand points -> %s" % [tapped])
+	var wheel_mark: int = main.wheel.size()
+	mark = main.sent.size()
+	_pose_mid(KNUCKLE, 0.005)
+	await _frames(3)
+	for i in 20:
+		_pose_mid(KNUCKLE + Vector3(0, 0.005 * (i + 1), 0), 0.005)
+		await _frames(1)
+	await _frames(5)
+	var during: Array = main.sent.slice(mark)
+	_pose_mid(KNUCKLE + Vector3(0, 0.1, 0), 0.08)
+	await _frames(15)
+	var units := 0
+	for w in main.wheel.slice(wheel_mark):
+		units += w[0]
+	check(units < -900 and units > -1200, "held and moved 10 cm up, it drags the page up -> %d wheel units" % units)
+	check(during.all(func(e): return _near(e, aim) and e[2] == 0), "the pointer holds still and nothing clicks")
+	_pose(MENU_KNUCKLE, 0.08)
+	await _frames(40)
+	_pose_mid(MENU_KNUCKLE, 0.005)
+	await _frames(3)
+	for i in 20:
+		_pose_mid(MENU_KNUCKLE + Vector3(0, -0.005 * (i + 1), 0), 0.005)
+		await _frames(1)
+	_pose_mid(MENU_KNUCKLE + Vector3(0, -0.1, 0), 0.08)
+	await _frames(15)
+	check(main.ui_scroll >= 7.0, "on the menu it scrolls the menu -> %d notches" % main.ui_scroll)
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP, 0)
+
+	# --- A fingertip on a panel rests the ray --------------------------------
+	_pose(KNUCKLE, 0.08)
+	await _frames(40)
+	main.touching = true
+	mark = main.sent.size()
+	_pose(KNUCKLE, 0.005)
+	await _frames(5)
+	check(not input._laser.visible and main.sent.slice(mark).all(func(e): return e[2] == 0),
+		"a fingertip touching a panel: no beam, and the pinch clicks nothing")
+	main.touching = false
+	_pose(KNUCKLE, 0.08)
+	await _frames(40)
+	check(input._laser.visible, "lifted away, the hand points again")
 
 	# --- A new hand tracker (the session restarted) is picked up ------------
 	XRServer.remove_tracker(hand)

@@ -2,8 +2,8 @@ extends SceneTree
 ## The whiteboard, headless:
 ##   - a ray with the trigger / pinch held draws a stroke; a ray elsewhere misses;
 ##   - a fingertip hovering in front of it draws nothing, touching it draws,
-##     lifting it ends the stroke; while one hand owns it the other hand and the
-##     ray do not draw;
+##     lifting it ends the stroke; while one hand owns it the ray does not
+##     draw, and the other hand takes over only by touching between strokes;
 ##   - the tool row works with the pointer (eraser), undo, and clear (undoable);
 ##   - a corner handle resizes it, aspect kept, the opposite corner fixed.
 ##
@@ -65,20 +65,24 @@ func _run() -> void:
 	# --- Fingertip ------------------------------------------------------------
 	check(wb.touch(0, _at(Vector2(400, 600), 0.05)), "a fingertip 5 cm in front owns the board")
 	check(wb.stroke_count() == 1 and wb._ring > 0.5, "hovering draws nothing, shows the wide ring")
-	check(not wb.touch(1, _at(Vector2(500, 600), 0.0)), "the other hand cannot draw meanwhile")
+	check(not wb.touch(1, _at(Vector2(500, 600), 0.03)), "the other hand hovering does not take it")
 	_ray(Vector2(800, 700), true)
 	_ray(Vector2(900, 700), true)
-	check(wb.stroke_count() == 1, "nor can the ray")
+	check(wb.stroke_count() == 1, "nor does the ray draw meanwhile")
 	for i in 15:
 		wb.touch(0, _at(Vector2(400 + i * 15, 600), 0.004))
 	check(wb.stroke_count() == 2, "touching it draws")
+	check(not wb.touch(1, _at(Vector2(500, 600), 0.0)), "mid-stroke the other hand cannot take over")
 	wb.touch(0, _at(Vector2(625, 600), 0.015))
 	check(wb._pointer_pressed, "within the release band it keeps drawing (hysteresis)")
 	wb.touch(0, _at(Vector2(625, 600), 0.03))
 	check(not wb._pointer_pressed, "lifting it 3 cm ends the stroke")
-	check(not wb.touch(0, _at(Vector2(625, 600), 0.2)), "20 cm away it lets go")
-	check(wb.touch(1, _at(Vector2(500, 600), 0.05)), "then the other hand can have it")
+	check(wb.touch(1, _at(Vector2(500, 600), 0.0)) and wb.stroke_count() == 3,
+		"between strokes the other hand takes over by touching")
+	check(not wb.touch(0, _at(Vector2(625, 600), 0.004)), "and the first one waits")
 	wb.touch(1, _at(Vector2(500, 600), 0.2))
+	check(not wb._pointer_pressed and wb.touch(0, _at(Vector2(625, 600), 0.05)), "once it leaves, the first one can have it")
+	check(not wb.touch(0, _at(Vector2(625, 600), 0.2)), "20 cm away it lets go")
 	_ray(Vector2(900, 700), false)
 
 	# --- Tools ----------------------------------------------------------------
@@ -91,14 +95,14 @@ func _run() -> void:
 	_ray(Vector2(520, 320), true)
 	_ray(Vector2(520, 320), false)
 	var last: Line2D = wb._ink.get_child(-1)
-	check(wb.stroke_count() == 3 and last.default_color == Whiteboard.SLATE \
+	check(wb.stroke_count() == 4 and last.default_color == Whiteboard.SLATE \
 		and last.width == Whiteboard.ERASER_PX, "it erases with a wide slate stroke")
 	wb.undo()
-	check(wb.stroke_count() == 2, "undo takes the last stroke away")
+	check(wb.stroke_count() == 3, "undo takes the last stroke away")
 	wb.clear()
 	check(wb.stroke_count() == 0, "clear empties the board")
 	wb.undo()
-	check(wb.stroke_count() == 2, "undo brings the cleared strokes back")
+	check(wb.stroke_count() == 3, "undo brings the cleared strokes back")
 
 	# --- Resize ---------------------------------------------------------------
 	var handle: ResizeHandle = wb.resize_handles[3]  # bottom-right
