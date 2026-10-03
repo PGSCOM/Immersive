@@ -206,6 +206,12 @@ func set_compositor_layer(enabled: bool, origin: Node3D) -> void:
 func has_compositor_layer() -> bool:
 	return _layer != null
 
+## The compositor stacks layers by sort_order, not depth: main.gd gives the
+## nearest screen the highest (still < 0, behind Godot's own layer).
+func set_layer_order(order: int) -> void:
+	if _layer and _layer.get("sort_order") != order:
+		_layer.set("sort_order", order)
+
 ## The canvas material feeding the layer from the hardware decoder, so
 ## main.gd can push the SurfaceTexture transform to it too (or null).
 func get_layer_material() -> ShaderMaterial:

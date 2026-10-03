@@ -259,6 +259,19 @@ func _process(delta: float) -> void:
 	_handle_debug_capture(delta)
 	_update_decoders()
 	_update_snap_preview()
+	_sort_layers()
+
+## Compositor layers ignore depth: farther screens get a lower sort_order so a
+## nearer one is drawn over them where they overlap.
+func _sort_layers() -> void:
+	if not compositor_layers or not xr_camera:
+		return
+	var eye := xr_camera.global_position
+	var panels := _live_panels().filter(func(p): return p.has_compositor_layer())
+	panels.sort_custom(func(a, b): return eye.distance_squared_to(a.global_position) \
+		< eye.distance_squared_to(b.global_position))
+	for i in panels.size():
+		panels[i].set_layer_order(-1 - i)
 
 # ---------------------------------------------------------------------------
 # XR helpers
