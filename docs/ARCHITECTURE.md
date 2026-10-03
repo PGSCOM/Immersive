@@ -124,29 +124,43 @@ No server and no account: a room is a handful of headsets talking directly.
   room and each sharer's PC must be reachable. If the headset that opened the
   room leaves, the room closes.
 - **What goes through it**: each person's *profile* (name, microphone on or
-  off, how to watch their PC, where their shared screens hang) when it
-  changes; their *pose* (head and both hands, relative to their XROrigin3D,
-  30 times a second, unreliable); their *voice* (microphone on a muted bus
-  with an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms
-  PCM-16 packets, only while it passes a noise gate). About 3 KB/s of poses
-  and 32 KB/s of voice per person talking.
+  off, how to watch their PC, where their shared screens and their
+  whiteboard hang) when it changes; their *pose* (head and both hands, 30
+  times a second, unreliable); their *voice* (microphone on a muted bus with
+  an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms PCM-16
+  packets, only while it passes a noise gate); their *ink*: every change to
+  their whiteboard as it happens (`Whiteboard.ink` ops: a stroke begins, goes
+  on, undo, clear; reliable), all of it again for whoever joins later. About
+  3 KB/s of poses and 32 KB/s of voice per person talking.
 - **Screens never go through the room.** A headset that shares sends its PC a
   random WATCH_CODE and, once the host has it, tells the room the PC's
   address, port and code. Everyone else connects to that PC directly as a
-  *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets the same encoded frames
-  the sharer gets, fanned out by the host: no second encode, no relay through
-  a headset, the sharer's own rate control. A watcher can do nothing but
-  watch. Sharing is off by default and never saved.
+  *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets a copy of its own:
+  MJPEG at most 1280 wide and 8 fps, encoded on a thread of its own from the
+  frames the PC streams to the sharer (`WatchStream` in `main.cpp`). Any
+  client decodes it (a PC too), it takes a few Mbps whatever the sharer
+  streams at, and the sharer's own stream never depends on who watches. A
+  watcher can do nothing but watch. Sharing is off by default and never saved.
+- **One room frame.** Poses, screens and whiteboards are sent in the room's
+  frame (the world), not the tracking origin, so people can move: walking
+  carries XROrigin3D through the world (left stick walks, right stick turns
+  30°, a pinch in the air pulls; "Back to my seat" returns), the others stay
+  where they are, and they see us come.
 - **Seats** (`Room.seat()`): everyone in one row, ordered by peer id, 3.2 m
   apart, facing the same way. Each `Participant` node sits at its seat; under
-  it, the avatar and the shared screens are in that person's own tracking
-  space, as they sent them. A shared screen can be grabbed by its bar and
-  brought closer; from then on it stays where it was put, here only.
+  it, the avatar, the shared screens and the whiteboard are in that person's
+  own room frame, as they sent them. A shared screen can be grabbed by its bar
+  and brought closer; from then on it stays where it was put, here only.
 - **Avatars** (`participant.gd`): a head wearing a headset, shoulders and a
-  chest that turns after the head, two mitts where the controllers (or bare
-  hands) are, and the name, brighter while they speak; one colour per seat
-  (`UiTheme.PEOPLE`), the same colour their name has in the menu. Their voice
-  plays from their head (AudioStreamPlayer3D).
+  chest that turns after the head, two mitts where the controllers in use (or
+  else the tracked bare hands' palms) are, and the name, brighter while they
+  speak; one colour per seat (`UiTheme.PEOPLE`), the same colour their name
+  has in the menu. Their voice plays from their head (AudioStreamPlayer3D).
+- **With "Sharper text"** our screens are compositor layers under Godot's
+  own, seen through a punched hole, and that hole let avatars behind a screen
+  show through it on the Pico. While anyone or anything of the room is behind
+  one of our screens, that screen draws its picture with its mesh as well
+  (`ScreenPanel.draw_mesh_over_layer`), which hides them by depth.
 
 ## Data Flow
 

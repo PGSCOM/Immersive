@@ -212,6 +212,16 @@ func set_layer_order(order: int) -> void:
 	if _layer and _layer.get("sort_order") != order:
 		_layer.set("sort_order", order)
 
+## While something of a multiplayer room sits behind this screen (main.gd),
+## draw the picture with the mesh too, its layer's hole closed: a layer is
+## composited under Godot's own, and the punched hole showed avatars behind
+## the screen through it on the Pico; the mesh hides them by depth. Sharp
+## again once nothing is behind.
+func draw_mesh_over_layer(on: bool) -> void:
+	if _layer and (layers != 0) != on:
+		layers = 1 if on else 0
+		_layer.set("enable_hole_punch", not on)
+
 ## The canvas material feeding the layer from the hardware decoder, so
 ## main.gd can push the SurfaceTexture transform to it too (or null).
 func get_layer_material() -> ShaderMaterial:

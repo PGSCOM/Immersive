@@ -57,11 +57,14 @@ def check_host(switch):
     print(f"[sandbox] started this build's host (log: {log})")
 
 
-def echo(proc, prefix, wanted):
-    """Print the lines of `proc` that contain one of `wanted` (and drain the rest)."""
-    for line in proc.stdout:
-        if any(w in line for w in wanted):
-            print(f"{prefix} {line.rstrip()}".strip())
+def echo(proc, prefix, wanted, log):
+    """Print the lines of `proc` that contain one of `wanted`; all of them go to `log`."""
+    with open(log, "w") as f:
+        for line in proc.stdout:
+            f.write(line)
+            f.flush()
+            if any(w in line for w in wanted):
+                print(f"{prefix} {line.rstrip()}".strip())
 
 
 def main():
@@ -96,10 +99,11 @@ def main():
     else:
         print(f"[sandbox] Ben joins the room at {room[0].split('=')[1]}")
     print("[sandbox] Ctrl+C stops Ben and his PC\n")
-    threading.Thread(target=echo, args=(ben_pc, "[Ben's PC]", ("watches", "refused", "sharing")),
-                     daemon=True).start()
+    threading.Thread(target=echo, args=(ben_pc, "[Ben's PC]", ("watches", "refused", "sharing"),
+                                        "/tmp/immersive2-ben-pc.log"), daemon=True).start()
+    print("[sandbox] full logs: /tmp/immersive2-ben.log, /tmp/immersive2-ben-pc.log")
     try:
-        echo(bot, "", ("[Bot]", "[Room]", "SCRIPT ERROR"))
+        echo(bot, "", ("[Bot]", "[Room]", "SCRIPT ERROR"), "/tmp/immersive2-ben.log")
     except KeyboardInterrupt:
         pass
     finally:

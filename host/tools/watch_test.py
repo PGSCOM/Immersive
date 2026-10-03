@@ -7,7 +7,8 @@ Starts the host with --stub --pin 246810 (IM2_TCP_PORT / IM2_UDP_PORT choose
 the ports). The owner (127.0.0.2, with the PIN) streams monitors 0 and 2.
 Checks: nobody may watch before WATCH_CODE, a wrong code is refused, the
 right one gets HELLO_ACK (view-only), STREAM_START for each live stream and
-the frames at the UDP port it asked for; its selection and input change
+the frames at the UDP port it asked for: a copy of its own, MJPEG at most
+1280 wide, whatever the owner streams in; its selection and input change
 nothing; the owner dropping a monitor stops it for the watcher too; a new
 code (or 0) drops the watchers, and so does the owner leaving.
 """
@@ -21,7 +22,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from smoke_client import (HOST, PIN, TCP_PORT, UDP_PORT, hello, receive_frames,  # noqa: E402
-                          recv_msg, send_multi_select)
+                          recv_msg, send_multi_select, send_stream_config)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OWNER_IP, WATCHER_IP = "127.0.0.2", "127.0.0.3"
@@ -89,9 +90,11 @@ def join(code, want_streams):
     ack = got[0][1]
     if len(ack) < 73 or not ack[68] & 0x01:
         fail(f"watcher HELLO_ACK lacks HOST_FLAG_VIEW_ONLY or lan_ipv4: {ack.hex()}")
-    started = sorted(p[0] for t, p in got if t == 0x05)
-    if started != want_streams:
-        fail(f"watcher got STREAM_START for {started}, expected {want_streams}")
+    starts = [struct.unpack_from("<BHHB", p) for t, p in got if t == 0x05]
+    if sorted(s[0] for s in starts) != want_streams:
+        fail(f"watcher got STREAM_START for {starts}, expected monitors {want_streams}")
+    if any(codec != 2 or w > 1280 for _, w, _, codec in starts):
+        fail(f"a watcher's stream must be MJPEG at most 1280 wide: {starts}")
     if any(t in (0x03, 0x07) for t in types):
         fail("a watcher must not get the monitor list or the PC's sound")
     return s
@@ -129,10 +132,12 @@ def run():
     mtype, ack = recv_msg(owner)
     if mtype != 0x02 or len(ack) < 73:
         fail(f"owner: HELLO_ACK without lan_ipv4 ({mtype:#x}, {len(ack)} bytes)")
+    send_stream_config(owner, 0, 4000, 0, 0, 0)  # the owner on H.264 (where the PC can)
     send_multi_select(owner, [0, 2])
-    starts = [p[0] for t, p in messages(owner, 3) if t == 0x05]
-    if sorted(starts) != [0, 2]:
+    starts = [struct.unpack_from("<BHHB", p) for t, p in messages(owner, 3) if t == 0x05]
+    if sorted(s[0] for s in starts) != [0, 2]:
         fail(f"owner: STREAM_START for {starts}")
+    print(f"[watch] the owner streams codec {starts[0][3]} (0 = H.264, 2 = MJPEG)")
 
     refused(0x5EC12E7, 1, "watching before anyone shares")
     watch_code(owner, 0x5EC12E7)
@@ -142,7 +147,7 @@ def run():
     got = receive_frames(watch_udp, [0, 2], 8, 3)
     if any(got.get(m, 0) < 3 for m in (0, 2)):
         fail(f"watcher frames: {got}")
-    print("[watch] watcher gets both streams at its own UDP port OK")
+    print("[watch] watcher gets both screens in MJPEG at its own UDP port OK")
 
     # Its requests change nothing: the owner keeps both streams.
     send_multi_select(w, [1])

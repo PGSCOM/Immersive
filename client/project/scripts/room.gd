@@ -9,12 +9,16 @@
 ## how to watch their PC and where their shared screens hang), their pose
 ## (head and hands relative to their XROrigin3D, POSE_HZ) and their voice
 ## (16 kHz mono PCM in 20 ms packets, only while louder than a noise gate).
+## Our whiteboard goes too: where it hangs (in the profile) and every stroke
+## as it is drawn (`ink` ops, reliable; whoever joins later gets them all).
 ## The screens never go through the room: each PC streams them straight to the
 ## headsets that watch it (Participant, protocol.h WatchCode).
 ##
-## Seats: everyone in one row, ordered by peer id, SEAT_SPACING_M apart and
-## facing the same way (each tracking space laid beside the others), so
-## whoever is on my right sees me on their left.
+## Everything is in the room frame (this node's, i.e. the world), not the
+## tracking origin: walking (main.gd moves XROrigin3D) carries us towards the
+## others, and they see us come. Seats: everyone in one row, ordered by peer
+## id, SEAT_SPACING_M apart and facing the same way (each person's world laid
+## beside the others), so whoever is on my right sees me on their left.
 
 extends Node3D
 class_name Room
@@ -65,7 +69,10 @@ var _camera: Node3D = null
 var _controllers: Array = []
 var _peer: ENetMultiplayerPeer = null
 var _people := {}                  ## peer id -> Participant
-var _profile := {"name": "", "mic": true, "share": {}, "screens": []}
+var _profile := {"name": "", "mic": true, "share": {}, "screens": [], "board": {}}
+## Every op of our whiteboard so far (Whiteboard.ink), for people who join later.
+var _ink_log: Array = []
+const INK_BATCH := 2000
 var _join_deadline_ms := 0
 var _pose_s := 0.0
 var _summary_s := 0.0
@@ -276,6 +283,8 @@ func _on_peer_connected(id: int) -> void:
 	_people[id] = p
 	_retone()
 	_take_profile.rpc_id(id, _profile)
+	for i in range(0, _ink_log.size(), INK_BATCH):
+		_take_ink.rpc_id(id, _ink_log.slice(i, i + INK_BATCH))
 	changed.emit()
 
 func _on_peer_disconnected(id: int) -> void:
@@ -302,6 +311,12 @@ func _take_pose(d: PackedFloat32Array) -> void:
 	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
 	if who:
 		who.set_pose(d)
+
+@rpc("any_peer", "call_remote", "reliable", 3)
+func _take_ink(ops: Array) -> void:
+	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
+	if who:
+		who.apply_ink(ops)
 
 @rpc("any_peer", "call_remote", "unreliable_ordered", 2)
 func _take_voice(pcm: PackedByteArray) -> void:
@@ -334,11 +349,10 @@ func _retone() -> void:
 func _seat_people() -> void:
 	var ids := _ids()
 	var me := ids.find(multiplayer.get_unique_id())
-	var base := _origin.global_transform if _origin else Transform3D.IDENTITY
 	for id in _people:
-		_people[id].global_transform = base * seat(ids.find(id) - me)
+		_people[id].global_transform = global_transform * seat(ids.find(id) - me)
 
-## Where someone `slots` seats to our right sits, in our tracking space.
+## Where someone `slots` seats to our right sits, in our room frame.
 static func seat(slots: int) -> Transform3D:
 	return Transform3D(Basis(), Vector3(slots * SEAT_SPACING_M, 0.0, 0.0))
 
@@ -367,11 +381,24 @@ func set_share(share: Dictionary) -> void:
 		_publish()
 
 ## Where our shared screens hang: [{id, x: 12 floats (basis columns, origin,
-## relative to our XROrigin3D), w: metres wide, c: curvature 0-1}].
+## in the room frame), w: metres wide, c: curvature 0-1}].
 func set_screens(screens: Array) -> void:
 	if screens != _profile.screens:
 		_profile.screens = screens
 		_publish()
+
+## Where our whiteboard hangs: {on, x: 12 floats in the room frame, w}.
+func set_board(board: Dictionary) -> void:
+	if board != _profile.board:
+		_profile.board = board
+		_publish()
+
+## Changes to our whiteboard (Whiteboard.ink): to everyone now, and kept for
+## whoever joins later.
+func send_ink(ops: Array) -> void:
+	_ink_log.append_array(ops)
+	if state == State.IN and _peer and not _people.is_empty():
+		_take_ink.rpc(ops)
 
 func sharing() -> bool:
 	return not _profile.share.is_empty()
@@ -382,18 +409,24 @@ func _publish() -> void:
 	changed.emit()
 
 func _my_pose() -> PackedFloat32Array:
-	var o := _origin.global_transform.affine_inverse()
+	var o := global_transform.affine_inverse()
 	return Participant.pack_pose(o * _camera.global_transform, _hand(0, o), _hand(1, o))
 
-## Hand i (0 left, 1 right) relative to the origin: the controller while it is
-## tracked, else the bare hand's palm, else null (not seen).
+## Hand i (0 left, 1 right) in the room frame `o`: the controller while it is
+## in use (vr_input.gd: held, not put down), else the bare hand's palm while
+## the runtime really tracks it (as hand_input.gd decides), else null (not
+## seen). A controller lying on the desk is not the hand: the Pico keeps
+## reporting it as tracked.
 func _hand(i: int, o: Transform3D) -> Variant:
 	var c: XRNode3D = _controllers[i] if i < _controllers.size() else null
-	if c and c.get_has_tracking_data():
+	var input: Node = c.get_node_or_null("VRInput") if c else null
+	if c and (input.in_use() if input else c.get_has_tracking_data()):
 		return o * c.global_transform
 	var t := XRServer.get_tracker(&"/user/hand_tracker/left" if i == 0 else &"/user/hand_tracker/right") as XRHandTracker
-	if t and t.has_tracking_data:
-		return t.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM)
+	if t and _origin and t.has_tracking_data and t.hand_tracking_source in [
+			XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED, XRHandTracker.HAND_TRACKING_SOURCE_UNKNOWN] \
+			and t.get_hand_joint_flags(XRHandTracker.HAND_JOINT_PALM) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID:
+		return o * _origin.global_transform * t.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM)
 	return null
 
 # ---------------------------------------------------------------------------
@@ -498,6 +531,14 @@ func people() -> Array:
 		out.append({"name": p.display_name, "me": false, "host": id == 1, "tone": p.tone,
 			"mic": p.mic_on, "speaking": p.is_speaking(), "screens": p.watch_state(),
 			"count": p.remote_panels().size()})
+	return out
+
+## Points on everyone else and what they show (world), so main.gd can tell
+## when one of our screens hides them.
+func occluder_points() -> Array:
+	var out := []
+	for p in _people.values():
+		out.append_array(p.occluder_points())
 	return out
 
 ## Every screen someone shares with us (main.gd::pick() can grab them).

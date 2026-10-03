@@ -88,6 +88,8 @@ var share_screens: bool = false
 var _watch_code: int = 0
 var _watch_probe: int = -1
 var _room_screens_s: float = 0.0
+## Whiteboard changes not yet handed to the room (Whiteboard.ink).
+var _ink_out: Array = []
 var _room_notice: String = ""
 ## The room joined last (the menu's address field starts there) and its port.
 var _room_address: String = ""
@@ -206,6 +208,8 @@ var _cmdline_room_pin := 0
 var _cmdline_name := ""
 ## --im2-tone / --im2-no-mic: the room hears a tone / nothing from us (Room.voice_from).
 var _cmdline_voice := "mic"
+## --im2-board: show the whiteboard and draw a line on it (tests).
+var _cmdline_board := false
 ## Driven from the command line (tests, adb): settings and layout stay as
 ## the user left them.
 var _ephemeral: bool = false
@@ -300,8 +304,19 @@ func _sort_layers() -> void:
 	var panels := _live_panels().filter(func(p): return p.has_compositor_layer())
 	panels.sort_custom(func(a, b): return eye.distance_squared_to(a.global_position) \
 		< eye.distance_squared_to(b.global_position))
+	var room_points: Array = room.occluder_points() if room else []
 	for i in panels.size():
 		panels[i].set_layer_order(-1 - i)
+		panels[i].draw_mesh_over_layer(_hides_any(panels[i], eye, room_points))
+
+## Whether `panel` stands between the eye and one of `points` (world).
+func _hides_any(panel: Node3D, eye: Vector3, points: Array) -> bool:
+	for at: Vector3 in points:
+		var to := at - eye
+		var hit: Dictionary = panel.ray_to_screen_hit(eye, to.normalized())
+		if hit.get("valid", false) and hit.distance < to.length():
+			return true
+	return false
 
 # ---------------------------------------------------------------------------
 # XR helpers
@@ -1001,6 +1016,7 @@ func _init_ui_overlay() -> void:
 		_save_config()
 		room.join(ip, port, pin))
 	ui_overlay.room_leave_requested.connect(func(): room.leave())
+	ui_overlay.room_seat_requested.connect(back_to_seat)
 	ui_overlay.room_mic_toggled.connect(func(on: bool):
 		_room_mic = on
 		room.set_mic(on)
@@ -1010,6 +1026,47 @@ func _init_ui_overlay() -> void:
 		_update_share()
 		_on_room_changed())
 	ui_overlay.set_room_defaults(_room_address, _room_port)
+
+# ---------------------------------------------------------------------------
+# Moving through the room
+# ---------------------------------------------------------------------------
+
+## Moving carries the tracking origin (XROrigin3D) through the world: the
+## screens, the menu, the whiteboard and the others in a room stay where they
+## are, and we go to them. The left stick walks and the right one turns
+## (vr_input.gd); a pinch on empty space pulls us along (hand_input.gd).
+const WALK_SPEED := 1.6     ## m/s with the stick all the way
+const TURN_STEP_DEG := 30.0
+const PULL_GAIN := 2.0      ## metres moved per metre the hand pulls
+
+## Walk along the floor, where we look: stick up = forward.
+func walk(stick: Vector2, delta: float) -> void:
+	var fwd := -xr_camera.global_basis.z
+	var right := xr_camera.global_basis.x
+	fwd.y = 0.0
+	right.y = 0.0
+	if fwd.length_squared() < 0.0001 or right.length_squared() < 0.0001:
+		return
+	xr_origin.global_position += (fwd.normalized() * stick.y + right.normalized() * stick.x) \
+		* WALK_SPEED * delta
+
+## Turn on the spot, about the head, one step: dir +1 to the right.
+func turn(dir: int) -> void:
+	var pivot := xr_camera.global_position
+	var rot := Basis(Vector3.UP, -dir * deg_to_rad(TURN_STEP_DEG))
+	var t := xr_origin.global_transform
+	xr_origin.global_transform = Transform3D(rot * t.basis, pivot + rot * (t.origin - pivot))
+
+## A hand pulling the room: it went from `before` to `now`, both in tracking
+## space (XROrigin3D's own), so the origin moving does not feed back.
+func pull(before: Vector3, now: Vector3) -> void:
+	var d := xr_origin.global_basis * (now - before)
+	d.y = 0.0
+	xr_origin.global_position -= d * PULL_GAIN
+
+## Back where we started (the menu's "Back to my seat").
+func back_to_seat() -> void:
+	xr_origin.global_transform = Transform3D.IDENTITY
 
 # ---------------------------------------------------------------------------
 # Multiplayer room
@@ -1026,6 +1083,9 @@ func _init_room() -> void:
 	add_child(room)
 	room.changed.connect(_on_room_changed)
 	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
+	whiteboard.ink.connect(func(op: Array): _ink_out.append(op))
+	if _cmdline_board:
+		_draw_test_line.call_deferred()
 	if _cmdline_room == "open":
 		room.open(_room_port, _cmdline_room_pin)
 	elif _cmdline_room.is_valid_ip_address():
@@ -1097,24 +1157,45 @@ func _update_room(delta: float) -> void:
 	if not room:
 		return
 	room.look_for_rooms(ui_overlay.is_shown() and ui_overlay.showing_room_tab())
-	if not room.sharing():
+	if not _ink_out.is_empty():
+		room.send_ink(_ink_out)  # kept even outside a room, for whoever joins later
+		_ink_out = []
+	if room.state != Room.State.IN:
 		return
-	# Where our screens hang, twice a second (the room only sends changes).
+	# Where the whiteboard and the shared screens hang, twice a second (the
+	# room only sends changes).
 	_room_screens_s += delta
 	if _room_screens_s < 0.5:
 		return
 	_room_screens_s = 0.0
-	var o := xr_origin.global_transform.affine_inverse()
+	room.set_board({"on": whiteboard.visible, "x": _in_room_frame(whiteboard),
+		"w": snappedf(whiteboard.panel_width, 0.001)})
+	if not room.sharing():
+		return
 	var curve := curved_screen_amount if curved_screen_enabled else 0.0
 	var screens := []
 	for p in _live_panels():
-		var t: Transform3D = o * p.global_transform
-		var b := t.basis
-		var x := [b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z,
-			t.origin.x, t.origin.y, t.origin.z].map(func(v: float): return snappedf(v, 0.001))
-		screens.append({"id": int(p.get_meta("monitor_id", -1)), "x": x,
+		screens.append({"id": int(p.get_meta("monitor_id", -1)), "x": _in_room_frame(p),
 			"w": snappedf(p.panel_width, 0.001), "c": curve})
 	room.set_screens(screens)
+
+## Where `node` is in the room frame (not the origin: we walk), as the 12
+## numbers the room sends: basis columns, then the origin.
+func _in_room_frame(node: Node3D) -> Array:
+	var t: Transform3D = room.global_transform.affine_inverse() * node.global_transform
+	var b := t.basis
+	return [b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z,
+		t.origin.x, t.origin.y, t.origin.z].map(func(v: float): return snappedf(v, 0.001))
+
+## --im2-board: show the whiteboard and draw a diagonal on it, as a pointer does.
+func _draw_test_line() -> void:
+	whiteboard.set_shown(true)
+	var n := whiteboard.global_basis.z
+	for i in 21:
+		var at := whiteboard.to_global(whiteboard.local_point(0.2 + 0.03 * i, 0.3 + 0.02 * i))
+		whiteboard.pointer_ray(at + n * 0.3, -n, true)
+		await get_tree().process_frame
+	whiteboard.pointer_leave()
 
 func _show_overlay() -> void:
 	if ui_overlay and not ui_overlay.is_shown():
@@ -2243,7 +2324,8 @@ func _load_config() -> void:
 ## --im2-virtual=WxH (ask the host for a virtual screen once connected),
 ## --im2-room=open|IP (open / join a room), --im2-room-port=N, --im2-room-pin=N,
 ## --im2-name=NAME (in the room), --im2-share (share the screens there),
-## --im2-tone (a tone instead of the microphone), --im2-no-mic (nothing).
+## --im2-tone (a tone instead of the microphone), --im2-no-mic (nothing),
+## --im2-board (show the whiteboard and draw a line on it).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
@@ -2285,6 +2367,8 @@ func _apply_cmdline_overrides() -> void:
 			_cmdline_voice = "tone"
 		elif arg == "--im2-no-mic":
 			_cmdline_voice = ""
+		elif arg == "--im2-board":
+			_cmdline_board = true
 		elif arg.begins_with("--im2-virtual="):
 			var wh := arg.get_slice("=", 1).split("x")
 			if wh.size() == 2:

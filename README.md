@@ -351,11 +351,19 @@ leaves, the room closes), and each shared screen comes straight from its PC.
 
 - **Show my screens to the room** shares the screens you have open, as they
   hang around you; others cannot control your PC. Off by default, never saved.
-  Grab a shared screen by its bar to bring it closer (only for you).
+  They get a lighter copy (MJPEG, up to 1280 wide, 8 fps) straight from your
+  PC, so your own stream is untouched. Grab a shared screen by its bar to
+  bring it closer (only for you).
+- Your **whiteboard** shows to everyone in the room, stroke by stroke as you
+  draw.
 - **Microphone** switches your voice off; others hear you from where your
   avatar sits. The headset asks for microphone permission the first time.
 - Everyone sits in one row, 3.2 m apart; names in the menu have the colour of
-  their avatar.
+  their avatar. To go over to someone, pinch in the air and pull, or walk with
+  the left stick (the right stick turns); **Back to my seat** returns.
+- Trying it alone: `python3 host/tools/room_sandbox.py` starts "Ben" on the
+  PC (a second person with his own fake PC: he looks at you, waves, repeats
+  what you say and draws on his whiteboard).
 - Over the internet the room and each sharer's PC must be reachable: a VPN
   such as Tailscale or ZeroTier, or forwarded ports (room UDP 19820, PC TCP
   19800 + UDP 19801).

@@ -87,13 +87,15 @@ The client remembers the PIN per PC and sends it on every connection.
 let the others watch what this PC streams to it, without the PIN: it sends
 WATCH_CODE with a random code, and a HELLO with `HELLO_FLAG_WATCH` and that
 code in the PIN field gets in (wrong codes cost and lock out like wrong PINs).
-A watcher receives STREAM_START / STREAM_STOP and the very same encoded frames
-as the headset that shared them (fanned out at its own UDP port, not encoded
-again), never the monitor list or the PC's sound, and nothing it sends is acted
-on except REQUEST_KEYFRAME (one a second at most per monitor, since each IDR
-blurs the sharer's picture for a moment), LATENCY_PROBE and PING. A new code,
-code 0, or the sharing headset leaving drops every watcher. Watchers do not
-count toward `--max-clients`.
+A watcher receives STREAM_START / STREAM_STOP for each screen the sharing
+headset streams, and a copy of its own of each: MJPEG (every client decodes
+it), at most 1280 wide and 8 fps, encoded on a thread of its own from the
+frames the PC streams to the sharer, sent to the watcher's own UDP port. The
+sharer's stream (codec, bitrate, keyframes) never depends on who watches, and
+a watcher never needs a keyframe. It never gets the monitor list or the PC's
+sound, and nothing it sends is acted on but LATENCY_PROBE and PING. A new
+code, code 0, or the sharing headset leaving drops every watcher. Watchers do
+not count toward `--max-clients`.
 
 ---
 

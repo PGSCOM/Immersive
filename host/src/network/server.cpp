@@ -342,11 +342,39 @@ public:
                 if (it->second.rate.last_ack.time_since_epoch().count())
                     it->second.rate.last_ack = std::chrono::steady_clock::now();
             }
-            stream_starts_[info.monitor_id] = {client_id, info};  // for watchers joining later
-            if (client_id == watch_owner_) append_watchers_locked(to);
+        }
+        send_control_message(client_id, protocol::MessageType::STREAM_START, &info, sizeof(info));
+    }
+
+    void send_watch_start(uint32_t owner, const protocol::StreamStart& info) override {
+        std::vector<uint32_t> to;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            stream_starts_[info.monitor_id] = {owner, info};  // for watchers joining later
+            if (owner == watch_owner_) append_watchers_locked(to);
         }
         for (uint32_t id : to)
             send_control_message(id, protocol::MessageType::STREAM_START, &info, sizeof(info));
+    }
+
+    bool has_watchers(uint32_t owner) const override {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        if (owner != watch_owner_) return false;
+        for (const auto& [id, c] : clients_)
+            if (c.watcher) return true;
+        return false;
+    }
+
+    void send_watch_packet(uint32_t owner, uint8_t monitor_id, uint32_t frame_number,
+                           const uint8_t* data, uint32_t size) override {
+        std::vector<struct sockaddr_in> dests;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            if (owner != watch_owner_) return;
+            for (const auto& [id, c] : clients_)
+                if (c.watcher && c.udp_addr_set) dests.push_back(c.udp_addr);
+        }
+        send_udp_frame(dests, monitor_id, frame_number, data, size);
     }
 
     void send_stream_stop(uint32_t client_id, uint8_t monitor_id) override {
@@ -371,8 +399,8 @@ public:
         // does not. One 1080p frame is ~100-200 chunks, so holding
         // clients_mutex_ across the whole burst serialised every monitor's
         // worker (and the ACK handler) behind one stream. Take the lock only
-        // long enough to copy the destinations out: the client (unless its
-        // video goes in-band on TCP) and the headsets watching it.
+        // long enough to copy the destination out (none when the video goes
+        // in-band on TCP).
         std::vector<struct sockaddr_in> dests;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
@@ -380,13 +408,14 @@ public:
             if (it != clients_.end() && it->second.udp_addr_set &&
                 send_to_client_locked(it->second, monitor_id, frame_number, data, size))
                 dests.push_back(it->second.udp_addr);
-            if (client_id == watch_owner_) {
-                for (const auto& [id, c] : clients_)
-                    if (c.watcher && c.udp_addr_set) dests.push_back(c.udp_addr);
-            }
         }
-        if (dests.empty()) return;
+        send_udp_frame(dests, monitor_id, frame_number, data, size);
+    }
 
+    /// One frame as UDP chunks plus their FEC parity, to each of `dests`.
+    void send_udp_frame(const std::vector<struct sockaddr_in>& dests, uint8_t monitor_id,
+                        uint32_t frame_number, const uint8_t* data, uint32_t size) {
+        if (dests.empty()) return;
         const uint16_t chunk_count = protocol::compute_chunk_count(size);
 
         // FEC (protocol.h, VideoParityHeader): Wi-Fi drops packets here and
@@ -415,9 +444,9 @@ public:
         vph.chunk_count  = chunk_count;
 
         auto send_packet = [&](size_t len) {
-            for (auto& dest : dests)
+            for (const auto& dest : dests)
                 sendto(udp_socket_, reinterpret_cast<const char*>(packet.data()),
-                       static_cast<int>(len), 0, reinterpret_cast<struct sockaddr*>(&dest),
+                       static_cast<int>(len), 0, reinterpret_cast<const struct sockaddr*>(&dest),
                        sizeof(dest));
         };
 
@@ -815,8 +844,7 @@ private:
                 break;
             }
             if (authed && msg_type == protocol::MessageType::HELLO) continue;
-            if (watcher && msg_type != protocol::MessageType::REQUEST_KEYFRAME &&
-                msg_type != protocol::MessageType::LATENCY_PROBE &&
+            if (watcher && msg_type != protocol::MessageType::LATENCY_PROBE &&
                 msg_type != protocol::MessageType::PING) continue;  // a watcher only watches
             switch (msg_type) {
             case protocol::MessageType::HELLO: {
@@ -1025,18 +1053,8 @@ private:
                 if (payload.size() >= sizeof(protocol::RequestKeyframe)) {
                     protocol::RequestKeyframe req;
                     std::memcpy(&req, payload.data(), sizeof(req));
-                    uint32_t from = client_id;
-                    if (watcher) {
-                        // The IDR goes to the owner too, and each one blurs
-                        // its picture for a moment: one a second at most.
-                        std::lock_guard<std::mutex> lock(clients_mutex_);
-                        const auto now = std::chrono::steady_clock::now();
-                        auto& last = watch_idr_at_[req.monitor_id];
-                        from = now - last < std::chrono::seconds(1) ? 0 : watch_owner_;
-                        if (from) last = now;
-                    }
-                    if (from && on_request_keyframe_) {
-                        on_request_keyframe_(from, req.monitor_id);
+                    if (on_request_keyframe_) {
+                        on_request_keyframe_(client_id, req.monitor_id);
                     }
                 }
                 break;
@@ -1203,8 +1221,9 @@ private:
     }
 
     /// HELLO_FLAG_WATCH: let the headset in if it shows the current watch
-    /// code, then announce the owner's streams to it and ask for an IDR of
-    /// each, so its picture starts at once. False when refused (it was told).
+    /// code, then announce the owner's watch streams to it (their next frame
+    /// comes with the owner's next one, within a second even on a still
+    /// screen). False when refused (it was told).
     bool accept_watcher(uint32_t client_id, SocketType sock, struct in_addr peer,
                         const protocol::Hello& hello) {
         uint32_t want;
@@ -1246,8 +1265,6 @@ private:
             send_control_message(client_id, protocol::MessageType::STREAM_START, &s, sizeof(s));
         std::cout << "[Server] Client " << client_id << " watches client " << owner
                   << "'s screens (" << starts.size() << " streaming)\n";
-        if (on_request_keyframe_)
-            for (const auto& s : starts) on_request_keyframe_(owner, s.monitor_id);
         return true;
     }
 
@@ -1452,13 +1469,11 @@ private:
     std::atomic<uint8_t>  host_flags_{0};
 
     // Watching (protocol::WatchCode), all under clients_mutex_: the code, the
-    // client whose streams watchers get, the last STREAM_START of each
-    // monitor (and whose it is) for watchers that join later, and the last
-    // IDR a watcher asked for, per monitor.
+    // client whose screens watchers get, and the last watch STREAM_START of
+    // each monitor (and whose it is) for watchers that join later.
     uint32_t watch_code_ = 0;
     uint32_t watch_owner_ = 0;
     std::map<uint8_t, std::pair<uint32_t, protocol::StreamStart>> stream_starts_;
-    std::unordered_map<uint8_t, std::chrono::steady_clock::time_point> watch_idr_at_;
 
     // Per-client handler threads, joined in stop(). finished_threads_ marks the
     // ones that have run to completion so the accept loop can reap them.

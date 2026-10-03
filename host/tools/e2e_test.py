@@ -24,9 +24,10 @@ Checks, in order:
   8. A virtual screen asked for from the headset streams.
   9. Multiplayer: a second PC (host) and two clients in one room. A wrong
      room PIN is refused; each sees the other's avatar (poses) and hears the
-     other's voice (a test tone), and each watches the screens the other
-     shares, straight from the other's PC (protocol.h WatchCode): the right
-     greys. Leaving shows on the other side.
+     other's voice (a test tone), each watches the screens the other shares,
+     straight from the other's PC (protocol.h WatchCode, an MJPEG copy): the
+     right greys, and Ben sees Ana's whiteboard with her line on it. Leaving
+     shows on the other side.
   10. Ctrl+C on the host exits promptly.
   11. The in-VR menu works with pointer clicks (keypads, PIN, tabs, layout,
      the Room tab), via client/tests/overlay_test.gd. Needs xvfb-run;
@@ -408,7 +409,8 @@ def multiplayer(host):
     host2 = start_host("host2", tcp2, udp2)
     room = [f"--im2-room-port={room_port}", "--im2-capture"]
     ana = Proc("ana", [*CLIENT, "--im2-host=127.0.0.1", "--im2-monitors=0,1", "--im2-name=Ana",
-                       "--im2-room=open", f"--im2-room-pin={room_pin}", "--im2-share", "--im2-tone", *room])
+                       "--im2-room=open", f"--im2-room-pin={room_pin}", "--im2-share", "--im2-tone",
+                       "--im2-board", *room])
     procs.append(ana)
     ana.wait_for(r"\[Room\] opened on UDP", 20)
     eve = Proc("eve", [*CLIENT, "--im2-name=Eve", "--im2-room=127.0.0.1", "--im2-room-pin=111111", *room])
@@ -430,6 +432,8 @@ def multiplayer(host):
     host.wait_for(r"watches client \d+'s screens", 5)
     host2.wait_for(r"watches client \d+'s screens", 5)
     print("      each watches the other's screens, straight from the other's PC")
+    ben.wait_for(r"remote board peer=Ana shown=true strokes=[1-9]", 20)
+    print("      Ben sees Ana's whiteboard and what she drew on it")
     mark = ana.mark()
     ben.signal(signal.SIGINT)  # quits cleanly: leaves the room
     ana.wait_for(r"\[Room\] Ben left", 40, mark)

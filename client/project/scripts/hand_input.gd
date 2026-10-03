@@ -93,6 +93,9 @@ var _last_pixel: Vector2i = Vector2i.ZERO
 ## Screen, menu or keyboard moved by a pinch on its bar, and the node that
 ## carries the ray for LaserDrag.
 var _grab: Node = null
+## A pinch on empty space pulls us along (main.gd::pull): where the knuckle
+## was last frame, in tracking space (XROrigin3D's own); null = no pull.
+var _pull_at: Variant = null
 var _ray_node: Node3D = null
 
 # One Euro filter state for the ray direction (ZERO = start over).
@@ -188,6 +191,7 @@ func _let_go() -> void:
 	_point_pinching = false
 	_point_armed = false
 	_torso_yaw = NAN
+	_pull_at = null
 	_drop_grab()
 	_end_pinch_if_active()
 	_hide_pointer_visual()
@@ -239,6 +243,16 @@ func _process_pointing_hand(delta: float) -> void:
 		var up := Vector3.RIGHT if absf(direction.dot(Vector3.UP)) > 0.99 else Vector3.UP
 		_ray_node.global_transform = Transform3D(Basis.looking_at(direction, up), origin)
 
+	# A pinch on empty space pulls us through the room until the fingers open.
+	if _pull_at != null:
+		if should_press:
+			var at: Vector3 = main_scene.xr_origin.to_local(_knuckle)
+			main_scene.pull(_pull_at, at)
+			_pull_at = at
+			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
+			return
+		_pull_at = null
+
 	# A pinch that grabbed a bar moves that thing until the fingers open.
 	if _grab != null:
 		if should_press and is_instance_valid(_grab):
@@ -288,6 +302,8 @@ func _process_pointing_hand(delta: float) -> void:
 			_point_at_panel(hit, should_press, origin, direction)
 		_:
 			_end_pinch_if_active()
+			if pressed_now and main_scene.has_method("pull"):
+				_pull_at = main_scene.xr_origin.to_local(_knuckle)
 			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
 
 ## Mouse on the PC: the pinch is the left button, however long it is held.

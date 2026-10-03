@@ -34,6 +34,9 @@ const GRIP_RELEASE_THRESHOLD := 0.35
 ## A grip held this long on a screen grabs it; a shorter squeeze right-clicks.
 const GRIP_HOLD_TO_DRAG_S := 0.28
 const STICK_DEADZONE := 0.15
+## The right stick turns once pushed past TURN_PUSH, again once back under TURN_REARM.
+const TURN_PUSH := 0.7
+const TURN_REARM := 0.3
 ## Wheel units per second at full deflection (120 = one notch); the response
 ## is quadratic so a light push scrolls slowly.
 const SCROLL_SPEED := 1500.0
@@ -94,6 +97,7 @@ var _render_models: Node3D
 var _trigger_pressed := false
 var _grip_pressed := false
 var _stick := Vector2.ZERO
+var _turn_held := false  ## the right stick turned and has not come back yet
 
 var _target: Target = Target.NONE
 var _panel: Node3D = null
@@ -298,6 +302,7 @@ func _process(delta: float) -> void:
 			active = null
 		_set_role("put down" if controller.get_has_tracking_data() else "untracked")
 		return
+	_update_locomotion(delta)
 	if active == null:
 		active = self
 	if active != self:
@@ -454,8 +459,26 @@ func _update_drag(delta: float) -> void:
 		_hit_distance = _dragging.get_drag_distance()
 
 # ---------------------------------------------------------------------------
-# Stick scrolling
+# Stick: walking and turning (main.gd), scrolling
 # ---------------------------------------------------------------------------
+
+## The stick walks (left controller) or turns one step (right controller)
+## while it has nothing else to do: not carrying something (then it pushes,
+## pulls and sizes it) nor, as the pointer, on a screen or the menu (then it
+## scrolls). After that it must come back to the middle before it turns.
+func _update_locomotion(delta: float) -> void:
+	var busy := is_instance_valid(_dragging) or (active == self and _target in [Target.PANEL, Target.OVERLAY])
+	if busy or not main_scene or not main_scene.has_method("walk"):
+		_turn_held = true
+		return
+	if _is_right():
+		if absf(_stick.x) < TURN_REARM:
+			_turn_held = false
+		elif absf(_stick.x) > TURN_PUSH and not _turn_held:
+			_turn_held = true
+			main_scene.turn(1 if _stick.x > 0.0 else -1)
+	elif _stick.length() > STICK_DEADZONE:
+		main_scene.walk(_stick, delta)
 
 func _update_scroll(delta: float) -> void:
 	var s := Vector2(

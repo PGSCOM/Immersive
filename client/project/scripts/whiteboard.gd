@@ -8,9 +8,17 @@
 ## undo and clear (clear can be undone too). The bar under it moves it, the
 ## corner brackets resize it (ResizeHandle, as on the screens), the grip and
 ## stick move and size it. Strokes live as long as the app does.
+##
+## In a multiplayer room (room.gd) every change goes out as it happens, as
+## `ink` ops, and the others' copies of this board replay them (apply_ink).
 
 extends Node3D
 class_name Whiteboard
+
+## One change of the drawing, for others to replay with apply_ink():
+## ["b", colour (html), width, x, y] a stroke begins, ["p", x, y] it goes on
+## there, ["u"] undo, ["c"] clear. Canvas pixels.
+signal ink(op: Array)
 
 const VIEW_SIZE := Vector2i(1600, 1040)
 const MIN_WIDTH := 0.5
@@ -172,6 +180,7 @@ func stroke_count() -> int:
 	return _ink.get_children().filter(func(c): return c is Line2D and c.visible).size()
 
 func undo() -> void:
+	ink.emit(["u"])
 	_stroke = null
 	var last: Node = _ink.get_child(-1) if _ink.get_child_count() > 0 else null
 	if last == null:
@@ -184,6 +193,7 @@ func undo() -> void:
 
 ## Hide every stroke behind one marker, so undo brings them all back.
 func clear() -> void:
+	ink.emit(["c"])
 	_stroke = null
 	var shown := _ink.get_children().filter(func(c): return c is Line2D and c.visible)
 	if shown.is_empty():
@@ -252,18 +262,45 @@ func _on_canvas_input(ev: InputEvent) -> void:
 		_smoothed = _smoothed.lerp(ev.position, 0.5)
 		if _smoothed.distance_to(_stroke.points[-1]) > 2.0:
 			_stroke.add_point(_smoothed)
+			ink.emit(["p", snappedf(_smoothed.x, 0.5), snappedf(_smoothed.y, 0.5)])
 
 func _begin(at: Vector2) -> void:
+	_new_stroke(SLATE if _erasing else _color, ERASER_PX if _erasing else _width, at)
+	_smoothed = at
+	ink.emit(["b", _stroke.default_color.to_html(false), _stroke.width, at.x, at.y])
+
+func _new_stroke(color: Color, width: float, at: Vector2) -> void:
 	_stroke = Line2D.new()
-	_stroke.width = ERASER_PX if _erasing else _width
-	_stroke.default_color = SLATE if _erasing else _color
+	_stroke.width = width
+	_stroke.default_color = color
 	_stroke.begin_cap_mode = Line2D.LINE_CAP_ROUND
 	_stroke.end_cap_mode = Line2D.LINE_CAP_ROUND
 	_stroke.joint_mode = Line2D.LINE_JOINT_ROUND
 	# Two points, so a tap leaves a dot.
 	_stroke.points = PackedVector2Array([at, at + Vector2(0.5, 0.0)])
-	_smoothed = at
 	_ink.add_child(_stroke)
+
+## Replay one op of someone else's board on this copy of it (see `ink`; it
+## comes from the network, so anything malformed is skipped).
+func apply_ink(op: Variant) -> void:
+	if typeof(op) != TYPE_ARRAY or op.is_empty() or typeof(op[0]) != TYPE_STRING:
+		return
+	var is_number := func(v): return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
+	match op[0]:
+		"b":
+			if op.size() == 5 and typeof(op[1]) == TYPE_STRING and op.slice(2).all(is_number):
+				_new_stroke(Color.from_string(op[1], INKS[0]), clampf(op[2], 1.0, ERASER_PX),
+					_on_canvas(op[3], op[4]))
+		"p":
+			if _stroke and op.size() == 3 and op.slice(1).all(is_number):
+				_stroke.add_point(_on_canvas(op[1], op[2]))
+		"u":
+			undo()
+		"c":
+			clear()
+
+func _on_canvas(x: float, y: float) -> Vector2:
+	return Vector2(clampf(x, -100.0, VIEW_SIZE.x + 100.0), clampf(y, -100.0, VIEW_SIZE.y + 100.0))
 
 func _draw_cursor() -> void:
 	if _ring < 0.0 or _pointer_pressed:

@@ -84,15 +84,22 @@ public:
     /// Monitor count reported from now on (virtual displays come and go).
     virtual void set_monitor_count(uint8_t count) = 0;
 
-    /// Send stream-start notification (and to the client's watchers, see
-    /// protocol::WatchCode, who also get it when they join later)
+    /// Send stream-start notification
     virtual void send_stream_start(uint32_t client_id,
                                    const protocol::StreamStart& info) = 0;
 
     /// Send STREAM_STOP for a monitor, to the client and its watchers
     virtual void send_stream_stop(uint32_t client_id, uint8_t monitor_id) = 0;
 
-    /// Send an encoded video packet via UDP (to the client's watchers too)
+    /// Watchers (protocol::WatchCode) get a copy of their own of `owner`'s
+    /// streams: announce one (also to watchers that join later), whether
+    /// anybody watches `owner` now, and one encoded frame of it, to them all.
+    virtual void send_watch_start(uint32_t owner, const protocol::StreamStart& info) = 0;
+    virtual bool has_watchers(uint32_t owner) const = 0;
+    virtual void send_watch_packet(uint32_t owner, uint8_t monitor_id, uint32_t frame_number,
+                                   const uint8_t* data, uint32_t size) = 0;
+
+    /// Send an encoded video packet via UDP
     virtual void send_video_packet(uint32_t client_id,
                                    uint8_t monitor_id,
                                    uint32_t frame_number,

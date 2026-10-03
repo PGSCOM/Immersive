@@ -57,6 +57,8 @@ signal compositor_layers_toggled(enabled: bool)
 signal room_open_requested
 signal room_join_requested(ip: String, port: int, pin: int)
 signal room_leave_requested
+## "Back to my seat": undo the walking (main.gd::back_to_seat()).
+signal room_seat_requested
 signal room_mic_toggled(on: bool)
 ## "Show my screens to the room".
 signal room_share_toggled(on: bool)
@@ -1839,10 +1841,17 @@ func _build_room_tab(body: VBoxContainer) -> void:
 	_lbl_share_note = _label("", 17, UiTheme.INK_3)
 	_lbl_share_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	right.add_child(_lbl_share_note)
+	var actions := _hbox(10)
+	right.add_child(actions)
+	var seat := _button("Back to my seat")
+	seat.pressed.connect(func(): room_seat_requested.emit())
+	actions.add_child(seat)
 	var leave := _button("Leave room")
-	leave.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	leave.pressed.connect(func(): room_leave_requested.emit())
-	right.add_child(leave)
+	actions.add_child(leave)
+	var move := _label("Pinch in the air and pull to walk over. Sticks: the left walks, the right turns.", 17, UiTheme.INK_3)
+	move.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	right.add_child(move)
 
 func _refresh_room() -> void:
 	if not _room_out:

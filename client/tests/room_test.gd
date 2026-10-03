@@ -1,6 +1,7 @@
 extends SceneTree
 ## The multiplayer room's own logic, headless (two headsets talking to each
-## other is e2e_test.py's step 9):
+## other is e2e_test.py's step 9), plus the whiteboard's ink replay and
+## walking:
 ##   godot --headless --xr-mode off --path client/project \
 ##       -s "$PWD/client/tests/room_test.gd"
 ## Pose packets, voice PCM and the noise gate's level, seats seen from both
@@ -87,5 +88,83 @@ func _run() -> void:
 	check(p.remote_panels().is_empty(), "and gone when they stop it")
 	p.queue_free()
 
+	await _whiteboards()
+	await _moving()
+
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
+
+## Someone's whiteboard, replayed from its ink ops on another copy.
+func _whiteboards() -> void:
+	var mine := Whiteboard.new()
+	var theirs := Whiteboard.new()
+	root.add_child(mine)
+	root.add_child(theirs)
+	await process_frame
+	mine.set_shown(true)
+	var ops: Array = []
+	mine.ink.connect(func(op): ops.append(op))
+	var n := mine.global_basis.z
+	for line in 2:
+		for i in 15:
+			var at := mine.to_global(mine.local_point(0.2 + 0.04 * i, 0.3 + 0.2 * line))
+			mine.pointer_ray(at + n * 0.3, -n, true)
+			await process_frame
+		mine.pointer_leave()
+		await process_frame
+	for op in ops:
+		theirs.apply_ink(op)
+	var a: Line2D = mine._ink.get_child(0)
+	var b: Line2D = theirs._ink.get_child(0)
+	check(theirs.stroke_count() == 2 and mine.stroke_count() == 2 and a.points.size() == b.points.size()
+		and a.points[-1].distance_to(b.points[-1]) < 1.0 and a.default_color == b.default_color,
+		"a whiteboard replays from its ink: %d strokes, %d of %d points" % [theirs.stroke_count(),
+			b.points.size(), a.points.size()])
+	mine.undo()
+	mine.clear()
+	for op in ops.slice(ops.size() - 2):
+		theirs.apply_ink(op)
+	check(ops.slice(-2) == [["u"], ["c"]] and theirs.stroke_count() == 0, "undo and clear go across too")
+	for bad in [[], [1], ["b", "x", "y", 1, 2], ["p", {}, 3], ["b", 7, 3.0, 1.0, 2.0], "c", null]:
+		theirs.apply_ink(bad)
+	check(theirs.stroke_count() == 0, "malformed ink ops are skipped")
+	mine.queue_free()
+	theirs.queue_free()
+
+## Walking, turning and pulling move the tracking origin; the head keeps its
+## place in a turn; a screen in between hides what is behind it.
+func _moving() -> void:
+	var m = load("res://scripts/main.gd").new()
+	var origin := XROrigin3D.new()
+	var cam := XRCamera3D.new()
+	root.add_child(origin)
+	origin.add_child(cam)
+	cam.position = Vector3(0.2, 1.6, 0.1)
+	cam.rotation.y = PI / 2.0  # looking along -X
+	m.xr_origin = origin
+	m.xr_camera = cam
+	await process_frame
+	m.walk(Vector2(0, 1), 1.0)
+	check(origin.position.is_equal_approx(Vector3(-m.WALK_SPEED, 0, 0)), "stick up walks where we look -> %s" % origin.position)
+	var head := cam.global_position
+	m.turn(1)
+	check(cam.global_position.is_equal_approx(head) and absf(cam.global_rotation.y - (PI / 2.0 - deg_to_rad(m.TURN_STEP_DEG))) < 0.001,
+		"a turn to the right keeps the head where it is -> %s, %.1f deg" % [cam.global_position, rad_to_deg(cam.global_rotation.y)])
+	m.back_to_seat()
+	m.pull(Vector3(0, 1.2, -0.5), Vector3(0, 1.0, -0.2))  # the hand comes 30 cm back (and down)
+	check(origin.position.is_equal_approx(Vector3(0, 0, -0.3 * m.PULL_GAIN)), "pulling the room walks us forward, level -> %s" % origin.position)
+	m.back_to_seat()
+	check(origin.transform == Transform3D.IDENTITY, "back to my seat")
+
+	var screen: Node3D = MeshInstance3D.new()
+	screen.script = load("res://scripts/screen_panel.gd")
+	root.add_child(screen)
+	await process_frame
+	screen.global_position = Vector3(0, 1.6, -1.0)
+	var eye := Vector3(0, 1.6, 0)
+	check(m._hides_any(screen, eye, [Vector3(0.1, 1.6, -3.0)]) and not m._hides_any(screen, eye, [Vector3(0.1, 1.6, -0.5)])
+		and not m._hides_any(screen, eye, [Vector3(3.0, 1.6, -3.0)]),
+		"a screen hides someone behind it, not someone in front or to the side")
+	screen.queue_free()
+	origin.queue_free()
+	m.free()

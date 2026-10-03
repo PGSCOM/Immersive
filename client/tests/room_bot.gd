@@ -8,6 +8,9 @@ extends SceneTree
 ##   Ben sees (you, and your screens when they stream in MJPEG, the only codec
 ##   a PC decodes);
 ## - moves both hands (fake controllers) and waves now and then;
+## - opens its whiteboard beside itself, facing you, and every few seconds
+##   draws a wavy line on it (through the same pointer a person uses), in
+##   the next ink, clearing it after six;
 ## - repeats what it hears from you ECHO_DELAY_MS later, so your own voice
 ##   comes back from its avatar. It stops listening while it speaks and just
 ##   after, or your headset's speakers would feed its echo back for ever. With
@@ -26,6 +29,10 @@ var heard := 0
 var repeated := 0
 var t := 0.0
 var status_s := 0.0
+var board_s := 0.0
+var stroke_i := -1  ## point of the line being drawn, -1 = none
+var strokes := 0
+const STROKE_POINTS := 40
 
 func _initialize() -> void:
 	main = load("res://scenes/main.tscn").instantiate()
@@ -54,6 +61,7 @@ func _process(delta: float) -> bool:
 		return false
 	t += delta
 	_move(delta)
+	_draw(delta)
 	var now := Time.get_ticks_msec()
 	while not echo.is_empty() and echo[0][0] <= now:
 		room.say(echo.pop_front()[1])
@@ -90,6 +98,43 @@ func _move(delta: float) -> void:
 	_pose(&"left_hand", Transform3D(yaw * tilt, yaw * left))
 	_pose(&"right_hand", Transform3D(yaw * Basis(Vector3.FORWARD, wave * 0.6 * sin(t * 12.0)) * tilt.slerp(Basis(Vector3.RIGHT, 0.9), wave),
 		yaw * right))
+
+## The board stands beside Ben, towards the first person in the room, facing them.
+func _draw(delta: float) -> void:
+	var wb: Whiteboard = main.whiteboard
+	board_s += delta
+	if stroke_i < 0:
+		if board_s < 6.0:
+			return
+		board_s = 0.0
+		_place_board(wb)
+		stroke_i = 0
+		if strokes >= 6:
+			wb.clear()
+			strokes = 0
+		wb._select("ink", Whiteboard.INKS[strokes % Whiteboard.INKS.size()])
+	var k := float(stroke_i) / STROKE_POINTS
+	var uv := Vector2(0.1 + 0.8 * k, 0.14 + 0.12 * strokes + 0.04 * sin(k * TAU * 2.0))
+	var n := wb.global_basis.z
+	wb.pointer_ray(wb.to_global(wb.local_point(uv.x, uv.y)) + n * 0.3, -n, stroke_i < STROKE_POINTS)
+	stroke_i += 1
+	if stroke_i > STROKE_POINTS:
+		wb.pointer_leave()
+		stroke_i = -1
+		strokes += 1
+
+func _place_board(wb: Whiteboard) -> void:
+	var me := Vector3(0.0, 1.5, 0.0)
+	var you := me + Vector3(3.2, 0.1, 0.0)
+	for p in room.get_children():
+		if p is Participant and p.visible:
+			you = p._head.global_position
+			break
+	var side := Vector3(you.x - me.x, 0.0, you.z - me.z).normalized()
+	var at := me + side * 1.3 + Vector3(0.0, -0.05, -0.45)
+	if not wb.visible:
+		wb.set_shown(true)
+	wb.global_transform = Transform3D(LaserDrag.facing_basis(at, you), at)
 
 func _pose(side: StringName, xform: Transform3D) -> void:
 	pads[side].set_pose(&"aim", xform, Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)

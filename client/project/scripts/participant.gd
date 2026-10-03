@@ -2,10 +2,11 @@
 ## avatar (a head wearing a headset, a torso, two hands and their name), their
 ## voice from where their head is, and the screens they share, streamed
 ## straight from their PC (a watch-only connection, protocol.h
-## HELLO_FLAG_WATCH): the room only carries where to connect and the code.
+## HELLO_FLAG_WATCH; the PC sends watchers an MJPEG copy of their screens):
+## the room only carries where to connect and the code.
 ##
 ## Room places this node at their seat; everything under it is in their own
-## tracking space (relative to their XROrigin3D), exactly as they sent it.
+## room frame, exactly as they sent it.
 ## Their screens can be grabbed by the bar and moved closer: from then on that
 ## screen stays where it was put, here only.
 
@@ -22,7 +23,6 @@ const TORSO_SMOOTH_S := 0.5
 const WATCH_RETRY_S := 5.0
 ## Their PC's host drops a silent watcher after 10 s: probe like main.gd.
 const PROBE_INTERVAL_S := 2.0
-const KEYFRAME_EVERY_MS := 1000
 const VOICE_RATE := 16000
 ## Voice queued past this is dropped, so a burst after a stall never lags.
 const VOICE_MAX := 4800
@@ -66,9 +66,9 @@ var _probe_s := 0.0
 var _probe_id := 0
 var _panels := {}            ## monitor id -> ScreenPanel
 var _layouts := {}           ## monitor id -> {xform, w, curve}
-var _decoders := {}          ## monitor id -> VideoDecoder or SoftwareVideoDecoder
-var _awaiting_idr := {}
-var _keyframe_asked_ms := {}
+var _decoders := {}          ## monitor id -> SoftwareVideoDecoder
+## Their whiteboard, replayed here (made when they first draw or show it).
+var _board: Whiteboard = null
 
 ## Received, for the test harness: pose and voice packets.
 var poses_in := 0
@@ -121,22 +121,54 @@ func set_profile(p: Dictionary) -> void:
 		_share = share
 		_refused = false
 		_retry_s = 0.0
+	_place_board(p.get("board", {}))
 	_layouts.clear()
 	var screens = p.get("screens", [])
 	if typeof(screens) == TYPE_ARRAY:
 		for sc in screens.slice(0, 8):
 			if typeof(sc) != TYPE_DICTIONARY:
 				continue
-			var x = sc.get("x", [])
-			if typeof(x) != TYPE_ARRAY or x.size() != 12 or x.any(func(v): return typeof(v) != TYPE_INT and typeof(v) != TYPE_FLOAT):
+			var t: Variant = _xform(sc.get("x", []))
+			if t == null:
 				continue
-			var t := Transform3D(Vector3(x[0], x[1], x[2]), Vector3(x[3], x[4], x[5]),
-				Vector3(x[6], x[7], x[8]), Vector3(x[9], x[10], x[11]))
-			if not t.is_finite() or t.origin.length() > POSE_LIMIT_M or absf(t.basis.determinant()) < 0.01:
-				continue
-			_layouts[int(_num(sc.get("id"), -1.0))] = {"xform": t.orthonormalized(),
+			_layouts[int(_num(sc.get("id"), -1.0))] = {"xform": t,
 				"w": clampf(_num(sc.get("w"), 1.6), 0.4, 4.0), "curve": clampf(_num(sc.get("c"), 0.0), 0.0, 1.0)}
 	_place_screens()
+
+## 12 numbers from the network (basis columns, origin) as a placement, or null.
+static func _xform(x: Variant) -> Variant:
+	if typeof(x) != TYPE_ARRAY or x.size() != 12 or x.any(func(v): return typeof(v) != TYPE_INT and typeof(v) != TYPE_FLOAT):
+		return null
+	var t := Transform3D(Vector3(x[0], x[1], x[2]), Vector3(x[3], x[4], x[5]),
+		Vector3(x[6], x[7], x[8]), Vector3(x[9], x[10], x[11]))
+	if not t.is_finite() or t.origin.length() > POSE_LIMIT_M or absf(t.basis.determinant()) < 0.01:
+		return null
+	return t.orthonormalized()
+
+## Their whiteboard where they have it, shown while theirs is.
+func _place_board(b: Variant) -> void:
+	var at: Variant = _xform(b.get("x", [])) if typeof(b) == TYPE_DICTIONARY else null
+	var on: bool = at != null and b.get("on", false) == true
+	if on:
+		_ensure_board()
+		if not _board.visible:
+			_board.set_shown(true)
+		_board.transform = at
+		_board.set_panel_width(clampf(_num(b.get("w"), 1.2), Whiteboard.MIN_WIDTH, Whiteboard.MAX_WIDTH))
+	elif _board and _board.visible:
+		_board.set_shown(false)
+
+## Their strokes as they draw them (Room._take_ink).
+func apply_ink(ops: Array) -> void:
+	_ensure_board()
+	for op in ops:
+		_board.apply_ink(op)
+
+func _ensure_board() -> void:
+	if _board == null:
+		_board = Whiteboard.new()
+		_board.name = "Board"
+		add_child(_board)
 
 ## A number from the network, or `default` for anything else.
 static func _num(v: Variant, default: float) -> float:
@@ -224,6 +256,22 @@ func is_speaking() -> bool:
 # Their screens
 # ---------------------------------------------------------------------------
 
+## Their head, chest and hands, and the corners and centre of what they show.
+func occluder_points() -> Array:
+	if not visible:
+		return []
+	var out := [_head.global_position, _torso.global_position]
+	for h in _hands:
+		if h.visible:
+			out.append(h.global_position)
+	var shown := remote_panels()
+	if _board and _board.visible:
+		shown.append(_board)
+	for p in shown:
+		for uv in [Vector2(0, 0), Vector2(1, 0), Vector2(0, 1), Vector2(1, 1), Vector2(0.5, 0.5)]:
+			out.append(p.to_global(p.local_point(uv.x, uv.y)))
+	return out
+
 func remote_panels() -> Array:
 	return _panels.values().filter(func(p): return is_instance_valid(p) and p.visible)
 
@@ -251,8 +299,9 @@ func _update_watch(delta: float) -> void:
 		_net.connection_rejected.connect(func(_reason: int): _refused = true)
 		_net.stream_started.connect(_on_stream_started)
 		_net.stream_stopped.connect(_on_stream_stopped)
-		_net.video_frame_received.connect(_on_video_frame)
-		_net.frame_gap_detected.connect(func(mid: int): _ask_keyframe(mid))
+		_net.video_frame_received.connect(func(mid: int, data: PackedByteArray, _w: int, _h: int):
+			if _decoders.has(mid):
+				_decoders[mid].submit(data))
 		_net.connect_to_server(_share.ip, _share.port, 0, false, 0, _share.code)
 		print("[Room] watching %s's screens at %s:%d" % [display_name, _share.ip, _share.port])
 		return
@@ -285,16 +334,10 @@ func _on_stream_started(mid: int, w: int, h: int, codec: int) -> void:
 		_panels[mid] = p
 	p.set_resolution(w, h, codec)
 	_place_screens()
-	if codec in [0, 1, 3] and VideoDecoder.is_codec_supported(codec):
-		var dec := VideoDecoder.new()
-		if dec.open(codec, w, h):
-			_decoders[mid] = dec
-			_awaiting_idr[mid] = true
-	elif SoftwareVideoDecoder.is_codec_supported(codec):
-		var sw := SoftwareVideoDecoder.new()
-		if sw.open(codec, w, h):
-			_decoders[mid] = sw
-	if not _decoders.has(mid):
+	var sw := SoftwareVideoDecoder.new()
+	if sw.open(codec, w, h):  # MJPEG: the copy a host sends its watchers
+		_decoders[mid] = sw
+	else:
 		p.set_placeholder_text("%s shares this in %s, which this headset cannot show." %
 			[display_name, CODEC_NAMES.get(codec, "a codec")])
 
@@ -308,32 +351,10 @@ func _drop_screen(mid: int) -> void:
 		_panels[mid].queue_free()
 	_panels.erase(mid)
 
-func _on_video_frame(mid: int, data: PackedByteArray, _w: int, _h: int) -> void:
-	var dec = _decoders.get(mid)
-	if dec is VideoDecoder:
-		if _awaiting_idr.get(mid, false):
-			if not VideoDecoder.is_keyframe(data, dec._codec):
-				_ask_keyframe(mid)
-				return
-			_awaiting_idr.erase(mid)
-		if not dec.submit(data):
-			_ask_keyframe(mid)
-	elif dec:
-		dec.submit(data)
-
-## Each IDR blurs the sharer's own picture for a moment: one a second at most.
-func _ask_keyframe(mid: int) -> void:
-	var now := Time.get_ticks_msec()
-	if _net and _decoders.get(mid) is VideoDecoder \
-			and now - int(_keyframe_asked_ms.get(mid, -100000)) >= KEYFRAME_EVERY_MS:
-		_keyframe_asked_ms[mid] = now
-		_net.send_request_keyframe(mid)
-
 func _close_decoder(mid: int) -> void:
 	if _decoders.has(mid):
 		_decoders[mid].close()
 		_decoders.erase(mid)
-	_awaiting_idr.erase(mid)
 
 ## Each screen where they have it, unless it was moved by hand here. One with
 ## no layout yet stays hidden (it would sit on the floor at their seat).
@@ -353,9 +374,12 @@ func _place_screens() -> void:
 			p.set_panel_width(l.w)
 		p.transform = l.xform
 
-## Centre pixel of each screen they share, for the test harness.
+## Centre pixel of each screen they share, and their board, for the test harness.
 func debug_lines() -> Array:
 	var out := []
+	if _board:
+		out.append("[Immersive-2][TEST] remote board peer=%s shown=%s strokes=%d" % [display_name,
+			_board.visible, _board.stroke_count()])
 	for mid in _panels:
 		var img: Image = _panels[mid].screen_image
 		if img and not img.is_empty():
