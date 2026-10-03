@@ -17,6 +17,7 @@
 #include <cstring>
 #include <chrono>
 #include <deque>
+#include <map>
 #include <limits>
 #include <cstddef>
 #include <string>
@@ -74,6 +75,10 @@ struct ClientState {
     /// TCP media: frames sent and not yet acknowledged, per monitor.
     std::unordered_map<uint8_t, std::deque<uint32_t>> tcp_unacked;
     bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
+    /// HELLO_FLAG_WATCH: only gets the frames of the client that set the
+    /// watch code (watch_owner_); sends nothing the host acts on but
+    /// REQUEST_KEYFRAME, LATENCY_PROBE and PING.
+    bool                watcher = false;
     std::string         name;
     struct FlowState {
         uint32_t first_frame = 0;  ///< this stream's first frame; older ACKs are the last stream's
@@ -313,7 +318,7 @@ public:
 
         std::lock_guard<std::mutex> lock(clients_mutex_);
         for (auto& [id, client] : clients_) {
-            if (client_id ? id != client_id : !client.authed) continue;
+            if (client_id ? id != client_id : !client.authed || client.watcher) continue;
             if (!send_tcp(client.tcp_socket, msg.data(), msg.size()))
                 shutdown(client.tcp_socket, SHUTDOWN_BOTH);
         }
@@ -323,6 +328,7 @@ public:
 
     void send_stream_start(uint32_t client_id,
                            const protocol::StreamStart& info) override {
+        std::vector<uint32_t> to{client_id};
         {
             // A new stream numbers its frames from info.first_frame: forget
             // the previous stream's acknowledgements.
@@ -336,11 +342,24 @@ public:
                 if (it->second.rate.last_ack.time_since_epoch().count())
                     it->second.rate.last_ack = std::chrono::steady_clock::now();
             }
+            stream_starts_[info.monitor_id] = {client_id, info};  // for watchers joining later
+            if (client_id == watch_owner_) append_watchers_locked(to);
         }
-        send_control_message(client_id,
-                             protocol::MessageType::STREAM_START,
-                             &info,
-                             sizeof(info));
+        for (uint32_t id : to)
+            send_control_message(id, protocol::MessageType::STREAM_START, &info, sizeof(info));
+    }
+
+    void send_stream_stop(uint32_t client_id, uint8_t monitor_id) override {
+        std::vector<uint32_t> to{client_id};
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = stream_starts_.find(monitor_id);
+            if (it != stream_starts_.end() && it->second.first == client_id) stream_starts_.erase(it);
+            if (client_id == watch_owner_) append_watchers_locked(to);
+        }
+        const protocol::StreamStop msg{monitor_id};
+        for (uint32_t id : to)
+            send_control_message(id, protocol::MessageType::STREAM_STOP, &msg, sizeof(msg));
     }
 
     void send_video_packet(uint32_t client_id,
@@ -352,65 +371,21 @@ public:
         // does not. One 1080p frame is ~100-200 chunks, so holding
         // clients_mutex_ across the whole burst serialised every monitor's
         // worker (and the ACK handler) behind one stream. Take the lock only
-        // long enough to copy the destination out.
-        struct sockaddr_in dest;
+        // long enough to copy the destinations out: the client (unless its
+        // video goes in-band on TCP) and the headsets watching it.
+        std::vector<struct sockaddr_in> dests;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
             auto it = clients_.find(client_id);
-            if (it == clients_.end() || !it->second.udp_addr_set) return;
-            dest = it->second.udp_addr;
-
-            auto& flow = it->second.flow_state[monitor_id];
-            if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
-                flow.ack_seen = false;
-                flow.last_ack = frame_number;
-            }
-            // A client falling behind is never a reason to stop sending:
-            // catching up needs the newest frames, and refusing them froze the
-            // stream for good (the client could never ACK again). The rate
-            // control sends less instead.
-            const auto now = std::chrono::steady_clock::now();
-            flow.last_sent = frame_number;
-            flow.sent_at[frame_number % flow.sent_at.size()] = now;
-            rate_on_sent(it->second, now);
-
-            if (it->second.tcp_media) {
-                // TCP never loses a frame, it queues it (in adb, the kernels,
-                // the headset), and a queue is latency. The client ACKs each
-                // frame as it reads it: once the oldest unacknowledged one has
-                // waited kMaxTcpQueue, drop whole frames until it catches up.
-                // It sees the gap in frame numbers and asks for a keyframe.
-                // By age, not count: 4 frames (66 ms at 60 fps) already
-                // tripped at stream start, and a sharp IDR (up to 1 MB, ~40 ms
-                // on the cable) must not make the frames behind it a gap and
-                // so another IDR. (A client that never ACKs, or has not yet on
-                // this stream, is not limited.)
-                constexpr auto kMaxTcpQueue = std::chrono::milliseconds(150);
-                auto& flow = it->second.flow_state[monitor_id];
-                auto& unacked = it->second.tcp_unacked[monitor_id];
-                if (!flow.ack_seen) unacked.clear();
-                while (!unacked.empty() && unacked.front() <= flow.last_ack) unacked.pop_front();
-                if (!unacked.empty() &&
-                    now - flow.sent_at[unacked.front() % flow.sent_at.size()] > kMaxTcpQueue) {
-                    if (now - flow.last_log > std::chrono::seconds(2)) {
-                        std::cout << "[Server] Client " << client_id << " monitor "
-                                  << static_cast<int>(monitor_id) << ": " << unacked.size()
-                                  << " frames unacknowledged on TCP for over "
-                                  << kMaxTcpQueue.count() << " ms, dropping frames\n";
-                        flow.last_log = now;
-                    }
-                    return;
-                }
-                // ponytail: the whole frame is written under clients_mutex_,
-                // serialising every monitor (they share this one socket anyway).
-                // SO_SNDTIMEO bounds the hold; a per-client send lock if it shows.
-                protocol::VideoFrameHeader vfh{monitor_id, frame_number};
-                send_media_locked(it->second, protocol::MessageType::VIDEO_FRAME,
-                                  &vfh, sizeof(vfh), data, size);
-                unacked.push_back(frame_number);
-                return;
+            if (it != clients_.end() && it->second.udp_addr_set &&
+                send_to_client_locked(it->second, monitor_id, frame_number, data, size))
+                dests.push_back(it->second.udp_addr);
+            if (client_id == watch_owner_) {
+                for (const auto& [id, c] : clients_)
+                    if (c.watcher && c.udp_addr_set) dests.push_back(c.udp_addr);
             }
         }
+        if (dests.empty()) return;
 
         const uint16_t chunk_count = protocol::compute_chunk_count(size);
 
@@ -440,9 +415,10 @@ public:
         vph.chunk_count  = chunk_count;
 
         auto send_packet = [&](size_t len) {
-            sendto(udp_socket_, reinterpret_cast<const char*>(packet.data()),
-                   static_cast<int>(len), 0, reinterpret_cast<struct sockaddr*>(&dest),
-                   sizeof(dest));
+            for (auto& dest : dests)
+                sendto(udp_socket_, reinterpret_cast<const char*>(packet.data()),
+                       static_cast<int>(len), 0, reinterpret_cast<struct sockaddr*>(&dest),
+                       sizeof(dest));
         };
 
         for (uint16_t i = 0; i < chunk_count; ++i) {
@@ -472,6 +448,67 @@ public:
                         parity.data() + static_cast<size_t>(j) * parity_len, parity_len);
             send_packet(sizeof(vph) + sizeof(ph) + parity_len);
         }
+    }
+
+    /// The flow bookkeeping of one frame for its client and, in TCP media
+    /// mode, the frame itself (or nothing, if its queue is too old). Returns
+    /// whether the frame still has to go out to it over UDP. Caller holds
+    /// clients_mutex_.
+    bool send_to_client_locked(ClientState& client, uint8_t monitor_id, uint32_t frame_number,
+                               const uint8_t* data, uint32_t size) {
+        auto& flow = client.flow_state[monitor_id];
+        if (frame_number == 0 || (flow.ack_seen && frame_number < flow.last_ack)) {
+            flow.ack_seen = false;
+            flow.last_ack = frame_number;
+        }
+        // A client falling behind is never a reason to stop sending:
+        // catching up needs the newest frames, and refusing them froze the
+        // stream for good (the client could never ACK again). The rate
+        // control sends less instead.
+        const auto now = std::chrono::steady_clock::now();
+        flow.last_sent = frame_number;
+        flow.sent_at[frame_number % flow.sent_at.size()] = now;
+        rate_on_sent(client, now);
+        if (!client.tcp_media) return true;
+
+        // TCP never loses a frame, it queues it (in adb, the kernels, the
+        // headset), and a queue is latency. The client ACKs each frame as it
+        // reads it: once the oldest unacknowledged one has waited
+        // kMaxTcpQueue, drop whole frames until it catches up. It sees the
+        // gap in frame numbers and asks for a keyframe. By age, not count: 4
+        // frames (66 ms at 60 fps) already tripped at stream start, and a
+        // sharp IDR (up to 1 MB, ~40 ms on the cable) must not make the
+        // frames behind it a gap and so another IDR. (A client that never
+        // ACKs, or has not yet on this stream, is not limited.)
+        constexpr auto kMaxTcpQueue = std::chrono::milliseconds(150);
+        auto& unacked = client.tcp_unacked[monitor_id];
+        if (!flow.ack_seen) unacked.clear();
+        while (!unacked.empty() && unacked.front() <= flow.last_ack) unacked.pop_front();
+        if (!unacked.empty() &&
+            now - flow.sent_at[unacked.front() % flow.sent_at.size()] > kMaxTcpQueue) {
+            if (now - flow.last_log > std::chrono::seconds(2)) {
+                std::cout << "[Server] Client " << client.id << " monitor "
+                          << static_cast<int>(monitor_id) << ": " << unacked.size()
+                          << " frames unacknowledged on TCP for over "
+                          << kMaxTcpQueue.count() << " ms, dropping frames\n";
+                flow.last_log = now;
+            }
+            return false;
+        }
+        // ponytail: the whole frame is written under clients_mutex_,
+        // serialising every monitor (they share this one socket anyway).
+        // SO_SNDTIMEO bounds the hold; a per-client send lock if it shows.
+        protocol::VideoFrameHeader vfh{monitor_id, frame_number};
+        send_media_locked(client, protocol::MessageType::VIDEO_FRAME,
+                          &vfh, sizeof(vfh), data, size);
+        unacked.push_back(frame_number);
+        return false;
+    }
+
+    /// Caller holds clients_mutex_: append the ids of every watcher.
+    void append_watchers_locked(std::vector<uint32_t>& ids) const {
+        for (const auto& [id, c] : clients_)
+            if (c.watcher) ids.push_back(id);
     }
 
     bool send_control_message(uint32_t client_id,
@@ -510,7 +547,9 @@ public:
         if (!data || size == 0) return;
         std::lock_guard<std::mutex> lock(clients_mutex_);
         for (auto& [id, client] : clients_) {
-            if (!client.authed) continue;  // no audio before the PIN is checked
+            // No audio before the PIN is checked, nor to watchers: theirs is
+            // another PC's sound, and this would land in their own PC's.
+            if (!client.authed || client.watcher) continue;
             if (client.tcp_media) {
                 send_media_locked(client, protocol::MessageType::AUDIO_DATA,
                                   nullptr, 0, data, size);
@@ -598,7 +637,7 @@ public:
             if (!c.authed) continue;
             char ip[INET_ADDRSTRLEN] = {};
             inet_ntop(AF_INET, &c.udp_addr.sin_addr, ip, sizeof(ip));
-            out.push_back({id, c.name, ip, c.tcp_media});
+            out.push_back({id, c.name, ip, c.tcp_media, c.watcher});
         }
         std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         return out;
@@ -739,6 +778,7 @@ private:
         SocketType sock;
         struct in_addr peer;
         bool authed = false;
+        bool watcher = false;
         bool rejected = false;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
@@ -775,6 +815,9 @@ private:
                 break;
             }
             if (authed && msg_type == protocol::MessageType::HELLO) continue;
+            if (watcher && msg_type != protocol::MessageType::REQUEST_KEYFRAME &&
+                msg_type != protocol::MessageType::LATENCY_PROBE &&
+                msg_type != protocol::MessageType::PING) continue;  // a watcher only watches
             switch (msg_type) {
             case protocol::MessageType::HELLO: {
                 // Clients older than the flags byte send one byte less.
@@ -793,6 +836,13 @@ private:
                         std::lock_guard<std::mutex> lock(auth_mutex_);
                         kicked = kicked_.erase(peer.s_addr) > 0;
                     }
+                    if (hello.flags & protocol::HELLO_FLAG_WATCH) {
+                        watcher = !kicked && accept_watcher(client_id, sock, peer, hello);
+                        if (kicked) send_reject(sock, protocol::REJECT_PIN_REQUIRED);
+                        authed = watcher;
+                        rejected = !watcher;
+                        break;
+                    }
                     const uint8_t reject = kicked ? protocol::REJECT_PIN_REQUIRED
                                                   : check_pin(peer, hello.pin);
                     if (reject) {
@@ -810,8 +860,8 @@ private:
                     }
                     {
                         std::lock_guard<std::mutex> lock(clients_mutex_);
-                        uint32_t paired = 0;
-                        for (const auto& [id, c] : clients_) paired += c.authed ? 1 : 0;
+                        uint32_t paired = 0;  // watchers come on top
+                        for (const auto& [id, c] : clients_) paired += c.authed && !c.watcher ? 1 : 0;
                         if (paired >= config_.max_clients) {
                             std::cerr << "[Server] Client " << client_id
                                       << " refused: client limit (" << config_.max_clients
@@ -975,8 +1025,18 @@ private:
                 if (payload.size() >= sizeof(protocol::RequestKeyframe)) {
                     protocol::RequestKeyframe req;
                     std::memcpy(&req, payload.data(), sizeof(req));
-                    if (on_request_keyframe_) {
-                        on_request_keyframe_(client_id, req.monitor_id);
+                    uint32_t from = client_id;
+                    if (watcher) {
+                        // The IDR goes to the owner too, and each one blurs
+                        // its picture for a moment: one a second at most.
+                        std::lock_guard<std::mutex> lock(clients_mutex_);
+                        const auto now = std::chrono::steady_clock::now();
+                        auto& last = watch_idr_at_[req.monitor_id];
+                        from = now - last < std::chrono::seconds(1) ? 0 : watch_owner_;
+                        if (from) last = now;
+                    }
+                    if (from && on_request_keyframe_) {
+                        on_request_keyframe_(from, req.monitor_id);
                     }
                 }
                 break;
@@ -992,6 +1052,14 @@ private:
             case protocol::MessageType::VIRTUAL_DISPLAY_REMOVE: {
                 if (payload.size() >= sizeof(protocol::VirtualDisplayRemove) && on_vdisplay_remove_) {
                     on_vdisplay_remove_(client_id, payload[0]);
+                }
+                break;
+            }
+            case protocol::MessageType::WATCH_CODE: {
+                if (payload.size() >= sizeof(protocol::WatchCode)) {
+                    protocol::WatchCode wc;
+                    std::memcpy(&wc, payload.data(), sizeof(wc));
+                    set_watch_code(client_id, wc.code);
                 }
                 break;
             }
@@ -1042,6 +1110,11 @@ private:
             if (it != clients_.end()) {
                 closesocket(it->second.tcp_socket);
                 clients_.erase(it);
+            }
+            if (client_id == watch_owner_) {
+                std::cout << "[Server] Client " << client_id << " left: its watchers go too\n";
+                drop_watchers_locked();
+                watch_code_ = watch_owner_ = 0;
             }
         }
 
@@ -1096,6 +1169,12 @@ private:
     uint8_t check_pin(struct in_addr peer, uint32_t pin) {
         const uint32_t want = pin_;
         if (want == 0 || peer.s_addr == htonl(INADDR_LOOPBACK)) return 0;
+        return check_code(peer, pin, want);
+    }
+
+    /// check_pin() without the exceptions: `pin` must be `want`, from any
+    /// address, with the same cost and lock-out for wrong ones.
+    uint8_t check_code(struct in_addr peer, uint32_t pin, uint32_t want) {
         const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(auth_mutex_);
@@ -1119,7 +1198,76 @@ private:
         ack.monitor_count = monitor_count_;
         ack.flags = host_flags_;
         std::strncpy(ack.host_name, host_name_.c_str(), sizeof(ack.host_name) - 1);
+        inet_pton(AF_INET, primary_ipv4().c_str(), &ack.lan_ipv4);  // stays 0 when unknown
         return ack;
+    }
+
+    /// HELLO_FLAG_WATCH: let the headset in if it shows the current watch
+    /// code, then announce the owner's streams to it and ask for an IDR of
+    /// each, so its picture starts at once. False when refused (it was told).
+    bool accept_watcher(uint32_t client_id, SocketType sock, struct in_addr peer,
+                        const protocol::Hello& hello) {
+        uint32_t want;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            want = watch_code_;
+        }
+        uint8_t reject = want ? check_code(peer, hello.pin, want) : protocol::REJECT_PIN_REQUIRED;
+        std::vector<protocol::StreamStart> starts;
+        uint32_t owner = 0;
+        if (!reject) {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = clients_.find(client_id);
+            if (it == clients_.end() || watch_code_ != hello.pin) {
+                reject = protocol::REJECT_WRONG_PIN;  // the code changed meanwhile
+            } else {
+                it->second.authed = it->second.watcher = true;
+                it->second.name.assign(hello.client_name,
+                                       strnlen(hello.client_name, sizeof(hello.client_name)));
+                it->second.udp_addr.sin_port = htons(hello.udp_port ? hello.udp_port : config_.udp_port);
+                owner = watch_owner_;
+                for (const auto& [mid, s] : stream_starts_)
+                    if (s.first == owner) starts.push_back(s.second);
+            }
+        }
+        if (reject) {
+            std::cerr << "[Server] Client " << client_id << " refused: "
+                      << (!want ? "it asked to watch, but nobody shares this PC's screens"
+                          : reject == protocol::REJECT_LOCKED_OUT ? "too many wrong watch codes"
+                          : "wrong watch code") << "\n";
+            send_reject(sock, reject);
+            return false;
+        }
+        set_recv_timeout(sock, 0);
+        protocol::HelloAck ack = make_ack();
+        ack.flags |= protocol::HOST_FLAG_VIEW_ONLY;
+        send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
+        for (const auto& s : starts)
+            send_control_message(client_id, protocol::MessageType::STREAM_START, &s, sizeof(s));
+        std::cout << "[Server] Client " << client_id << " watches client " << owner
+                  << "'s screens (" << starts.size() << " streaming)\n";
+        if (on_request_keyframe_)
+            for (const auto& s : starts) on_request_keyframe_(owner, s.monitor_id);
+        return true;
+    }
+
+    /// WATCH_CODE from `owner`: headsets showing `code` may watch its screens
+    /// (0: nobody). Another code drops the watchers of the old one; only the
+    /// client that set a code can take it back.
+    void set_watch_code(uint32_t owner, uint32_t code) {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        if (code == 0 ? owner != watch_owner_ : code == watch_code_ && owner == watch_owner_) return;
+        drop_watchers_locked();
+        watch_code_ = code;
+        watch_owner_ = code ? owner : 0;
+        std::cout << "[Server] Client " << owner << (code ? " shares its screens with its room\n"
+                                                           : " stopped sharing its screens\n");
+    }
+
+    /// Caller holds clients_mutex_. Their handler threads clean up.
+    void drop_watchers_locked() {
+        for (auto& [id, c] : clients_)
+            if (c.watcher) shutdown(c.tcp_socket, SHUTDOWN_BOTH);
     }
 
     /// Write one HELLO_REJECT straight to a socket (no client entry needed).
@@ -1302,6 +1450,15 @@ private:
     std::set<uint32_t> kicked_;  ///< peers disconnected from the panel (auth_mutex_)
     std::atomic<uint32_t> pin_{0};
     std::atomic<uint8_t>  host_flags_{0};
+
+    // Watching (protocol::WatchCode), all under clients_mutex_: the code, the
+    // client whose streams watchers get, the last STREAM_START of each
+    // monitor (and whose it is) for watchers that join later, and the last
+    // IDR a watcher asked for, per monitor.
+    uint32_t watch_code_ = 0;
+    uint32_t watch_owner_ = 0;
+    std::map<uint8_t, std::pair<uint32_t, protocol::StreamStart>> stream_starts_;
+    std::unordered_map<uint8_t, std::chrono::steady_clock::time_point> watch_idr_at_;
 
     // Per-client handler threads, joined in stop(). finished_threads_ marks the
     // ones that have run to completion so the accept loop can reap them.

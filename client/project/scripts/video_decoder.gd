@@ -37,6 +37,50 @@ static func is_codec_supported(codec: int) -> bool:
 	return CODEC_MIME.has(codec) and Engine.has_singleton(PLUGIN_NAME)
 
 
+## Whether `data` (Annex-B) holds an IDR / intra picture: a fresh decoder
+## must start on one.
+static func is_keyframe(data: PackedByteArray, codec: int) -> bool:
+	var size := data.size()
+	if size < 5:
+		return false
+	var i := 0
+	while i < size - 3:
+		if data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 1:
+			var nal_byte := data[i + 3]
+			if codec == 0:  # H.264: NAL type 5 = IDR
+				if (nal_byte & 0x1f) == 5:
+					return true
+			elif codec == 1:  # HEVC: NAL types 16-23 = IDR/BLA/CRA
+				var nal_type := (nal_byte >> 1) & 0x3f
+				if nal_type >= 16 and nal_type <= 23:
+					return true
+			i += 3
+		else:
+			i += 1
+	return codec == 3  # AV1: assume keyframe (OBU detection complex)
+
+
+## Each frame: put the newest picture of `decoder` (a VideoDecoder, or a
+## SoftwareVideoDecoder) on `panel`. Hardware: wire the OES texture to the
+## panel once, then schedule the render-thread updateTexImage. Software:
+## upload a freshly decoded image, if there is one.
+static func show_on(decoder: RefCounted, panel: MeshInstance3D) -> void:
+	if panel == null or not decoder.is_open():
+		return
+	if decoder is VideoDecoder:
+		var dec := decoder as VideoDecoder
+		if not dec.has_external_texture():
+			return
+		if not panel.is_using_external_texture():
+			panel.set_external_texture(dec.get_external_texture(), dec.get_width(), dec.get_height())
+		if panel.material_override is ShaderMaterial:
+			dec.schedule_update(panel.material_override as ShaderMaterial, panel.get_layer_material())
+		return
+	var img: Image = decoder.get_decoded_image()
+	if img:
+		panel.update_decoded_image(img)
+
+
 ## Open a hardware decoder for the stream. Returns false when unsupported.
 ## ExternalTexture is created on the main thread (safe for has_external_texture()
 ## checks), then get_external_texture_id() is read from the render thread to obtain

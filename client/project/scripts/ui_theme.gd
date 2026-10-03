@@ -22,6 +22,10 @@ const TALLY := Color("d9533b")
 const CLAY := Color("e39a7f")
 const SAGE := Color("a9bf9c")
 const OCHRE := Color("d6b36e")
+## One per person in a multiplayer room (avatar, name in the menu): quiet
+## tints off the bone ink, light enough to read on GROUND.
+const PEOPLE := [Color("a9bf9c"), Color("d6b36e"), Color("e39a7f"), Color("8fb8b0"),
+	Color("c2c98f"), Color("cdb8a0"), Color("9fb7cf"), Color("d9a3b0")]
 
 const DISPLAY_FONT_PATH := "res://fonts/Grotesk-04Gras.woff2"
 

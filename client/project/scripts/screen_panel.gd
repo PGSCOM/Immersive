@@ -639,6 +639,11 @@ func _create_placeholder_texture() -> void:
 	add_child(_placeholder_label)
 	_place_decorations()
 
+## The words on the screen while it has no picture (one this headset cannot decode, say).
+func set_placeholder_text(text: String) -> void:
+	if _placeholder_label:
+		_placeholder_label.text = text
+
 ## The grab bar sits over the top edge instead (another screen is right
 ## under this one, where the bar would be hidden). main.gd decides.
 var bar_on_top := false

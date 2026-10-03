@@ -84,11 +84,15 @@ public:
     /// Monitor count reported from now on (virtual displays come and go).
     virtual void set_monitor_count(uint8_t count) = 0;
 
-    /// Send stream-start notification
+    /// Send stream-start notification (and to the client's watchers, see
+    /// protocol::WatchCode, who also get it when they join later)
     virtual void send_stream_start(uint32_t client_id,
                                    const protocol::StreamStart& info) = 0;
 
-    /// Send an encoded video packet via UDP
+    /// Send STREAM_STOP for a monitor, to the client and its watchers
+    virtual void send_stream_stop(uint32_t client_id, uint8_t monitor_id) = 0;
+
+    /// Send an encoded video packet via UDP (to the client's watchers too)
     virtual void send_video_packet(uint32_t client_id,
                                    uint8_t monitor_id,
                                    uint32_t frame_number,
@@ -131,6 +135,7 @@ public:
         std::string name;       ///< from HELLO
         std::string address;    ///< peer IPv4
         bool        tcp_media;  ///< HELLO_FLAG_TCP_MEDIA (USB)
+        bool        watcher;    ///< HELLO_FLAG_WATCH: only watches another client's screens
     };
     /// Paired clients.
     virtual std::vector<ClientInfo> clients() const = 0;

@@ -56,6 +56,7 @@ enum class MessageType : uint8_t {
     VIRTUAL_DISPLAY_REMOVE = 0x23, ///< Client → host: remove a virtual monitor this host made
     VIRTUAL_DISPLAY_RESULT = 0x24, ///< Host → client: outcome of CREATE / REMOVE
     SCREEN_OFF           = 0x25, ///< Both ways: the PC's main screen dark / lit (ScreenOff)
+    WATCH_CODE           = 0x26, ///< Client → host: who may watch its screens (WatchCode)
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
@@ -77,12 +78,18 @@ struct ControlHeader {
 /// (VIDEO_FRAME / AUDIO_DATA) instead of UDP. Used over USB, where
 /// `adb reverse` tunnels TCP only. Older clients send no flags byte (= UDP).
 constexpr uint8_t HELLO_FLAG_TCP_MEDIA = 0x01;
+/// Hello.flags bit: only watch the screens the PC already streams to the
+/// headset that sent WATCH_CODE (a multiplayer room). Hello.pin carries that
+/// code instead of the PIN; the host never takes input or requests from a
+/// watcher, and sends it the video at Hello.udp_port.
+constexpr uint8_t HELLO_FLAG_WATCH     = 0x02;
 
 struct Hello {
     uint8_t  protocol_version;
     char     client_name[32];
     uint8_t  flags;  ///< HELLO_FLAG_* bitmask; optional (absent = 0)
-    uint32_t pin;    ///< Pairing PIN (100000-999999); optional (absent = 0 = none)
+    uint32_t pin;    ///< Pairing PIN (100000-999999), or the watch code; optional (absent = 0 = none)
+    uint16_t udp_port;  ///< Where to send the video; optional (absent = 0 = the host's udp_port)
 };
 
 struct HelloAck {
@@ -91,6 +98,10 @@ struct HelloAck {
     uint8_t  monitor_count;
     char     host_name[64];  ///< UTF-8, NUL-padded; optional (older hosts omit it)
     uint8_t  flags;          ///< HOST_FLAG_*; optional (absent = 0)
+    /// The PC's network address (IPv4, network byte order; 0 = unknown), so
+    /// a headset on the USB cable can tell others in its room where to watch
+    /// from. Optional (older hosts omit it).
+    uint32_t lan_ipv4;
 };
 
 /// HelloAck.flags bits.
@@ -193,6 +204,14 @@ struct ScreenOff {
 };
 
 constexpr uint32_t SCREEN_OFF_LEASE_MS = 10000;
+
+/// Client → host: headsets that send `code` in a HELLO with HELLO_FLAG_WATCH
+/// may watch this client's streams (the same encoded frames, fanned out:
+/// STREAM_START / STREAM_STOP and the video, nothing else). 0 = nobody. A new
+/// code, or the client leaving, drops every watcher. Ignored from watchers.
+struct WatchCode {
+    uint32_t code;
+};
 
 struct MonitorSelect {
     uint8_t monitor_id;

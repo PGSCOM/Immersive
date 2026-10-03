@@ -1020,10 +1020,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto send_stream_stop = [&](uint32_t client_id, uint8_t monitor_id) {
-        immersive::protocol::StreamStop stop_msg = { monitor_id };
-        server->send_control_message(client_id,
-                                     immersive::protocol::MessageType::STREAM_STOP,
-                                     &stop_msg, sizeof(stop_msg));
+        server->send_stream_stop(client_id, monitor_id);
     };
 
     // Stop every stream. Caller holds ops_mutex.

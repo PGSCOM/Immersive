@@ -79,6 +79,9 @@ The client runs on VR headsets (and on a PC for testing) and:
 5. **Takes input** — both controllers (`vr_input.gd`), bare hands
    (`hand_input.gd`), the VR keyboard (`virtual_keyboard.gd`) and, on the
    headset, a Bluetooth keyboard (`key_map.gd`).
+6. **Shares a room**: several people, each with their own PC, see each
+   other's avatars, talk, and watch the screens each one shares
+   (`room.gd`, `participant.gd`, see below).
 
 #### Component Architecture
 
@@ -99,6 +102,51 @@ The client runs on VR headsets (and on a PC for testing) and:
 same tokens as the web page). `laser_drag.gd` is how screens, menu and
 keyboard are moved: the grabbed point stays on the pointer ray and the object
 keeps facing the head.
+
+## Multiplayer rooms
+
+No server and no account: a room is a handful of headsets talking directly.
+
+```
+   Ana's PC ──────── video (watch) ────────────┐
+      │ her own stream                         ▼
+   Ana's headset ◄══ room (ENet, UDP 19820) ══► Ben's headset
+   (opened the room,  poses · voice · profiles      │ his own stream
+    relays the rest)                             Ben's PC ── video (watch) ──► Ana's headset
+```
+
+- **The room** (`room.gd`) is Godot's high-level multiplayer over ENet. One
+  headset opens it (UDP 19820, `--im2-room-port` in tests) and relays between
+  the others; it also answers LAN discovery on 19821, so the Room tab lists
+  it. Joining takes its address and its six-digit PIN (SceneMultiplayer
+  authentication; five wrong PINs lock an address out for a minute). Over the
+  internet that means a VPN (Tailscale, ZeroTier...) or a forwarded port: the
+  room and each sharer's PC must be reachable. If the headset that opened the
+  room leaves, the room closes.
+- **What goes through it**: each person's *profile* (name, microphone on or
+  off, how to watch their PC, where their shared screens hang) when it
+  changes; their *pose* (head and both hands, relative to their XROrigin3D,
+  30 times a second, unreliable); their *voice* (microphone on a muted bus
+  with an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms
+  PCM-16 packets, only while it passes a noise gate). About 3 KB/s of poses
+  and 32 KB/s of voice per person talking.
+- **Screens never go through the room.** A headset that shares sends its PC a
+  random WATCH_CODE and, once the host has it, tells the room the PC's
+  address, port and code. Everyone else connects to that PC directly as a
+  *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets the same encoded frames
+  the sharer gets, fanned out by the host: no second encode, no relay through
+  a headset, the sharer's own rate control. A watcher can do nothing but
+  watch. Sharing is off by default and never saved.
+- **Seats** (`Room.seat()`): everyone in one row, ordered by peer id, 3.2 m
+  apart, facing the same way. Each `Participant` node sits at its seat; under
+  it, the avatar and the shared screens are in that person's own tracking
+  space, as they sent them. A shared screen can be grabbed by its bar and
+  brought closer; from then on it stays where it was put, here only.
+- **Avatars** (`participant.gd`): a head wearing a headset, shoulders and a
+  chest that turns after the head, two mitts where the controllers (or bare
+  hands) are, and the name, brighter while they speak; one colour per seat
+  (`UiTheme.PEOPLE`), the same colour their name has in the menu. Their voice
+  plays from their head (AudioStreamPlayer3D).
 
 ## Data Flow
 

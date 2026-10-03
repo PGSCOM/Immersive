@@ -531,7 +531,7 @@ private:
         for (const auto& c : server_.clients()) {
             j << (first ? "" : ",") << "{\"id\":" << c.id << ",\"name\":" << json_str(c.name)
               << ",\"address\":" << json_str(c.address) << ",\"usb\":" << (c.tcp_media ? "true" : "false")
-              << ",\"streams\":[";
+              << ",\"watching\":" << (c.watcher ? "true" : "false") << ",\"streams\":[";
             first = false;
             bool first_s = true;
             if (c.id == streaming) {

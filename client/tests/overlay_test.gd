@@ -35,6 +35,11 @@ func _initialize() -> void:
 	ov.haptics_toggled.connect(func(on): events.append(["haptics", on]))
 	ov.compositor_layers_toggled.connect(func(on): events.append(["layers", on]))
 	ov.pointer_settings_changed.connect(func(h, a, f): events.append(["pointer", h, a, f]))
+	ov.room_open_requested.connect(func(): events.append(["room_open"]))
+	ov.room_join_requested.connect(func(ip, port, pin): events.append(["room_join", ip, port, pin]))
+	ov.room_leave_requested.connect(func(): events.append(["room_leave"]))
+	ov.room_mic_toggled.connect(func(on): events.append(["room_mic", on]))
+	ov.room_share_toggled.connect(func(on): events.append(["room_share", on]))
 	_run()
 
 func check(cond: bool, what: String) -> void:
@@ -92,6 +97,66 @@ func _step(name: String) -> void:
 	if out != "":
 		await RenderingServer.frame_post_draw
 		ov._viewport.get_texture().get_image().save_png("%s_%s.png" % [out, name])
+
+## The Room tab: rooms found, joining by address and PIN, opening one, and
+## the view inside a room.
+func _room() -> void:
+	await _click(ov._tab_buttons[ov.ROOM_TAB])
+	var tab: Button = ov._tab_buttons[ov.ROOM_TAB]
+	check(ov._tab == ov.ROOM_TAB and ov._room_out.visible and not ov._room_in.visible
+		and tab.get_global_rect().end.x <= ov._viewport.size.x - 30, "Room: the sixth tab fits and shows the join form")
+	ov.set_room_defaults("", 19820)
+	ov.set_found_rooms([{"ip": "192.168.1.40", "port": 19830, "monitors": 2, "name": "Ana", "pin_required": true}])
+	await _frames(2)
+	await _step("room")
+	await _click(_btn("Join", ov._rooms_list))
+	check(ov._room_text == ["192.168.1.40", ""] and ov._room_field == 1 and ov._lbl_room_hint.text.contains("PIN"),
+		"Room: a found room's Join fills its address and asks for its PIN -> %s" % [ov._room_text])
+	for d in "13579":
+		await _click(_btn(d, ov._room_out))
+	await _click(ov._btn_room_join)
+	check(events.back()[0] != "room_join" and ov._lbl_room_hint.text.contains("six"), "Room: Join needs all six digits")
+	await _click(_btn("0", ov._room_out))
+	await _step("room_pin")
+	await _click(ov._btn_room_join)
+	check(events.back() == ["room_join", "192.168.1.40", 19830, 135790], "Room: Join sends address, port, PIN -> %s" % [events.back()])
+	# An address typed by hand joins on the usual port.
+	await _click(ov._room_cells[0])
+	for i in 12:
+		await _click(_btn("⌫", ov._room_out))
+	for ch in "10.0.0.9":
+		await _click(_btn(ch, ov._room_out))
+	await _click(ov._btn_room_join)
+	check(events.back() == ["room_join", "10.0.0.9", 19820, 135790], "Room: a typed address -> %s" % [events.back()])
+	ov.set_room({"state": 1})
+	check(ov._btn_room_join.disabled and ov._btn_room_join.text.begins_with("Joining"), "Room: joining shows")
+	ov.set_room({"state": 0})
+	await _click(_btn("Open a room"))
+	check(events.back() == ["room_open"], "Room: Open a room")
+
+	ov.set_room({"state": 2, "host": true, "address": "192.168.1.37", "pin": 482913, "mic": true,
+		"share": false, "pc": true, "people": [
+		{"name": "Pablo", "me": true, "host": true, "tone": UiTheme.PEOPLE[0], "mic": true, "speaking": true, "screens": "", "count": 0},
+		{"name": "Ana", "me": false, "host": false, "tone": UiTheme.PEOPLE[1], "mic": true, "speaking": false, "screens": "live", "count": 2},
+		{"name": "DESKTOP-8F3K2LQ-WORKSTATION", "me": false, "host": false, "tone": UiTheme.PEOPLE[2], "mic": false, "speaking": false, "screens": "unreachable", "count": 0}]})
+	await _frames(2)
+	check(ov._room_in.visible and not ov._room_out.visible and ov._lbl_room_pin.text == "482 913"
+		and ov._people_list.get_child_count() == 3 and ov._lbl_room_title.text == "Your room",
+		"Room: inside, its PIN and who is there")
+	await _step("room_in")
+	await _click(ov._chk_share)
+	check(events.back() == ["room_share", true], "Room: share my screens -> %s" % [events.back()])
+	await _click(ov._chk_mic)
+	check(events.back() == ["room_mic", false], "Room: microphone off -> %s" % [events.back()])
+	ov.set_room({"state": 2, "host": false, "address": "192.168.1.37", "pin": 482913, "mic": true,
+		"share": true, "pc": false, "people": [{"name": "Pablo", "me": true, "host": false, "tone": UiTheme.PEOPLE[1],
+		"mic": true, "speaking": false, "screens": "", "count": 0}, {"name": "Ana", "me": false, "host": true,
+		"tone": UiTheme.PEOPLE[0], "mic": true, "speaking": true, "screens": "connecting", "count": 0}]})
+	await _frames(2)
+	check(ov._lbl_room_title.text == "Ana's room" and ov._chk_share.disabled, "Room: someone else's; no PC, no sharing")
+	await _step("room_guest")
+	await _click(_btn("Leave room"))
+	check(events.back() == ["room_leave"], "Room: Leave room")
 
 ## The virtual screen size page: a new screen, then changing one.
 func _virtual_page() -> void:
@@ -380,8 +445,9 @@ func _run() -> void:
 	var ind: Panel = ov._tab_indicator
 	var tab: Button = ov._tab_buttons[4]
 	check(tab.get_global_rect().end.x <= ov._viewport.size.x - 30 and absf(ind.position.x - tab.position.x - 14) < 1.0,
-		"five tabs fit the bar and the indicator sits under Input")
+		"the tabs fit the bar and the indicator sits under Input")
 	await _step("input")
+	await _room()
 
 	await _click(_btn("Close"))
 	check(not ov.visible, "Close hides the menu")

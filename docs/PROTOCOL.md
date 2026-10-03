@@ -83,6 +83,18 @@ Everything the host does — sending the desktop, injecting mouse and keyboard
 
 The client remembers the PIN per PC and sends it on every connection.
 
+**Watchers.** In a multiplayer room (see `docs/ARCHITECTURE.md`) a headset can
+let the others watch what this PC streams to it, without the PIN: it sends
+WATCH_CODE with a random code, and a HELLO with `HELLO_FLAG_WATCH` and that
+code in the PIN field gets in (wrong codes cost and lock out like wrong PINs).
+A watcher receives STREAM_START / STREAM_STOP and the very same encoded frames
+as the headset that shared them (fanned out at its own UDP port, not encoded
+again), never the monitor list or the PC's sound, and nothing it sends is acted
+on except REQUEST_KEYFRAME (one a second at most per monitor, since each IDR
+blurs the sharer's picture for a moment), LATENCY_PROBE and PING. A new code,
+code 0, or the sharing headset leaving drops every watcher. Watchers do not
+count toward `--max-clients`.
+
 ---
 
 ## Control Channel (TCP)
@@ -109,18 +121,19 @@ All control messages use a **TLV (Type-Length-Value)** framing:
 Sent immediately after TCP connection is established.
 
 ```
- 0         1                      33       34                38
- +---------+----------------------+--------+-----------------+
- | version | client_name[32]      | flags  | pin (uint32 LE) |
- +---------+----------------------+--------+-----------------+
+ 0         1                      33       34                38                40
+ +---------+----------------------+--------+-----------------+-----------------+
+ | version | client_name[32]      | flags  | pin (uint32 LE) | udp_port (u16)  |
+ +---------+----------------------+--------+-----------------+-----------------+
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | version | uint8 | Protocol version (currently 1) |
 | client_name | char[32] | UTF-8 null-terminated display name |
-| flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP |
-| pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing) |
+| flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP. Bit 1 `HELLO_FLAG_WATCH`: only watch, see [Pairing](#pairing) |
+| pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing); with `HELLO_FLAG_WATCH`, the watch code |
+| udp_port | uint16 LE | Optional (absent = 0 = the host's UDP port). Where to send the video; a watcher picks a port of its own |
 
 The host answers with HELLO_ACK, then MONITOR_LIST (and AUDIO_START when it
 captures audio) — or with HELLO_REJECT and closes.
@@ -132,10 +145,10 @@ captures audio) — or with HELLO_REJECT and closes.
 Response to HELLO.
 
 ```
- 0         1         3         4                  68        69
- +---------+---------+---------+------------------+---------+
- | version | udp_port| mon_cnt | host_name[64]    | flags   |
- +---------+---------+---------+------------------+---------+
+ 0         1         3         4                  68        69                 73
+ +---------+---------+---------+------------------+---------+------------------+
+ | version | udp_port| mon_cnt | host_name[64]    | flags   | lan_ipv4 (u32)   |
+ +---------+---------+---------+------------------+---------+------------------+
 ```
 
 | Field | Type | Description |
@@ -145,6 +158,7 @@ Response to HELLO.
 | monitor_count | uint8 | Number of monitors (informational; full list follows) |
 | host_name | char[64] | Optional (older hosts send 4 bytes). The PC's name, UTF-8 |
 | flags | uint8 | Optional (absent = 0). Bit 0 `HOST_FLAG_VIEW_ONLY`: mouse/keyboard input is ignored (`--view-only`, or "Let headsets control this PC" off in the host's settings window). Bit 1 `HOST_FLAG_VIRTUAL_DISPLAYS`: VIRTUAL_DISPLAY_CREATE works on this PC. Bit 2 `HOST_FLAG_SCREEN_OFF`: SCREEN_OFF works on this PC |
+| lan_ipv4 | 4 bytes | Optional (older hosts omit it; 0 = unknown). The PC's network address in network byte order (the source of its default route), so a headset on the USB cable can tell its room where to watch from |
 
 When the flags change while clients are connected (the settings window turns
 remote control on or off), the host sends every paired client a fresh
@@ -427,6 +441,21 @@ does not drive the PC, the backend failed). The client's switch follows these.
 
 ---
 
+### `0x26` WATCH_CODE — Client → Host
+
+| Field | Type | Description |
+|-------|------|-------------|
+| code | uint32 LE | Headsets that send this in a `HELLO_FLAG_WATCH` HELLO may watch this client's streams; 0 = nobody |
+
+Sent by a headset sharing its PC's screens with a multiplayer room, after its
+HELLO was accepted (the client then waits for the answer to its next
+LATENCY_PROBE, which proves the host has the code, before telling the room).
+Another code drops the watchers of the old one; only the client that set a
+code can take it back with 0; that client leaving takes it back too. Ignored
+from watchers.
+
+---
+
 ### `0x30` FRAME_ACK — Client → Host
 
 Acknowledges a video frame the client has completed (sent for every one).
@@ -691,4 +720,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors) — additive, old clients are unaffected |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors); WATCH_CODE, `HELLO_FLAG_WATCH`, HELLO `udp_port` and HELLO_ACK `lan_ipv4` (multiplayer rooms) — additive, old clients are unaffected |

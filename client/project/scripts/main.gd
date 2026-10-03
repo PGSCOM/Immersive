@@ -76,6 +76,23 @@ var screens_face_me: bool = false
 ## Pixels of the last virtual screen added or changed: the size page starts there.
 var virtual_size := Vector2i(1920, 1080)
 
+## The multiplayer room (room.gd: avatars, voice, shared screens), and the
+## menu's "Show my screens to the room" switch. Never saved: every room
+## starts with the screens private.
+var room: Room = null
+var share_screens: bool = false
+## The code this PC lets watchers in with (protocol.h WatchCode; 0 = not
+## sharing), and the latency probe whose answer proves the host has it: only
+## then does the room learn where to watch from.
+var _watch_code: int = 0
+var _watch_probe: int = -1
+var _room_screens_s: float = 0.0
+var _room_notice: String = ""
+## The room joined last (the menu's address field starts there) and its port.
+var _room_address: String = ""
+var _room_port: int = Room.PORT
+var _room_mic: bool = true
+
 # Stream quality settings (sent to the host via STREAM_CONFIG).
 ## Protocol codec value: 0 = H.264, 1 = HEVC, 2 = MJPEG, 3 = AV1.
 ## Resolved from the device's decode capability in _load_config(); see
@@ -181,6 +198,12 @@ var _debug_capture_count: int = 0
 var _cmdline_monitors: Array = []
 ## --im2-virtual=WxH: ask for a virtual screen of that size once connected.
 var _cmdline_virtual := Vector2i.ZERO
+## --im2-room=open|IP, --im2-room-pin, --im2-name, --im2-tone: a room from the
+## command line (tests); --im2-share shares the screens in it.
+var _cmdline_room := ""
+var _cmdline_room_pin := 0
+var _cmdline_name := ""
+var _cmdline_tone := false
 ## Driven from the command line (tests, adb): settings and layout stay as
 ## the user left them.
 var _ephemeral: bool = false
@@ -222,6 +245,7 @@ func _ready() -> void:
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
+	_init_room()
 	_save_timer = Timer.new()
 	_save_timer.one_shot = true
 	_save_timer.timeout.connect(save_workspace_layout)
@@ -260,6 +284,7 @@ func _process(delta: float) -> void:
 	_update_decoders()
 	_update_snap_preview()
 	_sort_layers()
+	_update_room(delta)
 
 ## Compositor layers ignore depth: farther screens get a lower sort_order so a
 ## nearer one is drawn over them where they overlap.
@@ -438,6 +463,7 @@ func disconnect_from_host() -> void:
 	_update_overlay_monitors()
 	_clear_all_screens()
 	_update_discovery()
+	_on_room_changed()
 
 ## The name a discovered PC answers with at `ip`, if any.
 func _name_for_ip(ip: String) -> String:
@@ -546,6 +572,14 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 			var d: float = handle.probe(ray_origin, ray_direction)
 			if d >= 0.0 and not on_screen:
 				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
+	# Screens others share: the pointer stops on them (nothing is sent to our
+	# PC), and their bar moves them, here only.
+	var remote: Array = room.remote_panels() if room else []
+	for p in remote:
+		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
+		if h.get("valid", false):
+			hits.append({"kind": "remote", "distance": h.distance})
+	owners.append_array(remote)
 	owners.append_array([ui_overlay, virtual_keyboard])
 	for o in owners:
 		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
@@ -704,6 +738,8 @@ func _is_linked(panel: Node3D) -> bool:
 ## the ones snapped to it (and to those, and so on) and, for a "Move together"
 ## screen, the other linked ones. The screen it is snapped to stays behind.
 func drag_group_for(panel: Node3D) -> Array:
+	if not screen_panels.has(panel):
+		return []  # a screen someone shares: it moves alone
 	var ids := [int(panel.get_meta("monitor_id", -1))]
 	if _is_linked(panel):
 		ids.append_array(_linked.keys().filter(func(k): return _linked[k]))
@@ -823,6 +859,8 @@ func _update_snap_preview() -> void:
 ## else it follows nobody. What follows it moves with it. "Move together" is
 ## not touched. Called before on_layout_changed().
 func on_panel_drag_ended(panel: Node3D) -> void:
+	if not screen_panels.has(panel):
+		return
 	var target := snap_target_for(panel)
 	_snap_pick = {}
 	if _snap_frame:
@@ -918,6 +956,129 @@ func _init_ui_overlay() -> void:
 	ui_overlay.set_linked_monitors(_linked.keys().filter(func(k): return _linked[k]))
 	ui_overlay.set_pointer_settings(pointer_hand, ray_angle_deg, screens_face_me)
 	ui_overlay.set_compositor_layers(compositor_layers, true)
+	ui_overlay.room_open_requested.connect(func():
+		ui_overlay.set_notice("")
+		room.open(_room_port, _cmdline_room_pin))
+	ui_overlay.room_join_requested.connect(func(ip: String, port: int, pin: int):
+		ui_overlay.set_notice("")
+		_room_address = ip
+		_save_config()
+		room.join(ip, port, pin))
+	ui_overlay.room_leave_requested.connect(func(): room.leave())
+	ui_overlay.room_mic_toggled.connect(func(on: bool):
+		_room_mic = on
+		room.set_mic(on)
+		_save_config())
+	ui_overlay.room_share_toggled.connect(func(on: bool):
+		share_screens = on
+		_update_share()
+		_on_room_changed())
+	ui_overlay.set_room_defaults(_room_address, _room_port)
+
+# ---------------------------------------------------------------------------
+# Multiplayer room
+# ---------------------------------------------------------------------------
+
+func _init_room() -> void:
+	room = Room.new()
+	room.name = "Room"  # the same path on every headset: the room's RPCs need it
+	room.port = _room_port
+	room.mic_on = _room_mic
+	room.test_tone = _cmdline_tone
+	room.my_name = _person_name()
+	room.setup(xr_origin, xr_camera, left_controller, right_controller)
+	add_child(room)
+	room.changed.connect(_on_room_changed)
+	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
+	if _cmdline_room == "open":
+		room.open(_room_port, _cmdline_room_pin)
+	elif _cmdline_room.is_valid_ip_address():
+		room.join(_cmdline_room, _room_port, _cmdline_room_pin)
+
+## What the room calls us: --im2-name, else the PC's name, else the headset's.
+func _person_name() -> String:
+	if not _cmdline_name.is_empty():
+		return _cmdline_name
+	if not _last_host_name.is_empty():
+		return _last_host_name
+	var model := OS.get_model_name()
+	return model if not model.is_empty() and model != "GenericDevice" else "Someone"
+
+func _on_room_changed() -> void:
+	if not room:
+		return
+	_update_share()
+	if not ui_overlay:
+		return
+	ui_overlay.set_room(_room_view())
+	if room.notice != _room_notice:
+		_room_notice = room.notice
+		if not _room_notice.is_empty():
+			ui_overlay.set_notice(_room_notice)
+
+func _room_view() -> Dictionary:
+	return {"state": room.state, "host": room.is_host, "address": room.address, "pin": room.pin,
+		"people": room.people(), "mic": room.mic_on, "share": share_screens,
+		"pc": current_state == State.CONNECTED or current_state == State.STREAMING}
+
+## Share this PC's screens while the switch is on, we are in a room and the
+## PC is connected: a fresh code to the host first; the room hears where to
+## watch from once the host has it (_on_latency_response).
+func _update_share() -> void:
+	if not room or not network_client:
+		return
+	var connected := current_state == State.CONNECTED or current_state == State.STREAMING
+	var want := share_screens and connected and room.state == Room.State.IN
+	if want and _watch_code == 0:
+		_watch_code = randi_range(1, 0x7FFFFFFF)
+		network_client.send_watch_code(_watch_code)
+		_watch_probe = _probe_id + 1
+		_latency_timer = LATENCY_INTERVAL  # that probe goes out now
+	elif not want and _watch_code != 0:
+		if connected:
+			network_client.send_watch_code(0)
+		_watch_code = 0
+		_watch_probe = -1
+		room.set_share({})
+		room.set_screens([])
+
+## The host has our code: tell the room where to watch from. The PC's network
+## address, as we reach it or as it says in HELLO_ACK (over the USB cable we
+## reach it at 127.0.0.1, which others cannot).
+func _announce_share() -> void:
+	var ip := _lan_ip
+	if not ip.is_valid_ip_address():
+		ip = network_client.lan_address
+	if not ip.is_valid_ip_address() and not host_ip.begins_with("127."):
+		ip = host_ip
+	if not ip.is_valid_ip_address():
+		ui_overlay.set_notice("Your screens cannot be shared: the PC did not say its network address.")
+		return
+	room.set_share({"ip": ip, "port": host_tcp_port, "code": _watch_code})
+	_room_screens_s = 1.0
+
+func _update_room(delta: float) -> void:
+	if not room:
+		return
+	room.look_for_rooms(ui_overlay.is_shown() and ui_overlay.showing_room_tab())
+	if not room.sharing():
+		return
+	# Where our screens hang, twice a second (the room only sends changes).
+	_room_screens_s += delta
+	if _room_screens_s < 0.5:
+		return
+	_room_screens_s = 0.0
+	var o := xr_origin.global_transform.affine_inverse()
+	var curve := curved_screen_amount if curved_screen_enabled else 0.0
+	var screens := []
+	for p in _live_panels():
+		var t: Transform3D = o * p.global_transform
+		var b := t.basis
+		var x := [b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z,
+			t.origin.x, t.origin.y, t.origin.z].map(func(v: float): return snappedf(v, 0.001))
+		screens.append({"id": int(p.get_meta("monitor_id", -1)), "x": x,
+			"w": snappedf(p.panel_width, 0.001), "c": curve})
+	room.set_screens(screens)
 
 func _show_overlay() -> void:
 	if ui_overlay and not ui_overlay.is_shown():
@@ -1149,6 +1310,7 @@ func _on_handshake_accepted(host_name: String, host_flags: int = 0) -> void:
 	if not host_name.is_empty():
 		_host_name = host_name
 		_last_host_name = host_name
+		room.set_display_name(_person_name())
 	if not host_ip.begins_with("127."):
 		_lan_ip = host_ip
 	var pin := int(_pins.get("pending", 0))
@@ -1163,6 +1325,7 @@ func _on_handshake_accepted(host_name: String, host_flags: int = 0) -> void:
 		ui_overlay.set_notice("")
 		ui_overlay.hide_pin_prompt()
 	_update_overlay_state()
+	_on_room_changed()  # the share switch can work now
 
 func _on_connection_rejected(reason: int) -> void:
 	var who := _host_name if not _host_name.is_empty() else host_ip
@@ -1217,6 +1380,7 @@ func _on_disconnected() -> void:
 	_audio_on = false
 	if was_streaming:
 		_remember_layouts()
+	_on_room_changed()  # the host dropped our watchers with us
 	print("[Immersive-2] Disconnected from host")
 	# Cable pulled (or its host gone): straight back to Wi-Fi, and give the
 	# cable a moment before trying it again.
@@ -1395,7 +1559,7 @@ func _on_video_frame(monitor_id: int, frame_data: PackedByteArray, width: int, h
 	if _decoders.has(monitor_id):
 		var dec: VideoDecoder = _decoders[monitor_id]
 		if _awaiting_idr.get(monitor_id, false):
-			if not _is_keyframe(frame_data, dec._codec):
+			if not VideoDecoder.is_keyframe(frame_data, dec._codec):
 				# The stream's first IDR can reach us before its STREAM_START
 				# was handled (UDP overtakes TCP) and the host sends no
 				# periodic IDR any more: ask for one, or the screen stays
@@ -1481,6 +1645,9 @@ func _handle_debug_capture(delta: float) -> void:
 		[_debug_capture_count, str(saved), current_state, _decoders.size(), " ".join(sw_stats)])
 	# One line per panel with its centre pixel, so host/tools/e2e_test.py can
 	# check each monitor's decoded image landed on that monitor's panel.
+	if room:
+		for line in room.debug_lines():
+			print(line)
 	for mid in active_monitor_ids:
 		var panel := _find_panel_for_monitor(mid)
 		if panel and panel.screen_image and not panel.screen_image.is_empty():
@@ -1508,35 +1675,12 @@ func _close_all_decoders() -> void:
 	_awaiting_idr.clear()
 	_stream_info.clear()
 
-## Each frame: drive both decoder kinds onto their panels.
-##   - Hardware (ExternalTexture): wire the OES texture to the panel once, then
-##     schedule the render-thread updateTexImage.
-##   - Software (MJPEG): poll the threaded decoder for a freshly decoded image and
-##     upload it to the panel.
+## Each frame: both decoder kinds onto their panels (VideoDecoder.show_on).
 func _update_decoders() -> void:
 	for monitor_id in _decoders:
-		var dec: VideoDecoder = _decoders[monitor_id]
-		if not dec.is_open() or not dec.has_external_texture():
-			continue
-		var panel := _find_panel_for_monitor(monitor_id)
-		if panel == null:
-			continue
-		if not panel.is_using_external_texture():
-			panel.set_external_texture(dec.get_external_texture(), dec.get_width(), dec.get_height())
-		var mat := panel.material_override
-		if mat is ShaderMaterial:
-			dec.schedule_update(mat as ShaderMaterial, panel.get_layer_material())
-
+		VideoDecoder.show_on(_decoders[monitor_id], _find_panel_for_monitor(monitor_id))
 	for monitor_id in _sw_decoders:
-		var sw: SoftwareVideoDecoder = _sw_decoders[monitor_id]
-		if not sw.is_open():
-			continue
-		var img := sw.get_decoded_image()
-		if img == null:
-			continue
-		var panel := _find_panel_for_monitor(monitor_id)
-		if panel:
-			panel.update_decoded_image(img)
+		VideoDecoder.show_on(_sw_decoders[monitor_id], _find_panel_for_monitor(monitor_id))
 
 ## Return the screen panel currently assigned to monitor_id, or null.
 func _find_panel_for_monitor(monitor_id: int) -> MeshInstance3D:
@@ -1544,27 +1688,6 @@ func _find_panel_for_monitor(monitor_id: int) -> MeshInstance3D:
 		if is_instance_valid(panel) and int(panel.get_meta("monitor_id", -1)) == monitor_id:
 			return panel
 	return null
-
-## Detect whether data begins with an IDR / intra NAL unit (Annex-B).
-func _is_keyframe(data: PackedByteArray, codec: int) -> bool:
-	var size := data.size()
-	if size < 5:
-		return false
-	var i := 0
-	while i < size - 3:
-		if data[i] == 0 and data[i + 1] == 0 and data[i + 2] == 1:
-			var nal_byte := data[i + 3]
-			if codec == 0:  # H.264: NAL type 5 = IDR
-				if (nal_byte & 0x1f) == 5:
-					return true
-			elif codec == 1:  # HEVC: NAL types 16-23 = IDR/BLA/CRA
-				var nal_type := (nal_byte >> 1) & 0x3f
-				if nal_type >= 16 and nal_type <= 23:
-					return true
-			i += 3
-		else:
-			i += 1
-	return codec == 3  # AV1: assume keyframe (OBU detection complex)
 
 ## The host streams a codec we cannot decode here. Ask for the best codec we
 ## CAN decode: H.264 if the MediaCodec plugin is present (e.g. AV1 stream on
@@ -1600,6 +1723,9 @@ func _on_audio_stream_stopped() -> void:
 	_audio_on = false
 
 func _on_latency_response(probe_id: int, _client_ts: int) -> void:
+	if _watch_code != 0 and _watch_probe >= 0 and probe_id >= _watch_probe:
+		_watch_probe = -1
+		_announce_share()
 	if probe_id != _probe_id:
 		return
 	_latency_ms = float(Time.get_ticks_usec() - _probe_sent_us) / 1000.0
@@ -2000,6 +2126,8 @@ func _save_config() -> void:
 	cfg.set_value("stream", "fps", stream_fps)
 	cfg.set_value("virtual", "width", virtual_size.x)
 	cfg.set_value("virtual", "height", virtual_size.y)
+	cfg.set_value("room", "address", _room_address)
+	cfg.set_value("room", "mic", _room_mic)
 	cfg.save(CONFIG_PATH)
 
 ## Best codec this device can actually decode, preferring hardware.
@@ -2057,6 +2185,8 @@ func _load_config() -> void:
 		stream_res_percent = cfg.get_value("stream", "res_percent", 100)
 		stream_fps = cfg.get_value("stream", "fps", 0)
 		virtual_size = Vector2i(cfg.get_value("virtual", "width", 1920), cfg.get_value("virtual", "height", 1080))
+		_room_address = str(cfg.get_value("room", "address", ""))
+		_room_mic = cfg.get_value("room", "mic", true) != false
 		# Test harness (see _autoconnect_on_start docs). Writable over adb run-as.
 		_autoconnect_on_start = cfg.get_value("test", "autoconnect", false)
 		_debug_capture = cfg.get_value("test", "debug_capture", false)
@@ -2072,7 +2202,10 @@ func _load_config() -> void:
 ## --im2-usb-port=N (the USB tunnel is 127.0.0.1:N: automatic USB on desktop),
 ## --im2-monitors=0,1,2 (monitors to stream once connected),
 ## --im2-pin=NNNNNN (pairing PIN for that host),
-## --im2-virtual=WxH (ask the host for a virtual screen once connected).
+## --im2-virtual=WxH (ask the host for a virtual screen once connected),
+## --im2-room=open|IP (open / join a room), --im2-room-port=N, --im2-room-pin=N,
+## --im2-name=NAME (in the room), --im2-share (share the screens there),
+## --im2-tone (a tone instead of the microphone).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
@@ -2099,6 +2232,19 @@ func _apply_cmdline_overrides() -> void:
 			_cmdline_monitors = Array(arg.get_slice("=", 1).split_floats(",")).map(func(v): return int(v))
 		elif arg.begins_with("--im2-pin="):
 			pin = int(arg.get_slice("=", 1))
+		elif arg.begins_with("--im2-room="):
+			_cmdline_room = arg.get_slice("=", 1)
+			_ephemeral = true
+		elif arg.begins_with("--im2-room-port="):
+			_room_port = int(arg.get_slice("=", 1))
+		elif arg.begins_with("--im2-room-pin="):
+			_cmdline_room_pin = int(arg.get_slice("=", 1))
+		elif arg.begins_with("--im2-name="):
+			_cmdline_name = arg.get_slice("=", 1)
+		elif arg == "--im2-share":
+			share_screens = true
+		elif arg == "--im2-tone":
+			_cmdline_tone = true
 		elif arg.begins_with("--im2-virtual="):
 			var wh := arg.get_slice("=", 1).split("x")
 			if wh.size() == 2:
