@@ -40,6 +40,7 @@ const CODEC_NAMES := {0: "H.264", 1: "HEVC", 2: "MJPEG", 3: "AV1"}
 @onready var left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var right_controller: XRController3D = $XROrigin3D/RightController
 @onready var virtual_keyboard: Node3D = get_node_or_null("VirtualKeyboard")
+var whiteboard: Whiteboard = null
 
 # ---------------------------------------------------------------------------
 # State
@@ -222,6 +223,9 @@ func _ready() -> void:
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
+	whiteboard = Whiteboard.new()
+	whiteboard.name = "Whiteboard"
+	add_child(whiteboard)
 	_save_timer = Timer.new()
 	_save_timer.one_shot = true
 	_save_timer.timeout.connect(save_workspace_layout)
@@ -519,11 +523,13 @@ func _apply_visual_settings_to_all_panels() -> void:
 func _live_panels() -> Array:
 	return screen_panels.filter(func(p): return is_instance_valid(p))
 
-## What a pointer ray lands on: the NEAREST of the menu, the keyboard, every
-## screen and every grab bar (vr_input.gd and hand_input.gd both use it).
-## Returns {} on a miss, else { kind: "overlay" / "keyboard" / "panel" / "bar",
+## What a pointer ray lands on: the NEAREST of the menu, the keyboard, the
+## whiteboard, every screen and every grab bar (vr_input.gd and hand_input.gd
+## both use it). Returns {} on a miss, else { kind: "overlay" / "keyboard" /
+## "whiteboard" / "panel" / "bar",
 ## distance, and uv (overlay, panel), panel + monitor_id (panel), target (the
-## node a bar moves: a screen, the menu, the keyboard or a ResizeHandle) + bar
+## node a bar moves: a screen, the menu, the keyboard, the whiteboard or a
+## ResizeHandle) + bar
 ## (the GrabBar or ResizeHandle, both have mark_hovered()) }.
 func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	var hits: Array = []
@@ -534,6 +540,14 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 		var kb: Dictionary = virtual_keyboard.ray_hit(ray_origin, ray_direction)
 		if not kb.is_empty():
 			hits.append({"kind": "keyboard", "distance": kb.distance})
+	if is_instance_valid(whiteboard) and whiteboard.visible:
+		var wb := whiteboard.ray_hit(ray_origin, ray_direction)
+		if not wb.is_empty():
+			hits.append({"kind": "whiteboard", "distance": wb.distance})
+		for handle in whiteboard.resize_handles:
+			var d: float = handle.probe(ray_origin, ray_direction)
+			if d >= 0.0 and wb.is_empty():
+				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
 	var owners: Array = _live_panels()
 	for p in owners:
 		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
@@ -546,7 +560,7 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 			var d: float = handle.probe(ray_origin, ray_direction)
 			if d >= 0.0 and not on_screen:
 				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
-	owners.append_array([ui_overlay, virtual_keyboard])
+	owners.append_array([ui_overlay, virtual_keyboard, whiteboard])
 	for o in owners:
 		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
 		var d: float = bar.hit(ray_origin, ray_direction) if bar else -1.0
@@ -563,6 +577,26 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 func leave_keyboard() -> void:
 	if is_instance_valid(virtual_keyboard):
 		virtual_keyboard.pointer_leave()
+
+## The pointer is not on the whiteboard (any more): end its stroke.
+func leave_whiteboard() -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.pointer_leave()
+
+## Route a pointer ray at the whiteboard (trigger / pinch draws). Returns the
+## hit distance, or -1 on a miss.
+func send_whiteboard_pointer(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
+	return whiteboard.pointer_ray(ray_origin, ray_direction, pressing) if is_instance_valid(whiteboard) else -1.0
+
+## A fingertip of hand `who` at `tip` (world): true while it draws on (or
+## hovers just in front of) the whiteboard, and the hand's ray should rest.
+func whiteboard_touch(who: int, tip: Vector3) -> bool:
+	return is_instance_valid(whiteboard) and whiteboard.touch(who, tip)
+
+## Show/hide the whiteboard (the menu, or B on desktop).
+func toggle_whiteboard() -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.toggle_visibility()
 
 func get_ui_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	if ui_overlay and ui_overlay.has_method("ray_to_overlay_hit"):
@@ -773,7 +807,7 @@ func _rename_snaps(old_id: int, new_id: int) -> void:
 
 ## False while the layout is locked (the menu and keyboard still move).
 func can_move_panel(_panel: Node3D) -> bool:
-	return not lock_layout
+	return not lock_layout or _panel.get_parent() is Whiteboard
 
 ## Where `panel` would land if released now: { panel: the neighbour, side:
 ## ScreenPanel.Side, xform: world transform } beside the nearest free side of
@@ -870,6 +904,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.arrange_requested.connect(arrange_panels)
 	ui_overlay.recenter_requested.connect(recenter_workspace)
 	ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
+	ui_overlay.whiteboard_toggle_requested.connect(toggle_whiteboard)
 	ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
 	ui_overlay.look_changed.connect(_on_overlay_look_changed)
 	ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
@@ -1866,6 +1901,8 @@ func _input(event: InputEvent) -> void:
 			toggle_ui_overlay()
 		KEY_K:
 			toggle_virtual_keyboard()
+		KEY_B:
+			toggle_whiteboard()
 		KEY_ESCAPE:
 			get_tree().quit()
 

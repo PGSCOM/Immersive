@@ -376,9 +376,9 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("11/11 hand tracking, controllers, screens and keyboard, video FEC")
+    step("11/11 hand tracking, controllers, screens, keyboard and whiteboard, video FEC")
     for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd",
-                 "groups_test.gd", "virtual_match_test.gd", "fec_test.gd"):
+                 "groups_test.gd", "virtual_match_test.gd", "whiteboard_test.gd", "fec_test.gd"):
         run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")
 

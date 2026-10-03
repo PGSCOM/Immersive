@@ -24,6 +24,7 @@ signal monitor_selected(monitor_id: int)
 signal arrange_requested
 signal recenter_requested
 signal keyboard_toggle_requested
+signal whiteboard_toggle_requested
 signal screen_curvature_changed(enabled: bool, amount: float)
 ## "night" / "dusk" / "void" / "passthrough"
 signal look_changed(look: String)
@@ -1168,6 +1169,9 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	_btn_keyboard = _button("Keyboard")
 	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
 	actions.add_child(_btn_keyboard)
+	var btn_board := _button("Whiteboard")
+	btn_board.pressed.connect(func(): whiteboard_toggle_requested.emit())
+	actions.add_child(btn_board)
 	# An extra screen that exists only in the headset (the PC makes it).
 	_btn_add_virtual = _button("New virtual screen")
 	_btn_add_virtual.pressed.connect(func(): virtual_page_requested.emit(-1))
