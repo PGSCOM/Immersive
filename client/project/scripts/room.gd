@@ -78,7 +78,7 @@ var _people := {}                  ## peer id -> Participant
 var _profile := {"name": "", "mic": true, "share": {}, "screens": [], "board": {}}
 ## Our own whiteboard (main.gd's): guests' ink is replayed on it.
 var board: Whiteboard = null
-## Every op on our whiteboard so far, as [author peer id, op], for people who
+## Every op on our whiteboard so far, as [author (OWNER or a guest's peer id), op], for people who
 ## join later.
 var _ink_log: Array = []
 ## Peer id -> {board, screens, voice: what we see / hear of them; draw: they
@@ -87,6 +87,8 @@ var _prefs := {}
 ## Our board's placement as main.gd last gave it (the guests are added to it).
 var _board_place := {}
 const INK_BATCH := 2000
+## The author of a board owner's own ink: never a peer id (those start at 1).
+const OWNER := 0
 var _join_deadline_ms := 0
 var _pose_s := 0.0
 var _summary_s := 0.0
@@ -444,10 +446,11 @@ func _publish_board() -> void:
 		_publish()
 
 ## Changes we made to our whiteboard (Whiteboard.ink): to everyone now, and
-## kept for whoever joins later.
+## kept for whoever joins later. Their author is OWNER (0), not our peer id:
+## ops drawn outside a room would carry the offline peer's id, 1, which is
+## the room host's, and its copy of our board skips its own ops.
 func send_ink(ops: Array) -> void:
-	var me := multiplayer.get_unique_id()
-	var inked := ops.map(func(op): return [me, op])
+	var inked := ops.map(func(op): return [OWNER, op])
 	_ink_log.append_array(inked)
 	if state == State.IN and _peer and not _people.is_empty():
 		_take_ink.rpc(inked)

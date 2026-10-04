@@ -144,6 +144,23 @@ func _whiteboards() -> void:
 	mine.queue_free()
 	theirs.queue_free()
 
+	# The owner's own ink goes out as Room.OWNER, never as a peer id: drawn
+	# outside a room it would be the offline peer's 1, the room host's, and
+	# the host's copy (here: we are peer 1) skips its own.
+	var room := Room.new()
+	root.add_child(room)
+	var sent := []
+	room.send_ink([["b", "ece6dc", 5.0, 10.0, 10.0]])
+	room._ink_log.map(func(pair): sent.append(pair[0]))
+	var host_copy := Participant.new()
+	root.add_child(host_copy)
+	await process_frame
+	host_copy.apply_ink(room._ink_log)
+	check(sent == [Room.OWNER] and root.multiplayer.get_unique_id() == 1 and host_copy.board_node().stroke_count() == 1,
+		"ink drawn before the room shows on the room host's copy -> authors %s" % [sent])
+	host_copy.queue_free()
+	room.queue_free()
+
 ## Walking, turning and pulling move the tracking origin; the head keeps its
 ## place in a turn; a screen in between hides what is behind it.
 func _moving() -> void:
