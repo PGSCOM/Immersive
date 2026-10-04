@@ -294,22 +294,33 @@ func _process(delta: float) -> void:
 	_handle_debug_capture(delta)
 	_update_decoders()
 	_update_snap_preview()
-	_sort_layers()
+	_sort_layers(delta)
 	_update_room(delta)
 
 ## Compositor layers ignore depth: farther screens get a lower sort_order so a
-## nearer one is drawn over them where they overlap.
-func _sort_layers() -> void:
+## nearer one is drawn over them where they overlap. Whether a screen hides
+## something of the room (one ray per screen and per point of everyone else,
+## Room.occluder_points(): dozens of people's worth on a headset's CPU) is
+## worked out OCCLUSION_S apart, not every frame, and not at all outside a room.
+const OCCLUSION_S := 0.1
+var _occlusion_s := 0.0
+
+func _sort_layers(delta: float = 0.0) -> void:
 	if not compositor_layers or not xr_camera:
 		return
 	var eye := xr_camera.global_position
 	var panels := _live_panels().filter(func(p): return p.has_compositor_layer())
 	panels.sort_custom(func(a, b): return eye.distance_squared_to(a.global_position) \
 		< eye.distance_squared_to(b.global_position))
-	var room_points: Array = room.occluder_points() if room else []
 	for i in panels.size():
 		panels[i].set_layer_order(-1 - i)
-		panels[i].draw_mesh_over_layer(_hides_any(panels[i], eye, room_points))
+	_occlusion_s += delta
+	if _occlusion_s < OCCLUSION_S:
+		return
+	_occlusion_s = 0.0
+	var room_points: Array = room.occluder_points() if room and room.state == Room.State.IN else []
+	for p in panels:
+		p.draw_mesh_over_layer(not room_points.is_empty() and _hides_any(p, eye, room_points))
 
 ## Whether `panel` stands between the eye and one of `points` (world).
 func _hides_any(panel: Node3D, eye: Vector3, points: Array) -> bool:
