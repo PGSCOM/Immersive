@@ -137,7 +137,7 @@ func set_profile(p: Dictionary) -> void:
 		_label.text = display_name
 	var share := {}
 	var s = p.get("share", {})
-	if typeof(s) == TYPE_DICTIONARY and str(s.get("ip", "")).is_valid_ip_address():
+	if typeof(s) == TYPE_DICTIONARY and watchable_ip(str(s.get("ip", ""))):
 		var port := _num(s.get("port"), 0.0)
 		var code := _num(s.get("code"), 0.0)
 		if port >= 1 and port <= 65535 and code >= 1 and code <= 0x7FFFFFFF:
@@ -160,6 +160,18 @@ func set_profile(p: Dictionary) -> void:
 			_layouts[int(_num(sc.get("id"), -1.0))] = {"xform": t,
 				"w": clampf(_num(sc.get("w"), 1.6), 0.4, 4.0), "curve": clampf(_num(sc.get("c"), 0.0), 0.0, 1.0)}
 	_place_screens()
+
+## Whether a PC to watch may be at `ip` (from the network: anyone in the room
+## could name any address, and every headset would connect there): an IPv4
+## address of a local network or a VPN: 10/8, 172.16/12, 192.168/16, 100.64/10
+## (CGNAT: Tailscale) or link-local 169.254/16. Never loopback (over USB that
+## is our own PC), a public address, multicast or broadcast.
+static func watchable_ip(ip: String) -> bool:
+	if not ip.is_valid_ip_address() or ip.count(".") != 3:
+		return false
+	var o := Array(ip.split(".")).map(func(v): return int(v))
+	return o[0] == 10 or (o[0] == 172 and o[1] >= 16 and o[1] <= 31) or (o[0] == 192 and o[1] == 168) \
+		or (o[0] == 100 and o[1] >= 64 and o[1] <= 127) or (o[0] == 169 and o[1] == 254 and o[3] != 255)
 
 ## 12 numbers from the network (basis columns, origin) as a placement, or null.
 static func _xform(x: Variant) -> Variant:

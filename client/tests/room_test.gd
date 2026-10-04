@@ -73,6 +73,13 @@ func _run() -> void:
 	p.set_profile({"name": "Ana", "share": {"ip": "10.0.0.2", "port": {}, "code": "7"}})
 	check(p.display_name == "Ana" and p.watch_state() == "" and p.mic_on and p._layouts.is_empty(),
 		"bad share and screen fields are ignored -> screens '%s'" % p.watch_state())
+	var ok_ips := ["10.0.0.2", "172.16.4.1", "172.31.255.1", "192.168.1.20", "100.101.102.103", "169.254.0.21"]
+	var bad_ips := ["127.0.0.1", "0.0.0.0", "8.8.8.8", "172.32.0.1", "192.169.1.1", "224.0.0.1",
+		"255.255.255.255", "100.128.0.1", "::1", "fe80::1", "192.168.1"]
+	check(ok_ips.all(Participant.watchable_ip) and not bad_ips.any(Participant.watchable_ip),
+		"a PC to watch must be on a local network or a VPN -> %s" % [bad_ips.filter(Participant.watchable_ip)])
+	p.set_profile({"name": "Ana", "share": {"ip": "127.0.0.1", "port": 19800, "code": 7}})
+	check(p.watch_state() == "", "a share at 127.0.0.1 (our own PC over USB) is ignored")
 	var at := Transform3D(Basis(Vector3.UP, 0.3), Vector3(-0.4, 1.5, -1.2))
 	var b := at.basis
 	p.set_profile({"name": "Ana", "screens": [{"id": 1, "w": 1.2, "c": 0.0,

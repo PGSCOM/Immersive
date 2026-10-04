@@ -1203,6 +1203,9 @@ func _announce_share() -> void:
 	if not ip.is_valid_ip_address():
 		ui_overlay.set_notice("Your screens cannot be shared: the PC did not say its network address.")
 		return
+	if not Participant.watchable_ip(ip):  # the others would not connect there
+		ui_overlay.set_notice("Your screens cannot be shared: the PC's address %s is not on a local network or a VPN." % ip)
+		return
 	room.set_share({"ip": ip, "port": host_tcp_port, "code": _watch_code})
 	_room_screens_s = 1.0
 

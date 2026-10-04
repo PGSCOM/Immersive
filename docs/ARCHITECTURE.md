@@ -154,7 +154,10 @@ No server and no account: a room is a handful of headsets talking directly.
   3 KB/s of poses and 32 KB/s of voice per person talking.
 - **Screens never go through the room.** A headset that shares sends its PC a
   random WATCH_CODE and, once the host has it, tells the room the PC's
-  address, port and code. Everyone else connects to that PC directly as a
+  address, port and code. Headsets only connect to an address of a local
+  network or a VPN (`Participant.watchable_ip()`: 10/8, 172.16/12,
+  192.168/16, 100.64/10, 169.254/16), never loopback or a public one, so
+  nobody in the room can send everyone's headset somewhere else. Everyone else connects to that PC directly as a
   *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets a copy of its own:
   MJPEG at most 1280 wide and 8 fps, encoded on a thread of its own from the
   frames the PC streams to the sharer (`WatchStream` in `main.cpp`). Any
