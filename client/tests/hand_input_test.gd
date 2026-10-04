@@ -63,6 +63,11 @@ func stop_drag():
 	drag = null
 func get_drag_distance() -> float: return drag.distance if drag else 0.0
 func toggle_ui_overlay(): toggles += 1
+var xr_origin: Node3D = self
+var in_room := false
+var pulled := Vector3.ZERO
+func can_move() -> bool: return in_room
+func pull(before: Vector3, now: Vector3): pulled += now - before
 """
 
 ## Eyes at 1.6 m; the neck pivot and right shoulder that hand_input.gd guesses
@@ -74,6 +79,8 @@ const NECK := Vector3(0, 1.52, 0.10)
 const KNUCKLE := Vector3(0.16, 1.38, -0.45)
 ## Lower: the ray from the shoulder meets the bar zone (y 0.5 at z -1.5).
 const BAR_KNUCKLE := Vector3(0.16, 1.0775, -0.45)
+## Further right: the ray lands on nothing (x 1.44 at z -1.5): empty space.
+const EMPTY_KNUCKLE := Vector3(0.6, 1.38, -0.45)
 ## Further left: the ray lands on the menu zone (x -1.5 at z -1.5).
 const MENU_KNUCKLE := Vector3(-0.41, 1.38, -0.45)
 ## Where the controller in the Pico section points: about pixel (400, 540),
@@ -346,6 +353,31 @@ func _run() -> void:
 	_pose(MENU_KNUCKLE, 0.08)
 	await _frames(15)
 	check(main.ui == [true, false], "a pinch on the menu presses and releases its button -> %s" % [main.ui])
+
+	# --- A pinch in the air pulls us, in a room, past a dead zone -------------
+	for in_room in [false, true]:
+		main.in_room = in_room
+		main.pulled = Vector3.ZERO
+		_pose(EMPTY_KNUCKLE, 0.08)
+		await _frames(20)
+		_pose(EMPTY_KNUCKLE, 0.005)
+		await _frames(5)
+		_pose(EMPTY_KNUCKLE + Vector3(0, 0, 0.03), 0.005)  # 3 cm: still the dead zone
+		await _frames(5)
+		var small: Vector3 = main.pulled
+		for i in 10:  # then 10 cm more, towards us
+			_pose(EMPTY_KNUCKLE + Vector3(0, 0, 0.04 + 0.01 * i), 0.005)
+			await _frames(1)
+		await _frames(3)
+		var pulled_by: Vector3 = main.pulled
+		_pose(EMPTY_KNUCKLE, 0.08)
+		await _frames(15)
+		if in_room:
+			check(small == Vector3.ZERO and pulled_by.z > 0.07 and pulled_by.z < 0.10,
+				"in a room, a pinch in the air pulls once past its 4 cm dead zone -> %s, then %s" % [small, pulled_by])
+		else:
+			check(pulled_by == Vector3.ZERO, "alone, a pinch in the air pulls nothing -> %s" % pulled_by)
+	main.in_room = false
 
 	# --- A new hand tracker (the session restarted) is picked up ------------
 	XRServer.remove_tracker(hand)

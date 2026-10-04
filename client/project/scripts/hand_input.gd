@@ -93,9 +93,14 @@ var _last_pixel: Vector2i = Vector2i.ZERO
 ## Screen, menu or keyboard moved by a pinch on its bar, and the node that
 ## carries the ray for LaserDrag.
 var _grab: Node = null
-## A pinch on empty space pulls us along (main.gd::pull): where the knuckle
-## was last frame, in tracking space (XROrigin3D's own); null = no pull.
+## A pinch on empty space, in a room (main.gd::can_move), pulls us along
+## (main.gd::pull) once the hand has moved PULL_START_M: where the pinch
+## began and where the knuckle was last frame, in tracking space
+## (XROrigin3D's own); null = no pinch / not pulling yet. The dead zone keeps
+## a pinch that just missed a screen from shifting the world.
+var _pull_from: Variant = null
 var _pull_at: Variant = null
+const PULL_START_M := 0.04
 var _ray_node: Node3D = null
 
 # One Euro filter state for the ray direction (ZERO = start over).
@@ -191,6 +196,7 @@ func _let_go() -> void:
 	_point_pinching = false
 	_point_armed = false
 	_torso_yaw = NAN
+	_pull_from = null
 	_pull_at = null
 	_drop_grab()
 	_end_pinch_if_active()
@@ -244,13 +250,17 @@ func _process_pointing_hand(delta: float) -> void:
 		_ray_node.global_transform = Transform3D(Basis.looking_at(direction, up), origin)
 
 	# A pinch on empty space pulls us through the room until the fingers open.
-	if _pull_at != null:
+	if _pull_from != null:
 		if should_press:
 			var at: Vector3 = main_scene.xr_origin.to_local(_knuckle)
-			main_scene.pull(_pull_at, at)
-			_pull_at = at
+			if _pull_at != null:
+				main_scene.pull(_pull_at, at)
+				_pull_at = at
+			elif at.distance_to(_pull_from) > PULL_START_M:
+				_pull_at = at  # past the dead zone: the pull starts here, without a jump
 			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
 			return
+		_pull_from = null
 		_pull_at = null
 
 	# A pinch that grabbed a bar moves that thing until the fingers open.
@@ -302,8 +312,8 @@ func _process_pointing_hand(delta: float) -> void:
 			_point_at_panel(hit, should_press, origin, direction)
 		_:
 			_end_pinch_if_active()
-			if pressed_now and main_scene.has_method("pull"):
-				_pull_at = main_scene.xr_origin.to_local(_knuckle)
+			if pressed_now and main_scene.has_method("can_move") and main_scene.can_move():
+				_pull_from = main_scene.xr_origin.to_local(_knuckle)
 			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
 
 ## Mouse on the PC: the pinch is the left button, however long it is held.

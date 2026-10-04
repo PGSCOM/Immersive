@@ -172,8 +172,10 @@ No server and no account: a room is a handful of headsets talking directly.
 - **One room frame.** Poses, screens and whiteboards are sent in the room's
   frame (the world), not the tracking origin, so people can move: walking
   carries XROrigin3D through the world (left stick walks, right stick turns
-  30°, a pinch in the air pulls; "Back to my seat" returns), the others stay
-  where they are, and they see us come.
+  30°, a pinch in the air pulls once the hand has moved 4 cm; "Back to my
+  seat" returns), the others stay where they are, and they see us come. Only
+  in a room (`main.gd::can_move()`): alone, the sticks and a pinch in the air
+  do nothing, and leaving a room takes us back to our seat.
 - **Seats** (`Room.seat()`): everyone in one row, ordered by peer id, 3.2 m
   apart, facing the same way. Each `Participant` node sits at its seat; under
   it, the avatar, the shared screens and the whiteboard are in that person's

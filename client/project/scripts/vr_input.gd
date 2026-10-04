@@ -465,13 +465,13 @@ func _update_drag(delta: float) -> void:
 # Stick: walking and turning (main.gd), scrolling
 # ---------------------------------------------------------------------------
 
-## The stick walks (left controller) or turns one step (right controller)
-## while it has nothing else to do: not carrying something (then it pushes,
+## In a room (main.gd::can_move), the stick walks (left controller) or turns
+## one step (right controller) while it has nothing else to do: not carrying something (then it pushes,
 ## pulls and sizes it) nor, as the pointer, on a screen or the menu (then it
 ## scrolls). After that it must come back to the middle before it turns.
 func _update_locomotion(delta: float) -> void:
 	var busy := is_instance_valid(_dragging) or (active == self and _target in [Target.PANEL, Target.OVERLAY])
-	if busy or not main_scene or not main_scene.has_method("walk"):
+	if busy or not main_scene or not main_scene.has_method("can_move") or not main_scene.can_move():
 		_turn_held = true
 		return
 	if _is_right():

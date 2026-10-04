@@ -296,6 +296,19 @@ func _moving() -> void:
 	check(origin.position.is_equal_approx(Vector3(0, 0, -0.3 * m.PULL_GAIN)), "pulling the room walks us forward, level -> %s" % origin.position)
 	m.back_to_seat()
 	check(origin.transform == Transform3D.IDENTITY, "back to my seat")
+	check(not m.can_move(), "alone (no room), the sticks and a pinch in the air do not move us")
+	var r := Room.new()
+	root.add_child(r)
+	m.room = r
+	r.state = Room.State.IN
+	m._on_room_changed()
+	m.walk(Vector2(0, 1), 1.0)
+	check(m.can_move() and origin.transform != Transform3D.IDENTITY, "in a room they do")
+	r.state = Room.State.OFF
+	m._on_room_changed()
+	check(origin.transform == Transform3D.IDENTITY and not m.can_move(), "leaving the room takes us back to our seat")
+	m.room = null
+	r.queue_free()
 
 	var screen: Node3D = MeshInstance3D.new()
 	screen.script = load("res://scripts/screen_panel.gd")

@@ -1084,6 +1084,12 @@ const WALK_SPEED := 1.6     ## m/s with the stick all the way
 const TURN_STEP_DEG := 30.0
 const PULL_GAIN := 2.0      ## metres moved per metre the hand pulls
 
+## Whether the sticks and a pinch in the air move us: only in a room, where
+## there is somewhere to go and "Back to my seat". Leaving the room takes us
+## back to it (_on_room_changed), so our own screens are where we left them.
+func can_move() -> bool:
+	return room != null and room.state == Room.State.IN
+
 ## Walk along the floor, where we look: stick up = forward.
 func walk(stick: Vector2, delta: float) -> void:
 	var fwd := -xr_camera.global_basis.z
@@ -1151,9 +1157,15 @@ func _person_name() -> String:
 	var model := OS.get_model_name()
 	return model if not model.is_empty() and model != "GenericDevice" else "Someone"
 
+var _was_in_room := false
+
 func _on_room_changed() -> void:
 	if not room:
 		return
+	var in_room := room.state == Room.State.IN
+	if _was_in_room and not in_room:
+		back_to_seat()
+	_was_in_room = in_room
 	_update_share()
 	if not ui_overlay:
 		return
