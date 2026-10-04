@@ -731,7 +731,9 @@ function renderHeadsets(list) {
     if (h.usb) link.firstChild.className = "";
     const grid = li.querySelector(".streams");
     const cells = [];
-    if (!live) cells.push(el("span", "idle", "Connected, not showing any screen yet."));
+    if (!live) cells.push(el("span", "idle", h.watching
+      ? "Watches the screens shared with its room. It cannot control this PC."
+      : "Connected, not showing any screen yet."));
     for (const s of h.streams) {
       const r = rate(`${h.id}:${s.monitor}`, s.frames, s.bytes);
       cells.push(

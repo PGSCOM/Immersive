@@ -61,6 +61,7 @@ const MSG_VIRTUAL_DISPLAY_CREATE: int = 0x22
 const MSG_VIRTUAL_DISPLAY_REMOVE: int = 0x23
 const MSG_VIRTUAL_DISPLAY_RESULT: int = 0x24
 const MSG_SCREEN_OFF: int            = 0x25
+const MSG_WATCH_CODE: int            = 0x26
 const MSG_FRAME_ACK: int             = 0x30
 const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
@@ -75,6 +76,7 @@ const VIDEO_HEADER_SIZE: int  = 9  # 1 + 4 + 2 + 2 bytes
 ## A parity chunk's payload starts with frame_size (u32) and parity_count (u16).
 const PARITY_HEADER_SIZE: int = 6
 const HELLO_FLAG_TCP_MEDIA: int = 0x01
+const HELLO_FLAG_WATCH: int = 0x02
 const REJECT_PIN_REQUIRED: int = 1
 const REJECT_WRONG_PIN: int = 2
 const REJECT_SERVER_FULL: int = 3
@@ -102,6 +104,12 @@ var _udp_port: int = 0
 var _tcp_media: bool = false
 ## Pairing PIN sent in HELLO (0 = none; the host skips it for 127.0.0.1).
 var _pin: int = 0
+## Watch only (a multiplayer room): the code another headset gave its PC,
+## sent in place of the PIN (protocol.h HELLO_FLAG_WATCH). 0 = a normal client.
+var _watch_code: int = 0
+## The PC's network address from HELLO_ACK ("" if the host did not say), so a
+## headset on the USB cable can tell its room where to watch from.
+var lan_address: String = ""
 
 ## Received video, for the stats line: frames and bytes since the last
 ## take_stats() call.
@@ -161,8 +169,10 @@ func _notification(what: int) -> void:
 
 ## Connect to the Immersive-2 host. tcp_media: receive video/audio on the TCP
 ## control socket instead of UDP (USB via adb reverse).
+## watch_code: only watch what the PC streams to another headset (see
+## _watch_code); the video comes to a port of our own, not udp_port.
 func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool = false,
-		pin: int = 0) -> void:
+		pin: int = 0, watch_code: int = 0) -> void:
 	# Cerrar conexiones previas limpiamente antes de reconectar
 	udp_client.close()
 	tcp_client.disconnect_from_host()
@@ -178,6 +188,8 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool
 	_udp_port = udp_port
 	_tcp_media = tcp_media
 	_pin = pin
+	_watch_code = watch_code
+	lan_address = ""
 
 	_connect_deadline_ms = Time.get_ticks_msec() + CONNECT_TIMEOUT_MS
 	tcp_client.connect_to_host(ip, tcp_port)
@@ -255,28 +267,35 @@ func _on_tcp_connected() -> void:
 	# the whole frame fail to reassemble, which looks like stutter, artifacts or a
 	# frozen/black screen. PacketPeerUDP.bind()'s recv_buffer_size (bytes) is the
 	# queue capacity in Godot 4; 8 MB gives generous headroom for motion bursts.
-	var bind_err := OK if _tcp_media else udp_client.bind(_udp_port, "*", 8 * 1024 * 1024)
+	# A watcher takes any free port and tells the host which.
+	var bind_err := OK if _tcp_media else udp_client.bind(0 if _watch_code else _udp_port, "*", 8 * 1024 * 1024)
 	if bind_err != OK:
 		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
 
-	tcp_client.put_data(hello_message(_tcp_media, _pin))
+	if _watch_code:
+		tcp_client.put_data(hello_message(false, _watch_code, " watching", HELLO_FLAG_WATCH,
+			udp_client.get_local_port()))
+	else:
+		tcp_client.put_data(hello_message(_tcp_media, _pin))
 	connected_to_host.emit()
 
 ## A whole HELLO message: version, name[32] (shown in the host's log; `note`
-## is appended to it), flags, pairing PIN.
-static func hello_message(tcp_media: bool, pin: int, note: String = "") -> PackedByteArray:
+## is appended to it), flags, pairing PIN (or watch code), video UDP port.
+static func hello_message(tcp_media: bool, pin: int, note: String = "", flags: int = 0,
+		udp_port: int = 0) -> PackedByteArray:
 	var model := OS.get_model_name()
 	var name := model if model != "GenericDevice" and not model.is_empty() else "Immersive-2 VR"
 	var name_bytes := (name + note).to_utf8_buffer()
 	var msg := PackedByteArray()
-	msg.resize(5 + 38)
+	msg.resize(5 + 40)
 	msg[0] = MSG_HELLO
-	msg.encode_u32(1, 38)
+	msg.encode_u32(1, 40)
 	msg[5] = PROTOCOL_VERSION
 	for i in range(min(name_bytes.size(), 31)):
 		msg[6 + i] = name_bytes[i]
-	msg[5 + 33] = HELLO_FLAG_TCP_MEDIA if tcp_media else 0
+	msg[5 + 33] = flags | (HELLO_FLAG_TCP_MEDIA if tcp_media else 0)
 	msg.encode_u32(5 + 34, pin)
+	msg.encode_u16(5 + 38, udp_port)
 	return msg
 
 ## Select a monitor to stream.
@@ -371,11 +390,13 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				var host_name := payload.slice(4, 68).get_string_from_utf8() \
 					if payload.size() >= 68 else ""
 				var host_flags: int = payload[68] if payload.size() >= 69 else 0
+				if payload.size() >= 73 and payload.decode_u32(69) != 0:
+					lan_address = "%d.%d.%d.%d" % [payload[69], payload[70], payload[71], payload[72]]
 				print("[Network] HELLO_ACK: version=%d udp_port=%d monitors=%d host=%s flags=%d" %
 					[version, udp_port, monitor_count, host_name, host_flags])
 				# The host sends video to our address at ITS UDP port: listen
 				# there, whatever port this client was configured with.
-				if not _tcp_media and udp_port > 0 and udp_port != _udp_port:
+				if not _tcp_media and not _watch_code and udp_port > 0 and udp_port != _udp_port:
 					_udp_port = udp_port
 					udp_client.close()
 					if udp_client.bind(_udp_port, "*", 8 * 1024 * 1024) != OK:
@@ -747,6 +768,13 @@ func send_virtual_display_remove(monitor_id: int) -> void:
 ## while this is re-sent: main.gd repeats it every 2 s (protocol.h ScreenOff).
 func send_screen_off(off: bool) -> void:
 	_send_control_message(MSG_SCREEN_OFF, PackedByteArray([1 if off else 0]))
+
+## Let headsets that show `code` watch what this PC streams to us (0: nobody).
+func send_watch_code(code: int) -> void:
+	var payload := PackedByteArray()
+	payload.resize(4)
+	payload.encode_u32(0, code)
+	_send_control_message(MSG_WATCH_CODE, payload)
 
 ## Send a frame acknowledgement.
 func send_frame_ack(monitor_id: int, frame_number: int) -> void:

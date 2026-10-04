@@ -79,6 +79,9 @@ The client runs on VR headsets (and on a PC for testing) and:
 5. **Takes input** — both controllers (`vr_input.gd`), bare hands
    (`hand_input.gd`), the VR keyboard (`virtual_keyboard.gd`) and, on the
    headset, a Bluetooth keyboard (`key_map.gd`).
+6. **Shares a room**: several people, each with their own PC, see each
+   other's avatars, talk, and watch the screens each one shares
+   (`room.gd`, `participant.gd`, see below).
 
 #### Component Architecture
 
@@ -99,6 +102,72 @@ The client runs on VR headsets (and on a PC for testing) and:
 same tokens as the web page). `laser_drag.gd` is how screens, menu and
 keyboard are moved: the grabbed point stays on the pointer ray and the object
 keeps facing the head.
+
+## Multiplayer rooms
+
+No server and no account: a room is a handful of headsets talking directly.
+
+```
+   Ana's PC ──────── video (watch) ────────────┐
+      │ her own stream                         ▼
+   Ana's headset ◄══ room (ENet, UDP 19820) ══► Ben's headset
+   (opened the room,  poses · voice · profiles      │ his own stream
+    relays the rest)                             Ben's PC ── video (watch) ──► Ana's headset
+```
+
+- **The room** (`room.gd`) is Godot's high-level multiplayer over ENet. One
+  headset opens it (UDP 19820, `--im2-room-port` in tests) and relays between
+  the others; it also answers LAN discovery on 19821, so the Room tab lists
+  it. Joining takes its address and its six-digit PIN (SceneMultiplayer
+  authentication; five wrong PINs lock an address out for a minute). Over the
+  internet that means a VPN (Tailscale, ZeroTier...) or a forwarded port: the
+  room and each sharer's PC must be reachable. If the headset that opened the
+  room leaves, the room closes.
+- **What goes through it**: each person's *profile* (name, microphone on or
+  off, how to watch their PC, where their shared screens and their
+  whiteboard hang) when it changes; their *pose* (head and both hands, 30
+  times a second, unreliable); their *voice* (microphone on a muted bus with
+  an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms PCM-16
+  packets, only while it passes a noise gate); their *ink*: every change to
+  their whiteboard as it happens (`Whiteboard.ink` ops: a stroke begins, goes
+  on, undo, clear; reliable, each with its author), all of it again for
+  whoever joins later. Someone the owner lets draw (the profile lists them)
+  draws on their copy; the ops go to the owner (`_draw_on`), who replays them
+  and passes them on, so the owner's board is the one that counts.
+- **Permissions** (the Room tab's page, `Room.pref()`): per person, whether we
+  see their whiteboard and their screens (off: not even downloaded) and hear
+  their voice, all only on our side, and whether they may draw on our board.
+  This session only. About
+  3 KB/s of poses and 32 KB/s of voice per person talking.
+- **Screens never go through the room.** A headset that shares sends its PC a
+  random WATCH_CODE and, once the host has it, tells the room the PC's
+  address, port and code. Everyone else connects to that PC directly as a
+  *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets a copy of its own:
+  MJPEG at most 1280 wide and 8 fps, encoded on a thread of its own from the
+  frames the PC streams to the sharer (`WatchStream` in `main.cpp`). Any
+  client decodes it (a PC too), it takes a few Mbps whatever the sharer
+  streams at, and the sharer's own stream never depends on who watches. A
+  watcher can do nothing but watch. Sharing is off by default and never saved.
+- **One room frame.** Poses, screens and whiteboards are sent in the room's
+  frame (the world), not the tracking origin, so people can move: walking
+  carries XROrigin3D through the world (left stick walks, right stick turns
+  30°, a pinch in the air pulls; "Back to my seat" returns), the others stay
+  where they are, and they see us come.
+- **Seats** (`Room.seat()`): everyone in one row, ordered by peer id, 3.2 m
+  apart, facing the same way. Each `Participant` node sits at its seat; under
+  it, the avatar, the shared screens and the whiteboard are in that person's
+  own room frame, as they sent them. A shared screen can be grabbed by its bar
+  and brought closer; from then on it stays where it was put, here only.
+- **Avatars** (`participant.gd`): a head wearing a headset, shoulders and a
+  chest that turns after the head, two mitts where the controllers in use (or
+  else the tracked bare hands' palms) are, and the name, brighter while they
+  speak; one colour per seat (`UiTheme.PEOPLE`), the same colour their name
+  has in the menu. Their voice plays from their head (AudioStreamPlayer3D).
+- **With "Sharper text"** our screens are compositor layers under Godot's
+  own, seen through a punched hole, and that hole let avatars behind a screen
+  show through it on the Pico. While anyone or anything of the room is behind
+  one of our screens, that screen draws its picture with its mesh as well
+  (`ScreenPanel.draw_mesh_over_layer`), which hides them by depth.
 
 ## Data Flow
 

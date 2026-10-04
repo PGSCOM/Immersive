@@ -19,6 +19,7 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <map>
 #include <set>
@@ -85,6 +86,98 @@ namespace {
             }
         }
     }
+
+    /// What watchers (protocol.h WatchCode) see of one stream: a copy of its
+    /// own, MJPEG (every client decodes it, a PC too), at most kWidth wide and
+    /// kFps, scaled and encoded on its own thread from the newest frame the
+    /// stream worker hands it, and sent to the watchers only. The owner's
+    /// stream (codec, rate, keyframes) never depends on who watches, and a
+    /// watcher needs no keyframe: every frame stands alone.
+    /// ponytail: MJPEG for everyone; H.264 to watchers that decode it would
+    /// take less of their Wi-Fi.
+    class WatchStream {
+    public:
+        static constexpr uint32_t kWidth = 1280, kFps = 8, kQuality = 60;
+
+        WatchStream(immersive::INetworkServer& server, uint32_t owner, uint8_t monitor_id,
+                    uint32_t width, uint32_t height, uint32_t first_frame)
+            : server_(server), owner_(owner), monitor_(monitor_id), frame_(first_frame) {
+            w_ = std::max(2u, std::min(width, kWidth) & ~1u);
+            h_ = std::max(2u, static_cast<uint32_t>(uint64_t(height) * w_ / std::max(width, 1u)) & ~1u);
+            immersive::protocol::StreamStart s{};
+            s.monitor_id = monitor_id;
+            s.width = static_cast<uint16_t>(w_);
+            s.height = static_cast<uint16_t>(h_);
+            s.codec = 2;  // MJPEG
+            s.first_frame = first_frame;
+            server_.send_watch_start(owner, s);
+            thread_ = std::thread([this] { run(); });
+        }
+
+        ~WatchStream() {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stop_ = true;
+            }
+            wake_.notify_one();
+            thread_.join();
+        }
+
+        /// The frame (BGRA) the stream just sent: copied for the watchers when
+        /// somebody watches, the last one is done and 1/kFps has passed.
+        void offer(const uint8_t* pixels, uint32_t w, uint32_t h, uint32_t pitch) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_ < std::chrono::milliseconds(1000 / kFps) || !server_.has_watchers(owner_)) return;
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            if (!lock.owns_lock() || pending_) return;
+            src_.assign(pixels, pixels + static_cast<size_t>(pitch) * h);
+            src_w_ = w;
+            src_h_ = h;
+            src_pitch_ = pitch;
+            pending_ = true;
+            last_ = now;
+            wake_.notify_one();
+        }
+
+    private:
+        void run() {
+            auto encoder = immersive::create_encoder(immersive::EncoderBackend::SOFTWARE);
+            immersive::EncoderConfig cfg;
+            cfg.width = w_;
+            cfg.height = h_;
+            cfg.fps = kFps;
+            cfg.jpeg_quality = kQuality;
+            const bool ok = encoder && encoder->initialize(cfg);
+            std::vector<uint8_t> scaled(static_cast<size_t>(w_) * h_ * 4);
+            std::unique_lock<std::mutex> lock(mutex_);
+            for (;;) {
+                wake_.wait(lock, [this] { return stop_ || pending_; });
+                if (stop_) return;
+                scale_bgra_bilinear(src_.data(), src_w_, src_h_, src_pitch_, scaled.data(), w_, h_);
+                pending_ = false;  // a new frame may be offered while this one encodes
+                lock.unlock();
+                if (ok) {
+                    for (const auto& pkt : encoder->encode(scaled.data(), w_, h_, w_ * 4, 0))
+                        server_.send_watch_packet(owner_, monitor_, frame_++, pkt.data.data(),
+                                                  static_cast<uint32_t>(pkt.data.size()));
+                }
+                lock.lock();
+            }
+        }
+
+        immersive::INetworkServer& server_;
+        const uint32_t owner_;
+        const uint8_t monitor_;
+        uint32_t w_ = 0, h_ = 0;
+        uint32_t frame_;
+        std::chrono::steady_clock::time_point last_{};
+        std::mutex mutex_;
+        std::condition_variable wake_;
+        bool stop_ = false, pending_ = false;
+        std::vector<uint8_t> src_;
+        uint32_t src_w_ = 0, src_h_ = 0, src_pitch_ = 0;
+        std::thread thread_;
+    };
 
     /// Run a shell command and wait for it. popen, not std::system: POSIX
     /// system() ignores SIGINT while the child runs, so a Ctrl+C landing
@@ -776,6 +869,7 @@ int main(int argc, char* argv[]) {
         start_info.codec       = actual_codec;  // 0=H264 1=HEVC 2=MJPEG 3=AV1
         start_info.first_frame = first_frame;
         server->send_stream_start(client_id, start_info);
+        WatchStream watch(*server, client_id, monitor_id, out_w, out_h, first_frame);
         ctx->codec = actual_codec;
         ctx->width = static_cast<uint16_t>(out_w);
         ctx->height = static_cast<uint16_t>(out_h);
@@ -983,6 +1077,7 @@ int main(int argc, char* argv[]) {
                 frame_number++;  // number only frames actually sent
                 ctx->frames++;
                 last_sent = now;
+                watch.offer(pixels, w, h, pitch);
             }
             last_frame = std::move(frame);
             last_frame_unsent = false;
@@ -1020,10 +1115,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto send_stream_stop = [&](uint32_t client_id, uint8_t monitor_id) {
-        immersive::protocol::StreamStop stop_msg = { monitor_id };
-        server->send_control_message(client_id,
-                                     immersive::protocol::MessageType::STREAM_STOP,
-                                     &stop_msg, sizeof(stop_msg));
+        server->send_stream_stop(client_id, monitor_id);
     };
 
     // Stop every stream. Caller holds ops_mutex.

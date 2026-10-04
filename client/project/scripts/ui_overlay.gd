@@ -1,10 +1,13 @@
 ## The in-VR menu: a 2D UI in a SubViewport, shown on a floating panel.
 ##
-## Five tabs: Connect (PCs found on the network, an address keypad, USB,
+## Six tabs: Connect (PCs found on the network, an address keypad, USB,
 ## PIN pairing), Screens (which monitors, arrangement, curvature), Space
 ## (surroundings, passthrough, snapping and locking screens), Quality (codec, resolution,
-## frame rate, bitrate) and Input (pointing hand, ray angle, how screens turn
-## while moved, vibration). A status line in the header says what is going on.
+## frame rate, bitrate), Input (pointing hand, ray angle, how screens turn
+## while moved, vibration) and Room (multiplayer: rooms found on the network,
+## joining by address and PIN, opening one; inside, who is there, the room's
+## PIN, the microphone and sharing this PC's screens). A status line in the
+## header says what is going on.
 ## Stays where it was opened; move it by the bar under it or with the grip.
 ##
 ## Holds no settings of its own: main.gd owns and saves them and pushes them
@@ -24,6 +27,7 @@ signal monitor_selected(monitor_id: int)
 signal arrange_requested
 signal recenter_requested
 signal keyboard_toggle_requested
+signal whiteboard_toggle_requested
 signal screen_curvature_changed(enabled: bool, amount: float)
 ## "night" / "dusk" / "void" / "passthrough"
 signal look_changed(look: String)
@@ -49,6 +53,18 @@ signal lock_toggled(enabled: bool)
 ## ray tilt in degrees · face_me: grabbed screens turn to the head.
 signal pointer_settings_changed(hand: String, ray_angle: float, face_me: bool)
 signal compositor_layers_toggled(enabled: bool)
+## Multiplayer room: open one here, join one (address, port, PIN), leave it.
+signal room_open_requested
+signal room_join_requested(ip: String, port: int, pin: int)
+signal room_leave_requested
+## "Back to my seat": undo the walking (main.gd::back_to_seat()).
+signal room_seat_requested
+## The Permissions page: what we see / hear of person `peer_id` ("board",
+## "screens", "voice") or whether they may draw on our whiteboard ("draw").
+signal room_permission_changed(peer_id: int, what: String, on: bool)
+signal room_mic_toggled(on: bool)
+## "Show my screens to the room".
+signal room_share_toggled(on: bool)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -60,7 +76,8 @@ const VIEW_SIZE := Vector2i(1000, 680)
 var panel_height: float = panel_width * VIEW_SIZE.y / VIEW_SIZE.x
 
 const AUTO_APPLY_DELAY := 0.45
-const TAB_NAMES := ["Connect", "Screens", "Space", "Quality", "Input"]
+const TAB_NAMES := ["Connect", "Screens", "Space", "Quality", "Input", "Room"]
+const ROOM_TAB := 5
 const LOOKS := [["Night", "night"], ["Dusk", "dusk"], ["Void", "void"], ["Passthrough", "passthrough"]]
 
 enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, STREAMING }
@@ -108,6 +125,14 @@ var _layers_enabled := false
 var _pin_visible := false
 var _last_pointer_uv := Vector2(0.5, 0.5)
 var _tab := 0
+## The room as main.gd last pushed it (set_room): state (0 none, 1 joining,
+## 2 in), host, address, pin, people, mic, share, pc (connected to the PC).
+var _room := {}
+var _found_rooms: Array = []
+var _room_text := ["", ""]   ## address and PIN as typed
+var _room_field := 0         ## the cell the keypad types into
+var _room_port := 19820      ## for an address typed by hand
+var _room_join_port := 19820 ## the room picked from the list may use another
 var _drag: LaserDrag = null
 ## The bar under the menu; main.gd::pick() tests it.
 var grab_bar: GrabBar = null
@@ -208,6 +233,30 @@ var _slider_ray: HSlider
 var _lbl_ray_value: Label
 var _chk_face_me: CheckButton
 var _chk_haptics: CheckButton
+
+# Room tab
+var _room_out: Control
+var _rooms_list: VBoxContainer
+var _btn_room_open: Button
+var _room_cells: Array = []
+var _lbl_room_hint: Label
+var _btn_room_join: Button
+var _room_in: Control
+var _lbl_room_title: Label
+var _people_list: VBoxContainer
+var _lbl_room_pin: Label
+var _lbl_room_where: Label
+var _chk_mic: CheckButton
+var _chk_share: CheckButton
+var _lbl_share_note: Label
+var _perm_scroll: ScrollContainer
+var _perm_grid: GridContainer
+var _lbl_perm_empty: Label
+var _perm_ids: Array = []          ## whose rows the table has now
+var _perm_switches := {}           ## [peer id, key] -> CheckButton
+## The Permissions page's columns: [heading, Room.pref() key, people() field].
+const PERMISSIONS := [["Their whiteboard", "board", "see_board"], ["Their screens", "screens", "see_screens"],
+	["Their voice", "voice", "hear"], ["Draws on mine", "draw", "draw"]]
 
 # Styles
 var _st_button: Dictionary
@@ -805,7 +854,8 @@ func _build_ui() -> void:
 	var pages := Control.new()
 	pages.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	column.add_child(pages)
-	for builder in [_build_connect_tab, _build_screens_tab, _build_space_tab, _build_quality_tab, _build_input_tab]:
+	for builder in [_build_connect_tab, _build_screens_tab, _build_space_tab, _build_quality_tab,
+			_build_input_tab, _build_room_tab]:
 		var page := ScrollContainer.new()
 		page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		page.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -825,6 +875,16 @@ func _build_ui() -> void:
 	vs_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_vs_scroll.add_child(vs_body)
 	_build_virtual_page(vs_body)
+	# The Permissions page shows over the Room tab.
+	_perm_scroll = ScrollContainer.new()
+	_perm_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_perm_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_perm_scroll.hide()
+	pages.add_child(_perm_scroll)
+	var perm_body := _vbox(14)
+	perm_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_perm_scroll.add_child(perm_body)
+	_build_permissions_page(perm_body)
 
 	_apply_debounce = Timer.new()
 	_apply_debounce.one_shot = true
@@ -855,6 +915,9 @@ func _build_ui() -> void:
 	_rebuild_monitor_list()
 	_refresh_quality_ui()
 	_refresh_input_tab()
+	_refresh_room()
+	_refresh_room_form()
+	_rebuild_rooms_list()
 	set_screen_curvature(_curved_enabled, _curvature_amount)
 	set_look(_look, _passthrough_supported)
 	_refresh_control()
@@ -863,6 +926,8 @@ func _select_tab(i: int) -> void:
 	_tab = i
 	if _vs_scroll:
 		_vs_scroll.hide()
+	if _perm_scroll:
+		_perm_scroll.hide()
 	for j in _tab_pages.size():
 		_tab_pages[j].visible = j == i
 		var b: Button = _tab_buttons[j]
@@ -1168,6 +1233,9 @@ func _build_screens_tab(body: VBoxContainer) -> void:
 	_btn_keyboard = _button("Keyboard")
 	_btn_keyboard.pressed.connect(func(): keyboard_toggle_requested.emit())
 	actions.add_child(_btn_keyboard)
+	var btn_board := _button("Whiteboard")
+	btn_board.pressed.connect(func(): whiteboard_toggle_requested.emit())
+	actions.add_child(btn_board)
 	# An extra screen that exists only in the headset (the PC makes it).
 	_btn_add_virtual = _button("New virtual screen")
 	_btn_add_virtual.pressed.connect(func(): virtual_page_requested.emit(-1))
@@ -1677,6 +1745,359 @@ func _refresh_input_tab() -> void:
 	_slider_ray.set_value_no_signal(_ray_angle)
 	_lbl_ray_value.text = "%d°" % int(_ray_angle)
 	_chk_face_me.set_pressed_no_signal(_face_me)
+
+# ---------------------------------------------------------------------------
+# Room tab
+# ---------------------------------------------------------------------------
+
+## What main.gd knows about the room (see _room).
+func set_room(info: Dictionary) -> void:
+	_room = info
+	_refresh_room()
+
+## Rooms answering on this network (HostDiscovery entries).
+func set_found_rooms(rooms: Array) -> void:
+	_found_rooms = rooms
+	_rebuild_rooms_list()
+
+## The address joined last and the port rooms use.
+func set_room_defaults(address: String, port: int) -> void:
+	_room_port = port
+	_room_join_port = port
+	if address.is_valid_ip_address():
+		_room_text[0] = address
+	_refresh_room_form()
+
+func showing_room_tab() -> bool:
+	return _tab == ROOM_TAB
+
+func _build_room_tab(body: VBoxContainer) -> void:
+	# Not in a room: rooms found on this network | join one by address and PIN.
+	_room_out = _hbox(28)
+	_room_out.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(_room_out)
+	var found := _vbox(12)
+	found.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	found.size_flags_stretch_ratio = 1.35
+	_room_out.add_child(found)
+	_heading(found, "Rooms on this network")
+	_rooms_list = _vbox(10)
+	found.add_child(_rooms_list)
+	# Opening one sits at the foot, its button level with Join across.
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 8
+	gap.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	found.add_child(gap)
+	_heading(found, "Or open one")
+	var note := _label("The others see your avatar and hear you. Your screens stay private until you share them.", 17, UiTheme.INK_3)
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	found.add_child(note)
+	_btn_room_open = _button("Open a room")
+	_btn_room_open.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	_btn_room_open.pressed.connect(func(): room_open_requested.emit())
+	found.add_child(_btn_room_open)
+
+	var by_hand := _vbox(12)
+	by_hand.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_room_out.add_child(by_hand)
+	_heading(by_hand, "Join by address")
+	var cells := _hbox(8)
+	by_hand.add_child(cells)
+	for i in 2:
+		var cell := Button.new()
+		cell.focus_mode = Control.FOCUS_NONE
+		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		cell.size_flags_stretch_ratio = 1.7 if i == 0 else 1.0
+		cell.add_theme_font_size_override("font_size", 24)
+		cell.add_theme_stylebox_override("focus", UiTheme.empty())
+		cell.pressed.connect(func():
+			_room_field = i
+			_refresh_room_form())
+		cells.add_child(cell)
+		_room_cells.append(cell)
+	_lbl_room_hint = _label("", 17, UiTheme.INK_3)
+	_lbl_room_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	by_hand.add_child(_lbl_room_hint)
+	by_hand.add_child(_keypad(["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"], _on_room_key))
+	_btn_room_join = _button("Join", true)
+	_btn_room_join.pressed.connect(_on_room_join_pressed)
+	by_hand.add_child(_btn_room_join)
+
+	# In a room: who is there | its PIN, the switches, leaving.
+	_room_in = _hbox(28)
+	_room_in.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	body.add_child(_room_in)
+	var left := _vbox(12)
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_stretch_ratio = 1.35
+	_room_in.add_child(left)
+	_lbl_room_title = _label("", 26, UiTheme.INK, true)
+	_lbl_room_title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	left.add_child(_lbl_room_title)
+	_people_list = _vbox(8)
+	left.add_child(_people_list)
+	var perms := _button("Permissions")
+	perms.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	perms.pressed.connect(func(): _show_permissions(true))
+	left.add_child(perms)
+
+	var right := _vbox(12)
+	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_room_in.add_child(right)
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.SURFACE, 14, 18, 14))
+	right.add_child(card)
+	var card_col := _vbox(2)
+	card.add_child(card_col)
+	card_col.add_child(_label("Room PIN", 17, UiTheme.INK_3))
+	_lbl_room_pin = _label("", 44, UiTheme.INK, true)
+	card_col.add_child(_lbl_room_pin)
+	_lbl_room_where = _label("", 17, UiTheme.INK_2)
+	_lbl_room_where.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	card_col.add_child(_lbl_room_where)
+	_chk_mic = CheckButton.new()
+	_chk_mic.text = "Microphone"
+	_chk_mic.focus_mode = Control.FOCUS_NONE
+	_chk_mic.toggled.connect(func(on): room_mic_toggled.emit(on))
+	right.add_child(_chk_mic)
+	_chk_share = CheckButton.new()
+	_chk_share.text = "Show my screens to the room"
+	_chk_share.focus_mode = Control.FOCUS_NONE
+	_chk_share.toggled.connect(func(on): room_share_toggled.emit(on))
+	right.add_child(_chk_share)
+	_lbl_share_note = _label("", 17, UiTheme.INK_3)
+	_lbl_share_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	right.add_child(_lbl_share_note)
+	var actions := _hbox(10)
+	right.add_child(actions)
+	var seat := _button("Back to my seat")
+	seat.pressed.connect(func(): room_seat_requested.emit())
+	actions.add_child(seat)
+	var leave := _button("Leave room")
+	leave.pressed.connect(func(): room_leave_requested.emit())
+	actions.add_child(leave)
+	var move := _label("Pinch in the air and pull to walk over. Sticks: the left walks, the right turns.", 17, UiTheme.INK_3)
+	move.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	right.add_child(move)
+
+func _refresh_room() -> void:
+	if not _room_out:
+		return
+	var st: int = _room.get("state", 0)
+	_room_out.visible = st != 2
+	_room_in.visible = st == 2
+	if st != 2 and _perm_scroll.visible:
+		_show_permissions(false)
+	_refresh_permissions()
+	_btn_room_open.disabled = st == 1
+	_btn_room_join.disabled = st == 1
+	_btn_room_join.text = "Joining…" if st == 1 else "Join"
+	if st != 2:
+		return
+	var people: Array = _room.get("people", [])
+	var host := ""
+	for p in people:
+		if p.host:
+			host = p.name
+	_lbl_room_title.text = "Your room" if _room.get("host", false) \
+		else ("%s's room" % host if not host.is_empty() else "In a room")
+	var pin := str(_room.get("pin", 0))
+	_lbl_room_pin.text = "%s %s" % [pin.left(3), pin.right(3)]
+	_lbl_room_where.text = "Others find it on this network, or join at %s." % _room.get("address", "") \
+		if not str(_room.get("address", "")).is_empty() else "Others find it on this network."
+	_chk_mic.set_pressed_no_signal(_room.get("mic", true))
+	_chk_share.set_pressed_no_signal(_room.get("share", false))
+	_chk_share.disabled = not _room.get("pc", false)
+	_lbl_share_note.text = "They see the screens you have open here. They cannot control your PC." \
+		if _room.get("pc", false) else "Connect to your PC first: its screens are what you share."
+	for c in _people_list.get_children():
+		c.queue_free()
+	for p in people:
+		var row := PanelContainer.new()
+		row.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.SURFACE, 12, 18, 10))
+		_people_list.add_child(row)
+		var line := _hbox(14)
+		row.add_child(line)
+		# The name in their avatar's colour: the menu's key to who is who.
+		var who := _label(p.name + (" (you)" if p.me else ""), 22, p.tone)
+		who.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS  # a long PC name ends in "…", never sliced
+		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		line.add_child(who)
+		line.add_child(_label(_person_status(p), 18, UiTheme.INK if p.speaking else UiTheme.INK_3))
+
+func _person_status(p: Dictionary) -> String:
+	var bits := []
+	if p.speaking:
+		bits.append("speaking")
+	elif not p.mic:
+		bits.append("muted")
+	var n: int = p.get("count", 0)
+	match p.get("screens", ""):
+		"live":
+			bits.append("sharing %d %s" % [n, "screen" if n == 1 else "screens"] if n > 0 else "sharing")
+		"connecting":
+			bits.append("screens on the way")
+		"hidden":
+			bits.append("screens hidden")
+		"refused":
+			bits.append("screens refused")
+		"unreachable":
+			bits.append("their PC is out of reach")
+	return " · ".join(bits)
+
+func _build_permissions_page(body: VBoxContainer) -> void:
+	var top := _hbox(18)
+	body.add_child(top)
+	var back := _button("Back")
+	back.pressed.connect(func(): _show_permissions(false))
+	top.add_child(back)
+	top.add_child(_label("Permissions", 28, UiTheme.INK, true))
+	# One row per person, one column per switch: every switch of a column
+	# under its heading, whatever the names' lengths.
+	_perm_grid = GridContainer.new()
+	_perm_grid.columns = 1 + PERMISSIONS.size()
+	_perm_grid.add_theme_constant_override("h_separation", 12)
+	_perm_grid.add_theme_constant_override("v_separation", 14)
+	body.add_child(_perm_grid)
+	_lbl_perm_empty = _label("Nobody else is in the room yet.", 19, UiTheme.INK_3)
+	body.add_child(_lbl_perm_empty)
+	var note := _label("Turning off their whiteboard, screens or voice is only for you; their screens are not even downloaded then. \"Draws on mine\" lets them draw on your whiteboard.", 17, UiTheme.INK_3)
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.add_child(note)
+
+func _show_permissions(on: bool) -> void:
+	_perm_scroll.visible = on
+	_tab_pages[ROOM_TAB].visible = not on and _tab == ROOM_TAB
+	_refresh_permissions()
+
+## The table from _room's people: the switches show what main.gd says. Rows
+## are rebuilt only when people come or go (the room refreshes as people talk,
+## and a switch must not be swapped out under a pointer pressing it).
+func _refresh_permissions() -> void:
+	if not _perm_grid or not _perm_scroll.visible:
+		return
+	var others: Array = _room.get("people", []).filter(func(p): return not p.me)
+	_lbl_perm_empty.visible = others.is_empty()
+	_perm_grid.visible = not others.is_empty()
+	var ids := others.map(func(p): return p.id)
+	if ids == _perm_ids:
+		for p in others:
+			for col in PERMISSIONS:
+				_perm_switches[[p.id, col[1]]].set_pressed_no_signal(p.get(col[2], col[1] != "draw"))
+		return
+	_perm_ids = ids
+	_perm_switches.clear()
+	for c in _perm_grid.get_children():
+		_perm_grid.remove_child(c)
+		c.queue_free()
+	if others.is_empty():
+		return
+	var corner := Control.new()
+	corner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_perm_grid.add_child(corner)
+	for col in PERMISSIONS:
+		var h := _label(col[0], 17, UiTheme.INK_3)
+		h.custom_minimum_size.x = 150
+		h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_perm_grid.add_child(h)
+	for p in others:
+		var who := _label(p.name, 22, p.tone)
+		who.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_perm_grid.add_child(who)
+		for col in PERMISSIONS:
+			var sw := CheckButton.new()
+			sw.focus_mode = Control.FOCUS_NONE
+			sw.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			sw.button_pressed = p.get(col[2], col[1] != "draw")
+			var id: int = p.id
+			var what: String = col[1]
+			sw.toggled.connect(func(on): room_permission_changed.emit(id, what, on))
+			_perm_grid.add_child(sw)
+			_perm_switches[[id, what]] = sw
+
+func _rebuild_rooms_list() -> void:
+	if not _rooms_list:
+		return
+	for c in _rooms_list.get_children():
+		c.queue_free()
+	if _found_rooms.is_empty():
+		var l := _label("No rooms on this network yet. When someone opens one, it shows up here.", 19, UiTheme.INK_3)
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_rooms_list.add_child(l)
+		return
+	for r in _found_rooms:
+		var card := PanelContainer.new()
+		card.add_theme_stylebox_override("panel", UiTheme.box(UiTheme.SURFACE, 14, 18, 14))
+		_rooms_list.add_child(card)
+		var row := _hbox(14)
+		card.add_child(row)
+		var text := _vbox(2)
+		text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(text)
+		var title := _label("%s's room" % r.name, 24, UiTheme.INK, true)
+		title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		text.add_child(title)
+		var n: int = r.get("monitors", 1)
+		text.add_child(_label("%s · %d %s" % [r.ip, n, "person" if n == 1 else "people"], 17, UiTheme.INK_3))
+		var b := _button("Join", true)
+		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		var ip: String = r.ip
+		var port: int = r.port
+		var host: String = r.name
+		b.pressed.connect(func():
+			_room_text = [ip, ""]
+			_room_join_port = port
+			_room_field = 1
+			_refresh_room_form("Now its PIN: %s can read it on their Room tab." % host))
+		row.add_child(b)
+
+func _on_room_key(k: String) -> void:
+	var t: String = _room_text[_room_field]
+	if k == "⌫":
+		t = t.left(-1)
+	elif _room_field == 0:
+		if t.length() < 15:
+			t += k
+	elif k != "." and t.length() < 6:
+		t += k
+	_room_text[_room_field] = t
+	if _room_field == 0:
+		_room_join_port = _room_port  # typed by hand: the usual port
+	_refresh_room_form()
+
+func _on_room_join_pressed() -> void:
+	var ip: String = _room_text[0].strip_edges()
+	if not ip.is_valid_ip_address():
+		_room_field = 0
+		_refresh_room_form("Four numbers with dots, like 192.168.1.20", true)
+		return
+	if _room_text[1].length() != 6:
+		_room_field = 1
+		_refresh_room_form("The room's PIN has six digits.", true)
+		return
+	room_join_requested.emit(ip, _room_join_port, int(_room_text[1]))
+
+## The two cells (the one the keypad types into outlined) and the hint under
+## them: what to do next, or what is wrong.
+func _refresh_room_form(hint := "", error := false) -> void:
+	if _room_cells.is_empty():
+		return
+	for i in 2:
+		var cell: Button = _room_cells[i]
+		var t: String = _room_text[i]
+		cell.text = ["Address", "PIN"][i] if t.is_empty() \
+			else (t if i == 0 or t.length() <= 3 else "%s %s" % [t.left(3), t.substr(3)])
+		var st := UiTheme.box(UiTheme.WELL, 10, 8, 6)
+		if i == _room_field:
+			st.border_color = Color(UiTheme.INK, 0.55)
+			st.set_border_width_all(2)
+		for k in ["normal", "hover", "pressed", "hover_pressed"]:
+			cell.add_theme_stylebox_override(k, st)
+		for k in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color"]:
+			cell.add_theme_color_override(k, UiTheme.INK_3 if t.is_empty() else UiTheme.INK)
+	_lbl_room_hint.text = hint if not hint.is_empty() else "Its address, then its six-digit PIN."
+	_lbl_room_hint.add_theme_color_override("font_color", UiTheme.CLAY if error else UiTheme.INK_3)
 
 # ---------------------------------------------------------------------------
 # Quality tab

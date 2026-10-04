@@ -85,7 +85,9 @@ Immersive-2/
 │   │   ├── host_discovery.gd# Finds PCs on the LAN (UDP broadcast)
 │   │   ├── screen_panel.gd  # A screen: flat or curved mesh, ray hits, grab
 │   │   ├── laser_drag.gd    # Moving screens / menu / keyboard with a pointer
-│   │   ├── ui_overlay.gd    # VR menu: Connect, Screens, Space, Quality
+│   │   ├── ui_overlay.gd    # VR menu: Connect, Screens, Space, Quality, Input, Room
+│   │   ├── room.gd          # Multiplayer room: join/open, poses, voice, seats
+│   │   ├── participant.gd   # Someone in the room: avatar, voice, their shared screens
 │   │   ├── ui_theme.gd      # Colours and type shared by menu and keyboard
 │   │   ├── world.gd         # Sky, floor and light (night / dusk / void)
 │   │   ├── video_decoder.gd # H.264/HEVC/AV1 via the MediaCodec plugin
@@ -338,6 +340,38 @@ eye buffer. Godot punches a hole where the layer is, so the menu, keyboard and
 pointer still draw in front. Off by default; turn it off again if a runtime
 shows the screens wrong.
 
+### Multiplayer rooms
+
+Several people, each with their own PC, in one space: you see each other's
+avatars, talk, and can watch each other's screens. Room tab → **Open a room**
+on one headset; it shows a six-digit PIN. The others find the room in their
+Room tab (same network) or type its address, then the PIN. No server is
+involved: the headset that opened the room relays between the others (when it
+leaves, the room closes), and each shared screen comes straight from its PC.
+
+- **Show my screens to the room** shares the screens you have open, as they
+  hang around you; others cannot control your PC. Off by default, never saved.
+  They get a lighter copy (MJPEG, up to 1280 wide, 8 fps) straight from your
+  PC, so your own stream is untouched. Grab a shared screen by its bar to
+  bring it closer (only for you).
+- Your **whiteboard** shows to everyone in the room, stroke by stroke as you
+  draw. Grab someone else's by its bar to move it (only for you).
+- **Permissions** (Room tab): for each person, whether you see their
+  whiteboard and their screens and hear their voice (only for you), and
+  whether they may draw on your whiteboard. Off by default; turn it on and
+  they draw on theirs as on their own.
+- **Microphone** switches your voice off; others hear you from where your
+  avatar sits. The headset asks for microphone permission the first time.
+- Everyone sits in one row, 3.2 m apart; names in the menu have the colour of
+  their avatar. To go over to someone, pinch in the air and pull, or walk with
+  the left stick (the right stick turns); **Back to my seat** returns.
+- Trying it alone: `python3 host/tools/room_sandbox.py` starts "Ben" on the
+  PC (a second person with his own fake PC: he looks at you, waves, repeats
+  what you say and draws on his whiteboard).
+- Over the internet the room and each sharer's PC must be reachable: a VPN
+  such as Tailscale or ZeroTier, or forwarded ports (room UDP 19820, PC TCP
+  19800 + UDP 19801).
+
 ## MVP Roadmap
 
 ### Implemented ✓
@@ -386,6 +420,7 @@ shows the screens wrong.
 - [x] Passthrough background mode (mixed reality in supported headsets)
 - [x] Audio streaming (WASAPI loopback → UDP → AudioStreamGenerator)
 - [x] Multi-client support (up to 4 simultaneous VR headsets, `--max-clients N`)
+- [x] Multiplayer rooms: avatars, voice, watching each other's shared screens (no server)
 - [x] H.264 hardware decode on Android (MediaCodec path via Godot GPU Shader YUV→RGBA conversion)
 - [x] IDD virtual display driver (Auto-creates self-signed certificates, no test-signing or WHQL required)
 

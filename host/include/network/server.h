@@ -88,6 +88,17 @@ public:
     virtual void send_stream_start(uint32_t client_id,
                                    const protocol::StreamStart& info) = 0;
 
+    /// Send STREAM_STOP for a monitor, to the client and its watchers
+    virtual void send_stream_stop(uint32_t client_id, uint8_t monitor_id) = 0;
+
+    /// Watchers (protocol::WatchCode) get a copy of their own of `owner`'s
+    /// streams: announce one (also to watchers that join later), whether
+    /// anybody watches `owner` now, and one encoded frame of it, to them all.
+    virtual void send_watch_start(uint32_t owner, const protocol::StreamStart& info) = 0;
+    virtual bool has_watchers(uint32_t owner) const = 0;
+    virtual void send_watch_packet(uint32_t owner, uint8_t monitor_id, uint32_t frame_number,
+                                   const uint8_t* data, uint32_t size) = 0;
+
     /// Send an encoded video packet via UDP
     virtual void send_video_packet(uint32_t client_id,
                                    uint8_t monitor_id,
@@ -131,6 +142,7 @@ public:
         std::string name;       ///< from HELLO
         std::string address;    ///< peer IPv4
         bool        tcp_media;  ///< HELLO_FLAG_TCP_MEDIA (USB)
+        bool        watcher;    ///< HELLO_FLAG_WATCH: only watches another client's screens
     };
     /// Paired clients.
     virtual std::vector<ClientInfo> clients() const = 0;

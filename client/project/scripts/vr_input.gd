@@ -4,10 +4,11 @@ extends Node
 ## right); both work the same way and the one whose trigger was pressed last
 ## drives the pointer (the other hides its laser), like the system UI.
 ##
-##   Trigger          click (desktop, menu, keyboard); on the bar under a
-##                    screen, the menu or the keyboard: hold to move it
+##   Trigger          click (desktop, menu, keyboard), draw on the whiteboard;
+##                    on the bar under a screen, the menu, the keyboard or the
+##                    whiteboard: hold to move it
 ##   Grip, tap        right click on a screen
-##   Grip, hold       move the screen / menu / keyboard under the pointer;
+##   Grip, hold       move the screen / menu / keyboard / whiteboard under the pointer;
 ##                    while moving, stick up/down (or reaching out / pulling
 ##                    the hand in) pushes it away / pulls it in and stick
 ##                    left/right resizes a screen
@@ -33,6 +34,9 @@ const GRIP_RELEASE_THRESHOLD := 0.35
 ## A grip held this long on a screen grabs it; a shorter squeeze right-clicks.
 const GRIP_HOLD_TO_DRAG_S := 0.28
 const STICK_DEADZONE := 0.15
+## The right stick turns once pushed past TURN_PUSH, again once back under TURN_REARM.
+const TURN_PUSH := 0.7
+const TURN_REARM := 0.3
 ## Wheel units per second at full deflection (120 = one notch); the response
 ## is quadratic so a light push scrolls slowly.
 const SCROLL_SPEED := 1500.0
@@ -74,7 +78,7 @@ const MODEL_IN_GRIP := Transform3D(
 ## places the model.
 const MODEL_TIP := Vector3(0, -0.01, -0.03)
 
-enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
+enum Target { NONE, OVERLAY, KEYBOARD, BOARD, PANEL, BAR }
 
 ## The instance whose controller drives the pointer.
 static var active: Node = null
@@ -93,6 +97,7 @@ var _render_models: Node3D
 var _trigger_pressed := false
 var _grip_pressed := false
 var _stick := Vector2.ZERO
+var _turn_held := false  ## the right stick turned and has not come back yet
 
 var _target: Target = Target.NONE
 var _panel: Node3D = null
@@ -100,6 +105,8 @@ var _uv := Vector2(-1, -1)
 var _hit_distance := MAX_RAY_M
 ## What the grab bar under the pointer moves (Target.BAR).
 var _bar_target: Node = null
+## The whiteboard under the pointer (ours, or someone's that lets us draw).
+var _board_target: Node3D = null
 var _ray_angle := 40.0
 ## Desktop mouse buttons this controller holds down, and where it last sent
 ## them (so a release always reaches the host, even off the panel).
@@ -297,6 +304,7 @@ func _process(delta: float) -> void:
 			active = null
 		_set_role("put down" if controller.get_has_tracking_data() else "untracked")
 		return
+	_update_locomotion(delta)
 	if active == null:
 		active = self
 	if active != self:
@@ -336,6 +344,8 @@ func _update_pointer() -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 	_hit_distance = hit.get("distance", MAX_RAY_M)
 	match kind:
 		"overlay":
@@ -345,6 +355,11 @@ func _update_pointer() -> void:
 		"keyboard":
 			_set_target(Target.KEYBOARD, null)
 			main_scene.send_keyboard_pointer(origin, dir, _trigger_pressed)
+			return
+		"whiteboard":
+			_set_target(Target.BOARD, null)
+			_board_target = hit.get("board")
+			main_scene.send_whiteboard_pointer(origin, dir, _trigger_pressed)
 			return
 		"bar":
 			_set_target(Target.BAR, null)
@@ -447,8 +462,26 @@ func _update_drag(delta: float) -> void:
 		_hit_distance = _dragging.get_drag_distance()
 
 # ---------------------------------------------------------------------------
-# Stick scrolling
+# Stick: walking and turning (main.gd), scrolling
 # ---------------------------------------------------------------------------
+
+## The stick walks (left controller) or turns one step (right controller)
+## while it has nothing else to do: not carrying something (then it pushes,
+## pulls and sizes it) nor, as the pointer, on a screen or the menu (then it
+## scrolls). After that it must come back to the middle before it turns.
+func _update_locomotion(delta: float) -> void:
+	var busy := is_instance_valid(_dragging) or (active == self and _target in [Target.PANEL, Target.OVERLAY])
+	if busy or not main_scene or not main_scene.has_method("walk"):
+		_turn_held = true
+		return
+	if _is_right():
+		if absf(_stick.x) < TURN_REARM:
+			_turn_held = false
+		elif absf(_stick.x) > TURN_PUSH and not _turn_held:
+			_turn_held = true
+			main_scene.turn(1 if _stick.x > 0.0 else -1)
+	elif _stick.length() > STICK_DEADZONE:
+		main_scene.walk(_stick, delta)
 
 func _update_scroll(delta: float) -> void:
 	var s := Vector2(
@@ -551,7 +584,7 @@ func _set_trigger_state(pressed: bool) -> void:
 			Target.BAR:
 				_start_drag(_bar_target, true)
 			_:
-				pass  # the keyboard reads the trigger in _update_pointer()
+				pass  # the keyboard and whiteboard read the trigger in _update_pointer()
 	else:
 		if _drag_by_trigger:
 			_stop_drag()
@@ -580,6 +613,8 @@ func _set_grip_state(pressed: bool) -> void:
 				_start_drag(main_scene.get("ui_overlay"))
 			Target.KEYBOARD:
 				_start_drag(main_scene.get("virtual_keyboard"))
+			Target.BOARD:
+				_start_drag(_board_target if is_instance_valid(_board_target) else main_scene.get("whiteboard"))
 			Target.BAR:
 				_start_drag(_bar_target)
 			Target.PANEL:

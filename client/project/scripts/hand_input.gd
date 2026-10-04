@@ -8,6 +8,9 @@
 ##     the keyboard moves it until the pinch opens; reaching out / pulling the
 ##     hand in pushes it away / brings it closer (LaserDrag). A pinch on a
 ##     screen itself always stays a mouse click or drag, however long.
+##   • Either hand — touch the whiteboard with the index fingertip to draw on
+##     it (main.gd's whiteboard_touch); while it does, the pointing hand's ray
+##     rests.
 ##   • Other hand — turn its palm towards your face and a menu mark shows next
 ##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
 ##     left to the headset's own gestures.
@@ -90,6 +93,9 @@ var _last_pixel: Vector2i = Vector2i.ZERO
 ## Screen, menu or keyboard moved by a pinch on its bar, and the node that
 ## carries the ray for LaserDrag.
 var _grab: Node = null
+## A pinch on empty space pulls us along (main.gd::pull): where the knuckle
+## was last frame, in tracking space (XROrigin3D's own); null = no pull.
+var _pull_at: Variant = null
 var _ray_node: Node3D = null
 
 # One Euro filter state for the ray direction (ZERO = start over).
@@ -146,12 +152,25 @@ func _process(delta: float) -> void:
 	if tracked != _point_tracked:
 		_point_tracked = tracked
 		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
-	if tracked:
+	if tracked and _touch_board(_point_left):
+		_let_go()  # the fingertip draws: no ray meanwhile
+	elif tracked:
 		_process_pointing_hand(delta)
 	else:
 		_let_go()
+	if _has_hand(not _point_left):
+		_touch_board(not _point_left)
 
 	_process_menu_hand(not _point_left, delta)
+
+## The index fingertip of one hand on (or just in front of) the whiteboard.
+func _touch_board(left: bool) -> bool:
+	var tracker := hand_tracker(left)
+	var tip := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
+	if not main_scene or not main_scene.has_method("whiteboard_touch") \
+			or not _joint_has_valid_position(tracker, tip):
+		return false
+	return main_scene.whiteboard_touch(int(left), _joint_world_position(tracker, tip))
 
 ## The joint tracker of one hand. Looked up every time: Godot replaces it when
 ## the OpenXR session restarts, and a kept reference would go silently stale.
@@ -172,6 +191,7 @@ func _let_go() -> void:
 	_point_pinching = false
 	_point_armed = false
 	_torso_yaw = NAN
+	_pull_at = null
 	_drop_grab()
 	_end_pinch_if_active()
 	_hide_pointer_visual()
@@ -223,6 +243,16 @@ func _process_pointing_hand(delta: float) -> void:
 		var up := Vector3.RIGHT if absf(direction.dot(Vector3.UP)) > 0.99 else Vector3.UP
 		_ray_node.global_transform = Transform3D(Basis.looking_at(direction, up), origin)
 
+	# A pinch on empty space pulls us through the room until the fingers open.
+	if _pull_at != null:
+		if should_press:
+			var at: Vector3 = main_scene.xr_origin.to_local(_knuckle)
+			main_scene.pull(_pull_at, at)
+			_pull_at = at
+			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
+			return
+		_pull_at = null
+
 	# A pinch that grabbed a bar moves that thing until the fingers open.
 	if _grab != null:
 		if should_press and is_instance_valid(_grab):
@@ -238,6 +268,8 @@ func _process_pointing_hand(delta: float) -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 
 	if kind == "overlay":
 		_handle_overlay_hit(hit, should_press, origin, direction)
@@ -254,6 +286,10 @@ func _process_pointing_hand(delta: float) -> void:
 			main_scene.send_keyboard_pointer(origin, direction, should_press)
 			_pinch_active = should_press
 			_update_pointer_visual(origin, direction, hit.distance, true)
+		"whiteboard":
+			_end_pinch_if_active()
+			main_scene.send_whiteboard_pointer(origin, direction, should_press)
+			_update_pointer_visual(origin, direction, hit.distance, true)
 		"bar":
 			_end_pinch_if_active()
 			if is_instance_valid(hit.get("bar")):
@@ -266,6 +302,8 @@ func _process_pointing_hand(delta: float) -> void:
 			_point_at_panel(hit, should_press, origin, direction)
 		_:
 			_end_pinch_if_active()
+			if pressed_now and main_scene.has_method("pull"):
+				_pull_at = main_scene.xr_origin.to_local(_knuckle)
 			_update_pointer_visual(origin, direction, MAX_RAY_LENGTH, false)
 
 ## Mouse on the PC: the pinch is the left button, however long it is held.

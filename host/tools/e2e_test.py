@@ -21,13 +21,23 @@ Checks, in order:
   7. LAN discovery finds the host (client/tests/discovery_test.gd), and PIN
      pairing: over the PC's LAN address the client is refused without the
      PIN (and stops retrying), and streams with it.
-  8. Ctrl+C on the host exits promptly.
-  9. The in-VR menu works with pointer clicks (keypads, PIN, tabs, layout),
-     via client/tests/overlay_test.gd. Needs xvfb-run; skipped without it.
-  10. Headless unit checks: hand tracking (a pinch clicks where the hand
+  8. A virtual screen asked for from the headset streams.
+  9. Multiplayer: a second PC (host) and two clients in one room. A wrong
+     room PIN is refused; each sees the other's avatar (poses) and hears the
+     other's voice (a test tone), each watches the screens the other shares,
+     straight from the other's PC (protocol.h WatchCode, an MJPEG copy): the
+     right greys; Ben sees Ana's whiteboard with her line on it, and draws on
+     it (she lets whoever joins): his line lands on hers. Leaving shows on the
+     other side.
+  10. Ctrl+C on the host exits promptly.
+  11. The in-VR menu works with pointer clicks (keypads, PIN, tabs, layout,
+     the Room tab), via client/tests/overlay_test.gd. Needs xvfb-run;
+     skipped without it.
+  12. Headless unit checks: hand tracking (a pinch clicks where the hand
      points), controllers (clicks, grip right-click vs grab, idle hiding),
-     curved-screen ray hits, grabbing and the VR keyboard, and the video
-     FEC (lost UDP chunks rebuilt from parity, client/tests/fec_test.gd).
+     curved-screen ray hits, grabbing and the VR keyboard, the video FEC
+     (lost UDP chunks rebuilt from parity, client/tests/fec_test.gd) and the
+     room's pose/voice packets and seats (client/tests/room_test.gd).
 """
 import os
 import re
@@ -160,12 +170,12 @@ def step(msg):
     print(f"[e2e] {msg}")
 
 
-def start_host():
+def start_host(name="host", tcp=TCP_PORT, udp=UDP_PORT):
     # stdbuf: the host's stdout is block-buffered into a pipe otherwise.
     # --no-usb: USB is simulated here (Tunnel); leave real headsets alone.
-    host = Proc("host", ["stdbuf", "-oL", HOST_BIN, "--stub", "--no-ui", "--pin", PIN, "--no-usb",
-                         "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT),
-                         "--audio-port", str(UDP_PORT + 1)])
+    host = Proc(name, ["stdbuf", "-oL", HOST_BIN, "--stub", "--no-ui", "--pin", PIN, "--no-usb",
+                       "--tcp-port", str(tcp), "--udp-port", str(udp),
+                       "--audio-port", str(udp + 1)])
     procs.append(host)
     host.wait_for(r"\[Host\] Ready", 10)
     return host
@@ -183,9 +193,10 @@ def expect_streaming(client, since):
         expect_shade(client, mid, 64 + 48 * mid, start)
 
 
-def expect_shade(client, mid, want, since):
-    """Monitor `mid`'s panel shows grey `want` within 20 s."""
-    rx = re.compile(rf"panel mon={mid} \d+x\d+ center=(\w{{6}})")
+def expect_shade(client, mid, want, since, peer=None):
+    """Monitor `mid`'s panel shows grey `want` within 20 s (the one `peer`
+    shares in a room, if given)."""
+    rx = re.compile((rf"remote panel peer={peer} " if peer else "panel ") + rf"mon={mid} \d+x\d+ center=(\w{{6}})")
     end = time.time() + 20
     seen = None
     i = since
@@ -199,7 +210,7 @@ def expect_shade(client, mid, want, since):
                 if all(abs(c - want) <= 8 for c in got):
                     return
         time.sleep(0.05)
-    fail(f"monitor {mid} panel shows #{seen}, expected grey {want}")
+    fail(f"monitor {mid} panel{' of ' + peer if peer else ''} shows #{seen}, expected grey {want}")
 
 
 def main():
@@ -226,24 +237,24 @@ def main():
         "--im2-monitors=" + ",".join(map(str, MONITORS))])
     procs.append(client)
 
-    step("1/11 connect, stream and decode 3 monitors")
+    step("1/12 connect, stream and decode 3 monitors")
     expect_streaming(client, 0)
 
-    step("2/11 host killed -> client reconnects to a new host")
+    step("2/12 host killed -> client reconnects to a new host")
     mark = client.mark()
     host.stop()
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 10, mark)
     host = start_host()
     expect_streaming(client, mark)
 
-    step("3/11 host frozen -> client times out, then recovers")
+    step("3/12 host frozen -> client times out, then recovers")
     mark = client.mark()
     host.signal(signal.SIGSTOP)
     client.wait_for(r"\[Immersive-2\] Disconnected from host", 20, mark)
     host.signal(signal.SIGCONT)
     expect_streaming(client, mark)
 
-    step("4/11 host sockets use TCP keepalive")
+    step("4/12 host sockets use TCP keepalive")
     if shutil.which("ss"):
         # ss shows one timer: while a control message waits for its ACK that
         # is the retransmit timer ("on"), so look a few times.
@@ -258,7 +269,7 @@ def main():
     else:
         print("      (skipped: `ss` not available)")
 
-    step("5/11 USB mode: video over the TCP control socket")
+    step("5/12 USB mode: video over the TCP control socket")
     # Same thing a headset on a cable does through `adb reverse`.
     client.stop()
     procs.remove(client)
@@ -272,7 +283,7 @@ def main():
     expect_streaming(usb, 0)
     client_lines = client.lines + usb.lines
 
-    step("6/11 automatic USB: cable found, pulled and plugged back in")
+    step("6/12 automatic USB: cable found, pulled and plugged back in")
     usb.stop()
     procs.remove(usb)
     lan = lan_ip()
@@ -311,7 +322,7 @@ def main():
     else:
         print("      (skipped: this machine has no LAN address)")
 
-    step("7/11 LAN discovery and PIN pairing")
+    step("7/12 LAN discovery and PIN pairing")
     run_godot_test("discovery_test.gd")
     if lan:
         mark = host.mark()
@@ -336,7 +347,7 @@ def main():
     else:
         print("      (PIN over the network skipped: this machine has no LAN address)")
 
-    step("8/11 a virtual screen asked for from the headset")
+    step("8/12 a virtual screen asked for from the headset")
     for p in procs:
         if p is not host:
             p.stop()
@@ -351,7 +362,15 @@ def main():
     expect_shade(virt, 100, 208, 0)  # the --stub virtual screens' grey
     client_lines += virt.lines
 
-    step("9/11 Ctrl+C -> host exits")
+    step("9/12 multiplayer room: avatars, voice, each PC's screens shared")
+    virt.stop()
+    procs.remove(virt)
+    if lan:
+        client_lines += multiplayer(host)
+    else:
+        print("      (skipped: this machine has no LAN address, which watching another PC needs)")
+
+    step("10/12 Ctrl+C -> host exits")
     host.signal(signal.SIGINT)
     try:
         host.p.wait(timeout=5)
@@ -365,7 +384,7 @@ def main():
         p.stop()
     procs.clear()
 
-    step("10/11 in-VR menu: keypads, PIN, tabs and layout")
+    step("11/12 in-VR menu: keypads, PIN, tabs, layout and the Room tab")
     if shutil.which("xvfb-run"):
         menu = Proc("menu", ["xvfb-run", "-a", "godot", "--rendering-driver", "opengl3",
                              "--xr-mode", "off", "--audio-driver", "Dummy", "--path", CLIENT_DIR,
@@ -376,11 +395,57 @@ def main():
     else:
         print("      (skipped: `xvfb-run` not available)")
 
-    step("11/11 hand tracking, controllers, screens and keyboard, video FEC")
+    step("12/12 hand tracking, controllers, screens, keyboard and whiteboard, video FEC, room packets")
     for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd",
-                 "groups_test.gd", "virtual_match_test.gd", "fec_test.gd"):
+                 "groups_test.gd", "virtual_match_test.gd", "whiteboard_test.gd", "fec_test.gd",
+                 "room_test.gd"):
         run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")
+
+
+def multiplayer(host):
+    """Ana (on `host`) opens a room and shares monitors 0 and 1; Ben, on a
+    second PC, joins with the room's PIN and shares monitor 2."""
+    tcp2, udp2, room_port, room_pin = TCP_PORT + 20, UDP_PORT + 20, TCP_PORT + 40, "135790"
+    host2 = start_host("host2", tcp2, udp2)
+    room = [f"--im2-room-port={room_port}", "--im2-capture"]
+    ana = Proc("ana", [*CLIENT, "--im2-host=127.0.0.1", "--im2-monitors=0,1", "--im2-name=Ana",
+                       "--im2-room=open", f"--im2-room-pin={room_pin}", "--im2-share", "--im2-tone",
+                       "--im2-board", "--im2-board-open", *room])
+    procs.append(ana)
+    ana.wait_for(r"\[Room\] opened on UDP", 20)
+    eve = Proc("eve", [*CLIENT, "--im2-name=Eve", "--im2-room=127.0.0.1", "--im2-room-pin=111111", *room])
+    procs.append(eve)
+    eve.wait_for(r"Wrong PIN for the room", 20)
+    ana.wait_for(r"gave a wrong PIN", 5)
+    eve.stop()
+    procs.remove(eve)
+    ben = Proc("ben", [*CLIENT, f"--im2-port={tcp2}", f"--im2-udp-port={udp2}", "--im2-host=127.0.0.1",
+                       "--im2-monitors=2", "--im2-name=Ben", "--im2-room=127.0.0.1",
+                       f"--im2-room-pin={room_pin}", "--im2-share", "--im2-draw-remote", *room])
+    procs.append(ben)
+    ben.wait_for(r"room peer=Ana poses=[1-9]\d* voice=[1-9]", 30)
+    ana.wait_for(r"room peer=Ben poses=[1-9]", 30)
+    print("      each sees the other's avatar, Ben hears Ana")
+    expect_shade(ben, 0, 64, 0, "Ana")
+    expect_shade(ben, 1, 112, 0, "Ana")
+    expect_shade(ana, 2, 160, 0, "Ben")
+    host.wait_for(r"watches client \d+'s screens", 5)
+    host2.wait_for(r"watches client \d+'s screens", 5)
+    print("      each watches the other's screens, straight from the other's PC")
+    ben.wait_for(r"remote board peer=Ana shown=true strokes=[1-9]", 20)
+    print("      Ben sees Ana's whiteboard and what she drew on it")
+    ana.wait_for(r"my board strokes=2", 20)
+    ben.wait_for(r"remote board peer=Ana shown=true strokes=2", 20)
+    print("      Ana let Ben draw on her board: his line is on hers, and on his copy")
+    mark = ana.mark()
+    ben.signal(signal.SIGINT)  # quits cleanly: leaves the room
+    ana.wait_for(r"\[Room\] Ben left", 40, mark)
+    lines = ana.lines + ben.lines + eve.lines
+    for p in (ana, ben, host2):
+        p.stop()
+        procs.remove(p)
+    return lines
 
 
 def run_godot_test(test):

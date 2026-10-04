@@ -75,6 +75,9 @@ jobs:
       - name: View-only test (--view-only)
         run: python3 host/tools/view_only_test.py
 
+      - name: Watcher test (multiplayer rooms, WATCH_CODE)
+        run: python3 host/tools/watch_test.py
+
       - name: Settings panel + tray test (private config, private D-Bus)
         run: python3 host/tools/panel_test.py
 
