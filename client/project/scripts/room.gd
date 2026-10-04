@@ -9,8 +9,12 @@
 ## how to watch their PC and where their shared screens hang), their pose
 ## (head and hands relative to their XROrigin3D, POSE_HZ) and their voice
 ## (16 kHz mono PCM in 20 ms packets, only while louder than a noise gate).
-## Our whiteboard goes too: where it hangs (in the profile) and every stroke
-## as it is drawn (`ink` ops, reliable; whoever joins later gets them all).
+## Our whiteboard goes too: where it hangs and who may draw on it (in the
+## profile), and every stroke as it is drawn (`ink` ops with their author,
+## reliable; whoever joins later gets them all). Someone we let draw sends
+## their ops to us (`_draw_on`) and we pass them on. What we see and hear of
+## each person, and who draws on our board, is up to us (pref(), the menu's
+## Permissions page; this session only).
 ## The screens never go through the room: each PC streams them straight to the
 ## headsets that watch it (Participant, protocol.h WatchCode).
 ##
@@ -63,6 +67,8 @@ var notice := ""
 var voice_from := "mic"
 ## Voice packets sent, for the test harness.
 var voice_out := 0
+## Everyone who joins may draw on our whiteboard (--im2-board-open: tests, the bot).
+var open_board := false
 
 var _origin: Node3D = null
 var _camera: Node3D = null
@@ -70,8 +76,16 @@ var _controllers: Array = []
 var _peer: ENetMultiplayerPeer = null
 var _people := {}                  ## peer id -> Participant
 var _profile := {"name": "", "mic": true, "share": {}, "screens": [], "board": {}}
-## Every op of our whiteboard so far (Whiteboard.ink), for people who join later.
+## Our own whiteboard (main.gd's): guests' ink is replayed on it.
+var board: Whiteboard = null
+## Every op on our whiteboard so far, as [author peer id, op], for people who
+## join later.
 var _ink_log: Array = []
+## Peer id -> {board, screens, voice: what we see / hear of them; draw: they
+## may draw on our board}. Missing = the default (see pref()).
+var _prefs := {}
+## Our board's placement as main.gd last gave it (the guests are added to it).
+var _board_place := {}
 const INK_BATCH := 2000
 var _join_deadline_ms := 0
 var _pose_s := 0.0
@@ -282,6 +296,10 @@ func _on_peer_connected(id: int) -> void:
 	add_child(p)
 	_people[id] = p
 	_retone()
+	if open_board:
+		_prefs[id] = {"draw": true}
+		_publish_board()
+	p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
 	_take_profile.rpc_id(id, _profile)
 	for i in range(0, _ink_log.size(), INK_BATCH):
 		_take_ink.rpc_id(id, _ink_log.slice(i, i + INK_BATCH))
@@ -294,6 +312,9 @@ func _on_peer_disconnected(id: int) -> void:
 		p.queue_free()
 	_people.erase(id)
 	_retone()
+	if pref(id, "draw"):
+		_prefs.erase(id)
+		_publish_board()
 	changed.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -312,11 +333,33 @@ func _take_pose(d: PackedFloat32Array) -> void:
 	if who:
 		who.set_pose(d)
 
+## Ink on the sender's board: [[author, op], …].
 @rpc("any_peer", "call_remote", "reliable", 3)
-func _take_ink(ops: Array) -> void:
+func _take_ink(inked: Array) -> void:
 	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
 	if who:
-		who.apply_ink(ops)
+		who.apply_ink(inked)
+
+## A guest's ink on OUR board: drawn here if we let them, then passed on to
+## everyone else (they drew it on their copy already).
+@rpc("any_peer", "call_remote", "reliable", 3)
+func _draw_on(ops: Array) -> void:
+	var from := multiplayer.get_remote_sender_id()
+	if not pref(from, "draw") or board == null:
+		return
+	var inked := []
+	for op in ops.slice(0, INK_BATCH):
+		board.apply_ink(op, from)
+		inked.append([from, op])
+	_ink_log.append_array(inked)
+	for id in _people:
+		if id != from:
+			_take_ink.rpc_id(id, inked)
+
+## Ink we drew on someone else's board (Participant): to its owner.
+func draw_on(owner_id: int, ops: Array) -> void:
+	if state == State.IN and _people.has(owner_id):
+		_draw_on.rpc_id(owner_id, ops)
 
 @rpc("any_peer", "call_remote", "unreliable_ordered", 2)
 func _take_voice(pcm: PackedByteArray) -> void:
@@ -388,17 +431,43 @@ func set_screens(screens: Array) -> void:
 		_publish()
 
 ## Where our whiteboard hangs: {on, x: 12 floats in the room frame, w}.
-func set_board(board: Dictionary) -> void:
-	if board != _profile.board:
-		_profile.board = board
+func set_board(place: Dictionary) -> void:
+	_board_place = place
+	_publish_board()
+
+## The placement plus who may draw on it ("guests": peer ids).
+func _publish_board() -> void:
+	var b := _board_place.duplicate()
+	b["guests"] = _prefs.keys().filter(func(id): return pref(id, "draw"))
+	if b != _profile.board:
+		_profile.board = b
 		_publish()
 
-## Changes to our whiteboard (Whiteboard.ink): to everyone now, and kept for
-## whoever joins later.
+## Changes we made to our whiteboard (Whiteboard.ink): to everyone now, and
+## kept for whoever joins later.
 func send_ink(ops: Array) -> void:
-	_ink_log.append_array(ops)
+	var me := multiplayer.get_unique_id()
+	var inked := ops.map(func(op): return [me, op])
+	_ink_log.append_array(inked)
 	if state == State.IN and _peer and not _people.is_empty():
-		_take_ink.rpc(ops)
+		_take_ink.rpc(inked)
+
+## What we see and hear of person `id`, and whether they may draw on our
+## board: "board", "screens", "voice" (all on unless turned off), "draw" (off
+## unless turned on).
+func pref(id: int, what: String) -> bool:
+	return _prefs.get(id, {}).get(what, what != "draw")
+
+func set_pref(id: int, what: String, on: bool) -> void:
+	if not _prefs.has(id):
+		_prefs[id] = {}
+	_prefs[id][what] = on
+	var p: Participant = _people.get(id)
+	if p:
+		p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
+	if what == "draw":
+		_publish_board()
+	changed.emit()
 
 func sharing() -> bool:
 	return not _profile.share.is_empty()
@@ -517,20 +586,24 @@ static func decode_voice(pcm: PackedByteArray) -> PackedVector2Array:
 # For the menu and the test harness
 # ---------------------------------------------------------------------------
 
-## Who is here, us first: [{name, me, host, tone, mic, speaking, screens
-## (Participant.watch_state(), or "live" for us while sharing), count}].
+## Who is here, us first: [{id, name, me, host, tone, mic, speaking, screens
+## (Participant.watch_state(), or "live" for us while sharing), count,
+## and for the others board (they show one), see_board, see_screens, hear,
+## draw (see pref()), may_draw (we may draw on theirs)}].
 func people() -> Array:
 	var me := multiplayer.get_unique_id()
-	var out := [{"name": my_name, "me": true, "host": is_host, "tone": _tone_for(me),
+	var out := [{"id": me, "name": my_name, "me": true, "host": is_host, "tone": _tone_for(me),
 		"mic": mic_on, "speaking": mic_on and _gate_s > 0.0,
 		"screens": "live" if sharing() else "", "count": _profile.screens.size()}]
 	for id in _ids():
 		if id == me:
 			continue
 		var p: Participant = _people[id]
-		out.append({"name": p.display_name, "me": false, "host": id == 1, "tone": p.tone,
+		out.append({"id": id, "name": p.display_name, "me": false, "host": id == 1, "tone": p.tone,
 			"mic": p.mic_on, "speaking": p.is_speaking(), "screens": p.watch_state(),
-			"count": p.remote_panels().size()})
+			"count": p.remote_panels().size(), "board": p.shows_board(),
+			"see_board": pref(id, "board"), "see_screens": pref(id, "screens"),
+			"hear": pref(id, "voice"), "draw": pref(id, "draw"), "may_draw": p.may_draw()})
 	return out
 
 ## Points on everyone else and what they show (world), so main.gd can tell
@@ -540,6 +613,18 @@ func occluder_points() -> Array:
 	for p in _people.values():
 		out.append_array(p.occluder_points())
 	return out
+
+## Everyone else's whiteboard that we see (main.gd::pick()).
+func remote_boards() -> Array:
+	var out := []
+	for p in _people.values():
+		if p.board_shown():
+			out.append(p.board_node())
+	return out
+
+## Whether `b` (someone's board, remote_boards()) lets us draw on it.
+func may_draw_on(b: Node) -> bool:
+	return b.get_parent() is Participant and b.get_parent().may_draw()
 
 ## Every screen someone shares with us (main.gd::pick() can grab them).
 func remote_panels() -> Array:

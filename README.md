@@ -355,7 +355,11 @@ leaves, the room closes), and each shared screen comes straight from its PC.
   PC, so your own stream is untouched. Grab a shared screen by its bar to
   bring it closer (only for you).
 - Your **whiteboard** shows to everyone in the room, stroke by stroke as you
-  draw.
+  draw. Grab someone else's by its bar to move it (only for you).
+- **Permissions** (Room tab): for each person, whether you see their
+  whiteboard and their screens and hear their voice (only for you), and
+  whether they may draw on your whiteboard. Off by default; turn it on and
+  they draw on theirs as on their own.
 - **Microphone** switches your voice off; others hear you from where your
   avatar sits. The headset asks for microphone permission the first time.
 - Everyone sits in one row, 3.2 m apart; names in the menu have the colour of

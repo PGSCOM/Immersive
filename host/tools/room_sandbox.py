@@ -91,7 +91,7 @@ def main():
     time.sleep(1.0)
     bot = subprocess.Popen(["godot", "--xr-mode", "off", "--path", CLIENT_DIR, "-s", BOT, "--",
                             "--im2-host=127.0.0.1", f"--im2-port={BEN_TCP}", f"--im2-udp-port={BEN_TCP + 1}",
-                            "--im2-monitors=0,2", "--im2-name=Ben", "--im2-share",
+                            "--im2-monitors=0,2", "--im2-name=Ben", "--im2-share", "--im2-board-open",
                             "--im2-tone" if "--tone" in opts else "--im2-no-mic", *room],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if room[0] == "--im2-room=open":

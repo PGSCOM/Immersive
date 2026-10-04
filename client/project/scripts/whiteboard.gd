@@ -11,6 +11,9 @@
 ##
 ## In a multiplayer room (room.gd) every change goes out as it happens, as
 ## `ink` ops, and the others' copies of this board replay them (apply_ink).
+## Someone allowed to draw on it draws on their copy; the ops go to the owner,
+## who replays them here and passes them on. Strokes are kept apart by author,
+## so two people can draw at once.
 
 extends Node3D
 class_name Whiteboard
@@ -53,6 +56,11 @@ var _width: float = WIDTHS[1]
 var _erasing := false
 var _dots: Array = []      ## [Dot, kind ("ink" / "width"), value]
 var _btn_eraser: Button
+
+## Replaying someone's ops (apply_ink): what that changes is not `ink` again.
+var _replaying := false
+## The stroke each other author is drawing on this board now.
+var _inked := {}
 
 var _pointer_pressed := false
 var _pointer_px := Vector2(-100, -100)
@@ -180,8 +188,10 @@ func stroke_count() -> int:
 	return _ink.get_children().filter(func(c): return c is Line2D and c.visible).size()
 
 func undo() -> void:
-	ink.emit(["u"])
+	if not _replaying:
+		ink.emit(["u"])
 	_stroke = null
+	_inked.clear()
 	var last: Node = _ink.get_child(-1) if _ink.get_child_count() > 0 else null
 	if last == null:
 		return
@@ -193,8 +203,10 @@ func undo() -> void:
 
 ## Hide every stroke behind one marker, so undo brings them all back.
 func clear() -> void:
-	ink.emit(["c"])
+	if not _replaying:
+		ink.emit(["c"])
 	_stroke = null
+	_inked.clear()
 	var shown := _ink.get_children().filter(func(c): return c is Line2D and c.visible)
 	if shown.is_empty():
 		return
@@ -265,39 +277,44 @@ func _on_canvas_input(ev: InputEvent) -> void:
 			ink.emit(["p", snappedf(_smoothed.x, 0.5), snappedf(_smoothed.y, 0.5)])
 
 func _begin(at: Vector2) -> void:
-	_new_stroke(SLATE if _erasing else _color, ERASER_PX if _erasing else _width, at)
+	_stroke = _new_stroke(SLATE if _erasing else _color, ERASER_PX if _erasing else _width, at)
 	_smoothed = at
 	ink.emit(["b", _stroke.default_color.to_html(false), _stroke.width, at.x, at.y])
 
-func _new_stroke(color: Color, width: float, at: Vector2) -> void:
-	_stroke = Line2D.new()
-	_stroke.width = width
-	_stroke.default_color = color
-	_stroke.begin_cap_mode = Line2D.LINE_CAP_ROUND
-	_stroke.end_cap_mode = Line2D.LINE_CAP_ROUND
-	_stroke.joint_mode = Line2D.LINE_JOINT_ROUND
+func _new_stroke(color: Color, width: float, at: Vector2) -> Line2D:
+	var line := Line2D.new()
+	line.width = width
+	line.default_color = color
+	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	line.joint_mode = Line2D.LINE_JOINT_ROUND
 	# Two points, so a tap leaves a dot.
-	_stroke.points = PackedVector2Array([at, at + Vector2(0.5, 0.0)])
-	_ink.add_child(_stroke)
+	line.points = PackedVector2Array([at, at + Vector2(0.5, 0.0)])
+	_ink.add_child(line)
+	return line
 
-## Replay one op of someone else's board on this copy of it (see `ink`; it
-## comes from the network, so anything malformed is skipped).
-func apply_ink(op: Variant) -> void:
+## Replay one op someone else drew (see `ink`), `author` telling apart whose
+## stroke a point goes on. It comes from the network: anything malformed is
+## skipped.
+func apply_ink(op: Variant, author: int = 0) -> void:
 	if typeof(op) != TYPE_ARRAY or op.is_empty() or typeof(op[0]) != TYPE_STRING:
 		return
 	var is_number := func(v): return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
+	_replaying = true
 	match op[0]:
 		"b":
 			if op.size() == 5 and typeof(op[1]) == TYPE_STRING and op.slice(2).all(is_number):
-				_new_stroke(Color.from_string(op[1], INKS[0]), clampf(op[2], 1.0, ERASER_PX),
-					_on_canvas(op[3], op[4]))
+				_inked[author] = _new_stroke(Color.from_string(op[1], INKS[0]),
+					clampf(op[2], 1.0, ERASER_PX), _on_canvas(op[3], op[4]))
 		"p":
-			if _stroke and op.size() == 3 and op.slice(1).all(is_number):
-				_stroke.add_point(_on_canvas(op[1], op[2]))
+			var line: Line2D = _inked.get(author)
+			if is_instance_valid(line) and op.size() == 3 and op.slice(1).all(is_number):
+				line.add_point(_on_canvas(op[1], op[2]))
 		"u":
 			undo()
 		"c":
 			clear()
+	_replaying = false
 
 func _on_canvas(x: float, y: float) -> Vector2:
 	return Vector2(clampf(x, -100.0, VIEW_SIZE.x + 100.0), clampf(y, -100.0, VIEW_SIZE.y + 100.0))

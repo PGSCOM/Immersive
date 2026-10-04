@@ -40,6 +40,7 @@ func _initialize() -> void:
 	ov.room_leave_requested.connect(func(): events.append(["room_leave"]))
 	ov.room_mic_toggled.connect(func(on): events.append(["room_mic", on]))
 	ov.room_share_toggled.connect(func(on): events.append(["room_share", on]))
+	ov.room_permission_changed.connect(func(id, what, on): events.append(["perm", id, what, on]))
 	_run()
 
 func check(cond: bool, what: String) -> void:
@@ -136,9 +137,11 @@ func _room() -> void:
 
 	ov.set_room({"state": 2, "host": true, "address": "192.168.1.37", "pin": 482913, "mic": true,
 		"share": false, "pc": true, "people": [
-		{"name": "Pablo", "me": true, "host": true, "tone": UiTheme.PEOPLE[0], "mic": true, "speaking": true, "screens": "", "count": 0},
-		{"name": "Ana", "me": false, "host": false, "tone": UiTheme.PEOPLE[1], "mic": true, "speaking": false, "screens": "live", "count": 2},
-		{"name": "DESKTOP-8F3K2LQ-WORKSTATION", "me": false, "host": false, "tone": UiTheme.PEOPLE[2], "mic": false, "speaking": false, "screens": "unreachable", "count": 0}]})
+		{"id": 1, "name": "Pablo", "me": true, "host": true, "tone": UiTheme.PEOPLE[0], "mic": true, "speaking": true, "screens": "", "count": 0},
+		{"id": 501, "name": "Ana", "me": false, "host": false, "tone": UiTheme.PEOPLE[1], "mic": true, "speaking": false,
+			"screens": "live", "count": 2, "see_board": true, "see_screens": true, "hear": true, "draw": false},
+		{"id": 902, "name": "DESKTOP-8F3K2LQ-WORKSTATION", "me": false, "host": false, "tone": UiTheme.PEOPLE[2], "mic": false,
+			"speaking": false, "screens": "hidden", "count": 0, "see_board": true, "see_screens": false, "hear": true, "draw": true}]})
 	await _frames(2)
 	check(ov._room_in.visible and not ov._room_out.visible and ov._lbl_room_pin.text == "482 913"
 		and ov._people_list.get_child_count() == 3 and ov._lbl_room_title.text == "Your room",
@@ -148,6 +151,7 @@ func _room() -> void:
 	check(events.back() == ["room_share", true], "Room: share my screens -> %s" % [events.back()])
 	await _click(ov._chk_mic)
 	check(events.back() == ["room_mic", false], "Room: microphone off -> %s" % [events.back()])
+	await _permissions()
 	ov.set_room({"state": 2, "host": false, "address": "192.168.1.37", "pin": 482913, "mic": true,
 		"share": true, "pc": false, "people": [{"name": "Pablo", "me": true, "host": false, "tone": UiTheme.PEOPLE[1],
 		"mic": true, "speaking": false, "screens": "", "count": 0}, {"name": "Ana", "me": false, "host": true,
@@ -157,6 +161,33 @@ func _room() -> void:
 	await _step("room_guest")
 	await _click(_btn("Leave room"))
 	check(events.back() == ["room_leave"], "Room: Leave room")
+
+## The Permissions page over the Room tab: a row per person, a column per
+## switch, every switch under its heading; each says who and what.
+func _permissions() -> void:
+	await _click(_btn("Permissions"))
+	check(ov._perm_scroll.visible and not ov._tab_pages[ov.ROOM_TAB].visible, "Permissions opens over the Room tab")
+	var grid: GridContainer = ov._perm_grid
+	check(grid.get_child_count() == 3 * (1 + ov.PERMISSIONS.size()), "Permissions: a heading row and a row per other person")
+	var ana_screens: CheckButton = ov._perm_switches[[501, "screens"]]
+	var ben_screens: CheckButton = ov._perm_switches[[902, "screens"]]
+	var heading: Label = grid.get_child(2)
+	var centre := func(c: Control): return c.get_global_rect().get_center().x
+	check(ana_screens.button_pressed and not ben_screens.button_pressed
+		and absf(centre.call(ana_screens) - centre.call(ben_screens)) < 1.0
+		and absf(centre.call(ana_screens) - centre.call(heading)) < 1.0,
+		"Permissions: the switches show the room and line up under their heading")
+	await _step("permissions")
+	await _click(ov._perm_switches[[501, "draw"]])
+	check(events.back() == ["perm", 501, "draw", true], "Permissions: let Ana draw on my board -> %s" % [events.back()])
+	await _click(ben_screens)
+	check(events.back() == ["perm", 902, "screens", true], "Permissions: show the other one's screens -> %s" % [events.back()])
+	var before: Node = ov._perm_switches[[501, "voice"]]
+	ov.set_room(ov._room)  # the room refreshes as people talk
+	await _frames(2)
+	check(ov._perm_switches[[501, "voice"]] == before, "Permissions: a refresh keeps the switches (none swapped under a pointer)")
+	await _click(_btn("Back", ov._perm_scroll))
+	check(not ov._perm_scroll.visible and ov._tab_pages[ov.ROOM_TAB].visible, "Permissions: Back returns to the room")
 
 ## The virtual screen size page: a new screen, then changing one.
 func _virtual_page() -> void:

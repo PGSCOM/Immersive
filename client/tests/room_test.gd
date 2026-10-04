@@ -128,6 +128,19 @@ func _whiteboards() -> void:
 	for bad in [[], [1], ["b", "x", "y", 1, 2], ["p", {}, 3], ["b", 7, 3.0, 1.0, 2.0], "c", null]:
 		theirs.apply_ink(bad)
 	check(theirs.stroke_count() == 0, "malformed ink ops are skipped")
+	# Two people drawing at once: each point lands on its author's stroke, and
+	# replaying an undo does not send it on again (it would bounce for ever).
+	var echoed := []
+	theirs.ink.connect(func(op): echoed.append(op))
+	for step in [[["b", "ece6dc", 5.0, 10.0, 10.0], 7], [["b", "e39a7f", 5.0, 500.0, 500.0], 9],
+			[["p", 30.0, 10.0], 7], [["p", 520.0, 500.0], 9], [["p", 50.0, 10.0], 7]]:
+		theirs.apply_ink(step[0], step[1])
+	var lines: Array = theirs._ink.get_children().filter(func(c): return c is Line2D and c.visible)
+	check(lines.size() == 2 and lines[0].points.size() == 4 and lines[1].points.size() == 3
+		and lines[1].points[-1] == Vector2(520, 500),
+		"two people drawing at once keep their own strokes -> %s points" % [lines.map(func(l): return l.points.size())])
+	theirs.apply_ink(["u"], 7)
+	check(echoed.is_empty() and theirs.stroke_count() == 1, "a replayed undo is not sent on again")
 	mine.queue_free()
 	theirs.queue_free()
 

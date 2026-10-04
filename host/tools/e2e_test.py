@@ -26,8 +26,9 @@ Checks, in order:
      room PIN is refused; each sees the other's avatar (poses) and hears the
      other's voice (a test tone), each watches the screens the other shares,
      straight from the other's PC (protocol.h WatchCode, an MJPEG copy): the
-     right greys, and Ben sees Ana's whiteboard with her line on it. Leaving
-     shows on the other side.
+     right greys; Ben sees Ana's whiteboard with her line on it, and draws on
+     it (she lets whoever joins): his line lands on hers. Leaving shows on the
+     other side.
   10. Ctrl+C on the host exits promptly.
   11. The in-VR menu works with pointer clicks (keypads, PIN, tabs, layout,
      the Room tab), via client/tests/overlay_test.gd. Needs xvfb-run;
@@ -410,7 +411,7 @@ def multiplayer(host):
     room = [f"--im2-room-port={room_port}", "--im2-capture"]
     ana = Proc("ana", [*CLIENT, "--im2-host=127.0.0.1", "--im2-monitors=0,1", "--im2-name=Ana",
                        "--im2-room=open", f"--im2-room-pin={room_pin}", "--im2-share", "--im2-tone",
-                       "--im2-board", *room])
+                       "--im2-board", "--im2-board-open", *room])
     procs.append(ana)
     ana.wait_for(r"\[Room\] opened on UDP", 20)
     eve = Proc("eve", [*CLIENT, "--im2-name=Eve", "--im2-room=127.0.0.1", "--im2-room-pin=111111", *room])
@@ -421,7 +422,7 @@ def multiplayer(host):
     procs.remove(eve)
     ben = Proc("ben", [*CLIENT, f"--im2-port={tcp2}", f"--im2-udp-port={udp2}", "--im2-host=127.0.0.1",
                        "--im2-monitors=2", "--im2-name=Ben", "--im2-room=127.0.0.1",
-                       f"--im2-room-pin={room_pin}", "--im2-share", *room])
+                       f"--im2-room-pin={room_pin}", "--im2-share", "--im2-draw-remote", *room])
     procs.append(ben)
     ben.wait_for(r"room peer=Ana poses=[1-9]\d* voice=[1-9]", 30)
     ana.wait_for(r"room peer=Ben poses=[1-9]", 30)
@@ -434,6 +435,9 @@ def multiplayer(host):
     print("      each watches the other's screens, straight from the other's PC")
     ben.wait_for(r"remote board peer=Ana shown=true strokes=[1-9]", 20)
     print("      Ben sees Ana's whiteboard and what she drew on it")
+    ana.wait_for(r"my board strokes=2", 20)
+    ben.wait_for(r"remote board peer=Ana shown=true strokes=2", 20)
+    print("      Ana let Ben draw on her board: his line is on hers, and on his copy")
     mark = ana.mark()
     ben.signal(signal.SIGINT)  # quits cleanly: leaves the room
     ana.wait_for(r"\[Room\] Ben left", 40, mark)

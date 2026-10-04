@@ -59,6 +59,9 @@ signal room_join_requested(ip: String, port: int, pin: int)
 signal room_leave_requested
 ## "Back to my seat": undo the walking (main.gd::back_to_seat()).
 signal room_seat_requested
+## The Permissions page: what we see / hear of person `peer_id` ("board",
+## "screens", "voice") or whether they may draw on our whiteboard ("draw").
+signal room_permission_changed(peer_id: int, what: String, on: bool)
 signal room_mic_toggled(on: bool)
 ## "Show my screens to the room".
 signal room_share_toggled(on: bool)
@@ -246,6 +249,14 @@ var _lbl_room_where: Label
 var _chk_mic: CheckButton
 var _chk_share: CheckButton
 var _lbl_share_note: Label
+var _perm_scroll: ScrollContainer
+var _perm_grid: GridContainer
+var _lbl_perm_empty: Label
+var _perm_ids: Array = []          ## whose rows the table has now
+var _perm_switches := {}           ## [peer id, key] -> CheckButton
+## The Permissions page's columns: [heading, Room.pref() key, people() field].
+const PERMISSIONS := [["Their whiteboard", "board", "see_board"], ["Their screens", "screens", "see_screens"],
+	["Their voice", "voice", "hear"], ["Draws on mine", "draw", "draw"]]
 
 # Styles
 var _st_button: Dictionary
@@ -864,6 +875,16 @@ func _build_ui() -> void:
 	vs_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_vs_scroll.add_child(vs_body)
 	_build_virtual_page(vs_body)
+	# The Permissions page shows over the Room tab.
+	_perm_scroll = ScrollContainer.new()
+	_perm_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_perm_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_perm_scroll.hide()
+	pages.add_child(_perm_scroll)
+	var perm_body := _vbox(14)
+	perm_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_perm_scroll.add_child(perm_body)
+	_build_permissions_page(perm_body)
 
 	_apply_debounce = Timer.new()
 	_apply_debounce.one_shot = true
@@ -905,6 +926,8 @@ func _select_tab(i: int) -> void:
 	_tab = i
 	if _vs_scroll:
 		_vs_scroll.hide()
+	if _perm_scroll:
+		_perm_scroll.hide()
 	for j in _tab_pages.size():
 		_tab_pages[j].visible = j == i
 		var b: Button = _tab_buttons[j]
@@ -1813,6 +1836,10 @@ func _build_room_tab(body: VBoxContainer) -> void:
 	left.add_child(_lbl_room_title)
 	_people_list = _vbox(8)
 	left.add_child(_people_list)
+	var perms := _button("Permissions")
+	perms.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	perms.pressed.connect(func(): _show_permissions(true))
+	left.add_child(perms)
 
 	var right := _vbox(12)
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1859,6 +1886,9 @@ func _refresh_room() -> void:
 	var st: int = _room.get("state", 0)
 	_room_out.visible = st != 2
 	_room_in.visible = st == 2
+	if st != 2 and _perm_scroll.visible:
+		_show_permissions(false)
+	_refresh_permissions()
 	_btn_room_open.disabled = st == 1
 	_btn_room_join.disabled = st == 1
 	_btn_room_join.text = "Joining…" if st == 1 else "Join"
@@ -1907,11 +1937,84 @@ func _person_status(p: Dictionary) -> String:
 			bits.append("sharing %d %s" % [n, "screen" if n == 1 else "screens"] if n > 0 else "sharing")
 		"connecting":
 			bits.append("screens on the way")
+		"hidden":
+			bits.append("screens hidden")
 		"refused":
 			bits.append("screens refused")
 		"unreachable":
 			bits.append("their PC is out of reach")
 	return " · ".join(bits)
+
+func _build_permissions_page(body: VBoxContainer) -> void:
+	var top := _hbox(18)
+	body.add_child(top)
+	var back := _button("Back")
+	back.pressed.connect(func(): _show_permissions(false))
+	top.add_child(back)
+	top.add_child(_label("Permissions", 28, UiTheme.INK, true))
+	# One row per person, one column per switch: every switch of a column
+	# under its heading, whatever the names' lengths.
+	_perm_grid = GridContainer.new()
+	_perm_grid.columns = 1 + PERMISSIONS.size()
+	_perm_grid.add_theme_constant_override("h_separation", 12)
+	_perm_grid.add_theme_constant_override("v_separation", 14)
+	body.add_child(_perm_grid)
+	_lbl_perm_empty = _label("Nobody else is in the room yet.", 19, UiTheme.INK_3)
+	body.add_child(_lbl_perm_empty)
+	var note := _label("Turning off their whiteboard, screens or voice is only for you; their screens are not even downloaded then. \"Draws on mine\" lets them draw on your whiteboard.", 17, UiTheme.INK_3)
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.add_child(note)
+
+func _show_permissions(on: bool) -> void:
+	_perm_scroll.visible = on
+	_tab_pages[ROOM_TAB].visible = not on and _tab == ROOM_TAB
+	_refresh_permissions()
+
+## The table from _room's people: the switches show what main.gd says. Rows
+## are rebuilt only when people come or go (the room refreshes as people talk,
+## and a switch must not be swapped out under a pointer pressing it).
+func _refresh_permissions() -> void:
+	if not _perm_grid or not _perm_scroll.visible:
+		return
+	var others: Array = _room.get("people", []).filter(func(p): return not p.me)
+	_lbl_perm_empty.visible = others.is_empty()
+	_perm_grid.visible = not others.is_empty()
+	var ids := others.map(func(p): return p.id)
+	if ids == _perm_ids:
+		for p in others:
+			for col in PERMISSIONS:
+				_perm_switches[[p.id, col[1]]].set_pressed_no_signal(p.get(col[2], col[1] != "draw"))
+		return
+	_perm_ids = ids
+	_perm_switches.clear()
+	for c in _perm_grid.get_children():
+		_perm_grid.remove_child(c)
+		c.queue_free()
+	if others.is_empty():
+		return
+	var corner := Control.new()
+	corner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_perm_grid.add_child(corner)
+	for col in PERMISSIONS:
+		var h := _label(col[0], 17, UiTheme.INK_3)
+		h.custom_minimum_size.x = 150
+		h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_perm_grid.add_child(h)
+	for p in others:
+		var who := _label(p.name, 22, p.tone)
+		who.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		who.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_perm_grid.add_child(who)
+		for col in PERMISSIONS:
+			var sw := CheckButton.new()
+			sw.focus_mode = Control.FOCUS_NONE
+			sw.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			sw.button_pressed = p.get(col[2], col[1] != "draw")
+			var id: int = p.id
+			var what: String = col[1]
+			sw.toggled.connect(func(on): room_permission_changed.emit(id, what, on))
+			_perm_grid.add_child(sw)
+			_perm_switches[[id, what]] = sw
 
 func _rebuild_rooms_list() -> void:
 	if not _rooms_list:

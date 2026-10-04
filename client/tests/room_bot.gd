@@ -8,9 +8,10 @@ extends SceneTree
 ##   Ben sees (you, and your screens when they stream in MJPEG, the only codec
 ##   a PC decodes);
 ## - moves both hands (fake controllers) and waves now and then;
-## - opens its whiteboard beside itself, facing you, and every few seconds
-##   draws a wavy line on it (through the same pointer a person uses), in
-##   the next ink, clearing it after six;
+## - opens its whiteboard beside itself, facing you, lets you draw on it
+##   (the launcher passes --im2-board-open) and every few seconds draws a wavy
+##   line on it (through the same pointer a person uses), in the next ink, six
+##   in all;
 ## - repeats what it hears from you ECHO_DELAY_MS later, so your own voice
 ##   comes back from its avatar. It stops listening while it speaks and just
 ##   after, or your headset's speakers would feed its echo back for ever. With
@@ -107,11 +108,10 @@ func _draw(delta: float) -> void:
 		if board_s < 6.0:
 			return
 		board_s = 0.0
+		if strokes >= 6:
+			return  # done: it stays put, the rest of the board is yours
 		_place_board(wb)
 		stroke_i = 0
-		if strokes >= 6:
-			wb.clear()
-			strokes = 0
 		wb._select("ink", Whiteboard.INKS[strokes % Whiteboard.INKS.size()])
 	var k := float(stroke_i) / STROKE_POINTS
 	var uv := Vector2(0.1 + 0.8 * k, 0.14 + 0.12 * strokes + 0.04 * sin(k * TAU * 2.0))

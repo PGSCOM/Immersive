@@ -105,6 +105,8 @@ var _uv := Vector2(-1, -1)
 var _hit_distance := MAX_RAY_M
 ## What the grab bar under the pointer moves (Target.BAR).
 var _bar_target: Node = null
+## The whiteboard under the pointer (ours, or someone's that lets us draw).
+var _board_target: Node3D = null
 var _ray_angle := 40.0
 ## Desktop mouse buttons this controller holds down, and where it last sent
 ## them (so a release always reaches the host, even off the panel).
@@ -356,6 +358,7 @@ func _update_pointer() -> void:
 			return
 		"whiteboard":
 			_set_target(Target.BOARD, null)
+			_board_target = hit.get("board")
 			main_scene.send_whiteboard_pointer(origin, dir, _trigger_pressed)
 			return
 		"bar":
@@ -611,7 +614,7 @@ func _set_grip_state(pressed: bool) -> void:
 			Target.KEYBOARD:
 				_start_drag(main_scene.get("virtual_keyboard"))
 			Target.BOARD:
-				_start_drag(main_scene.get("whiteboard"))
+				_start_drag(_board_target if is_instance_valid(_board_target) else main_scene.get("whiteboard"))
 			Target.BAR:
 				_start_drag(_bar_target)
 			Target.PANEL:

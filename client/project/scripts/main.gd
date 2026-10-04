@@ -208,8 +208,12 @@ var _cmdline_room_pin := 0
 var _cmdline_name := ""
 ## --im2-tone / --im2-no-mic: the room hears a tone / nothing from us (Room.voice_from).
 var _cmdline_voice := "mic"
-## --im2-board: show the whiteboard and draw a line on it (tests).
+## --im2-board: show the whiteboard and draw a line on it; --im2-board-open:
+## whoever joins may draw on it; --im2-draw-remote: draw a line on the first
+## board of someone else's that lets us (tests).
 var _cmdline_board := false
+var _cmdline_board_open := false
+var _cmdline_draw_remote := false
 ## Driven from the command line (tests, adb): settings and layout stay as
 ## the user left them.
 var _ephemeral: bool = false
@@ -582,10 +586,15 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 		var kb: Dictionary = virtual_keyboard.ray_hit(ray_origin, ray_direction)
 		if not kb.is_empty():
 			hits.append({"kind": "keyboard", "distance": kb.distance})
+	# Ours draws; someone else's draws if they let us, else it just stops the
+	# pointer (and its bar moves it, here only).
+	for b in _boards():
+		var wb: Dictionary = b.ray_hit(ray_origin, ray_direction)
+		if not wb.is_empty():
+			var drawable: bool = b == whiteboard or room.may_draw_on(b)
+			hits.append({"kind": "whiteboard" if drawable else "remote", "distance": wb.distance, "board": b})
 	if is_instance_valid(whiteboard) and whiteboard.visible:
 		var wb := whiteboard.ray_hit(ray_origin, ray_direction)
-		if not wb.is_empty():
-			hits.append({"kind": "whiteboard", "distance": wb.distance})
 		for handle in whiteboard.resize_handles:
 			var d: float = handle.probe(ray_origin, ray_direction)
 			if d >= 0.0 and wb.is_empty():
@@ -610,6 +619,7 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 		if h.get("valid", false):
 			hits.append({"kind": "remote", "distance": h.distance})
 	owners.append_array(remote)
+	owners.append_array(room.remote_boards() if room else [])
 	owners.append_array([ui_overlay, virtual_keyboard, whiteboard])
 	for o in owners:
 		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
@@ -630,18 +640,42 @@ func leave_keyboard() -> void:
 
 ## The pointer is not on the whiteboard (any more): end its stroke.
 func leave_whiteboard() -> void:
-	if is_instance_valid(whiteboard):
-		whiteboard.pointer_leave()
+	for b in _boards():
+		b.pointer_leave()
+
+## Every whiteboard shown here: ours, then the others' (Room).
+func _boards() -> Array:
+	var out: Array = [whiteboard] if is_instance_valid(whiteboard) and whiteboard.visible else []
+	if room:
+		out.append_array(room.remote_boards())
+	return out
+
+## The boards we may draw on: ours, and the others' that let us.
+func _drawable_boards() -> Array:
+	return _boards().filter(func(b): return b == whiteboard or room.may_draw_on(b))
 
 ## Route a pointer ray at the whiteboard (trigger / pinch draws). Returns the
 ## hit distance, or -1 on a miss.
 func send_whiteboard_pointer(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
-	return whiteboard.pointer_ray(ray_origin, ray_direction, pressing) if is_instance_valid(whiteboard) else -1.0
+	var nearest: Node3D = null
+	var best := INF
+	for b in _drawable_boards():
+		var hit: Dictionary = b.ray_hit(ray_origin, ray_direction)
+		if not hit.is_empty() and hit.distance < best:
+			best = hit.distance
+			nearest = b
+	for b in _drawable_boards():
+		if b != nearest:
+			b.pointer_leave()
+	return nearest.pointer_ray(ray_origin, ray_direction, pressing) if nearest else -1.0
 
 ## A fingertip of hand `who` at `tip` (world): true while it draws on (or
 ## hovers just in front of) the whiteboard, and the hand's ray should rest.
 func whiteboard_touch(who: int, tip: Vector3) -> bool:
-	return is_instance_valid(whiteboard) and whiteboard.touch(who, tip)
+	for b in _drawable_boards():
+		if b.touch(who, tip):
+			return true
+	return false
 
 ## Show/hide the whiteboard (the menu, or B on desktop).
 func toggle_whiteboard() -> void:
@@ -1017,6 +1051,8 @@ func _init_ui_overlay() -> void:
 		room.join(ip, port, pin))
 	ui_overlay.room_leave_requested.connect(func(): room.leave())
 	ui_overlay.room_seat_requested.connect(back_to_seat)
+	ui_overlay.room_permission_changed.connect(func(id: int, what: String, on: bool):
+		room.set_pref(id, what, on))
 	ui_overlay.room_mic_toggled.connect(func(on: bool):
 		_room_mic = on
 		room.set_mic(on)
@@ -1078,14 +1114,19 @@ func _init_room() -> void:
 	room.port = _room_port
 	room.mic_on = _room_mic
 	room.voice_from = _cmdline_voice
+	room.open_board = _cmdline_board_open
 	room.my_name = _person_name()
 	room.setup(xr_origin, xr_camera, left_controller, right_controller)
+	room.board = whiteboard
 	add_child(room)
 	room.changed.connect(_on_room_changed)
 	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
 	whiteboard.ink.connect(func(op: Array): _ink_out.append(op))
 	if _cmdline_board:
-		_draw_test_line.call_deferred()
+		whiteboard.set_shown.call_deferred(true)
+		_draw_test_line.call_deferred(whiteboard)
+	if _cmdline_draw_remote:
+		_draw_on_remote_board.call_deferred()
 	if _cmdline_room == "open":
 		room.open(_room_port, _cmdline_room_pin)
 	elif _cmdline_room.is_valid_ip_address():
@@ -1187,15 +1228,24 @@ func _in_room_frame(node: Node3D) -> Array:
 	return [b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z,
 		t.origin.x, t.origin.y, t.origin.z].map(func(v: float): return snappedf(v, 0.001))
 
-## --im2-board: show the whiteboard and draw a diagonal on it, as a pointer does.
-func _draw_test_line() -> void:
-	whiteboard.set_shown(true)
-	var n := whiteboard.global_basis.z
+## --im2-board / --im2-draw-remote: a diagonal on `board`, as a pointer draws it.
+func _draw_test_line(board: Whiteboard) -> void:
+	await get_tree().process_frame
+	var n := board.global_basis.z
 	for i in 21:
-		var at := whiteboard.to_global(whiteboard.local_point(0.2 + 0.03 * i, 0.3 + 0.02 * i))
-		whiteboard.pointer_ray(at + n * 0.3, -n, true)
+		var at := board.to_global(board.local_point(0.2 + 0.03 * i, 0.3 + 0.02 * i))
+		board.pointer_ray(at + n * 0.3, -n, true)
 		await get_tree().process_frame
-	whiteboard.pointer_leave()
+	board.pointer_leave()
+
+func _draw_on_remote_board() -> void:
+	while true:
+		for b in room.remote_boards():
+			if room.may_draw_on(b):
+				print("[Immersive-2][TEST] drawing on someone else's whiteboard")
+				_draw_test_line(b)
+				return
+		await get_tree().create_timer(0.5).timeout
 
 func _show_overlay() -> void:
 	if ui_overlay and not ui_overlay.is_shown():
@@ -1765,6 +1815,8 @@ func _handle_debug_capture(delta: float) -> void:
 	if room:
 		for line in room.debug_lines():
 			print(line)
+		if whiteboard.visible:
+			print("[Immersive-2][TEST] my board strokes=%d" % whiteboard.stroke_count())
 	for mid in active_monitor_ids:
 		var panel := _find_panel_for_monitor(mid)
 		if panel and panel.screen_image and not panel.screen_image.is_empty():
@@ -2325,7 +2377,8 @@ func _load_config() -> void:
 ## --im2-room=open|IP (open / join a room), --im2-room-port=N, --im2-room-pin=N,
 ## --im2-name=NAME (in the room), --im2-share (share the screens there),
 ## --im2-tone (a tone instead of the microphone), --im2-no-mic (nothing),
-## --im2-board (show the whiteboard and draw a line on it).
+## --im2-board (show the whiteboard and draw a line on it), --im2-board-open
+## (whoever joins may draw on it), --im2-draw-remote (draw on someone else's).
 func _apply_cmdline_overrides() -> void:
 	var args := OS.get_cmdline_args()
 	args.append_array(OS.get_cmdline_user_args())
@@ -2369,6 +2422,10 @@ func _apply_cmdline_overrides() -> void:
 			_cmdline_voice = ""
 		elif arg == "--im2-board":
 			_cmdline_board = true
+		elif arg == "--im2-board-open":
+			_cmdline_board_open = true
+		elif arg == "--im2-draw-remote":
+			_cmdline_draw_remote = true
 		elif arg.begins_with("--im2-virtual="):
 			var wh := arg.get_slice("=", 1).split("x")
 			if wh.size() == 2:

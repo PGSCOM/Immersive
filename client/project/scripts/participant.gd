@@ -67,8 +67,16 @@ var _probe_id := 0
 var _panels := {}            ## monitor id -> ScreenPanel
 var _layouts := {}           ## monitor id -> {xform, w, curve}
 var _decoders := {}          ## monitor id -> SoftwareVideoDecoder
-## Their whiteboard, replayed here (made when they first draw or show it).
+## Their whiteboard, replayed here (made when they first draw or show it),
+## and where they have it ({on, x, w, guests}).
 var _board: Whiteboard = null
+var _board_info := {}
+## What we drew on their board (they let us), not yet sent to them.
+var _guest_ink: Array = []
+## What we see and hear of them (Room.pref(), the menu's Permissions page).
+var see_board := true
+var see_screens := true
+var hear := true
 
 ## Received, for the test harness: pose and voice packets.
 var poses_in := 0
@@ -86,9 +94,23 @@ func _process(delta: float) -> void:
 	_update_watch(delta)
 	for mid in _decoders:
 		VideoDecoder.show_on(_decoders[mid], _panels.get(mid))
-	for p in _panels.values():
+	for p in _panels.values() + ([_board] if _board else []):
 		if p.is_dragging():
 			p.set_meta("moved", true)  # put somewhere by hand: theirs no longer moves it
+	if not _guest_ink.is_empty():
+		get_parent().draw_on(peer_id, _guest_ink)
+		_guest_ink = []
+
+## What we see and hear of them: their whiteboard, their screens (off: not
+## even downloaded) and their voice.
+func set_seen(board: bool, screens: bool, voice: bool) -> void:
+	see_board = board
+	hear = voice
+	if screens != see_screens:
+		see_screens = screens
+		_stop_watching()
+		_retry_s = 0.0
+	_place_board(_board_info)
 
 # ---------------------------------------------------------------------------
 # What the room says about them
@@ -147,28 +169,49 @@ static func _xform(x: Variant) -> Variant:
 
 ## Their whiteboard where they have it, shown while theirs is.
 func _place_board(b: Variant) -> void:
-	var at: Variant = _xform(b.get("x", [])) if typeof(b) == TYPE_DICTIONARY else null
-	var on: bool = at != null and b.get("on", false) == true
-	if on:
+	_board_info = b if typeof(b) == TYPE_DICTIONARY else {}
+	var at: Variant = _xform(_board_info.get("x", []))
+	if at != null and _board_info.get("on", false) == true and see_board:
 		_ensure_board()
 		if not _board.visible:
 			_board.set_shown(true)
-		_board.transform = at
-		_board.set_panel_width(clampf(_num(b.get("w"), 1.2), Whiteboard.MIN_WIDTH, Whiteboard.MAX_WIDTH))
+		if not _board.get_meta("moved", false):
+			_board.transform = at
+			_board.set_panel_width(clampf(_num(_board_info.get("w"), 1.2), Whiteboard.MIN_WIDTH, Whiteboard.MAX_WIDTH))
 	elif _board and _board.visible:
 		_board.set_shown(false)
 
-## Their strokes as they draw them (Room._take_ink).
-func apply_ink(ops: Array) -> void:
+## Ink on their board, as [[author, op], …] (Room._take_ink); our own comes
+## back to nobody, it is on our copy already.
+func apply_ink(inked: Array) -> void:
 	_ensure_board()
-	for op in ops:
-		_board.apply_ink(op)
+	var me := multiplayer.get_unique_id()
+	for pair in inked:
+		if typeof(pair) == TYPE_ARRAY and pair.size() == 2 and typeof(pair[0]) == TYPE_INT and pair[0] != me:
+			_board.apply_ink(pair[1], pair[0])
+
+## They show a whiteboard; we see it here; they let us draw on it.
+func shows_board() -> bool:
+	return _board_info.get("on", false) == true
+
+func board_shown() -> bool:
+	return _board != null and _board.visible
+
+func board_node() -> Whiteboard:
+	return _board
+
+func may_draw() -> bool:
+	var guests = _board_info.get("guests", [])
+	return typeof(guests) == TYPE_ARRAY and guests.has(multiplayer.get_unique_id())
 
 func _ensure_board() -> void:
 	if _board == null:
 		_board = Whiteboard.new()
 		_board.name = "Board"
 		add_child(_board)
+		# What we draw on it (when they let us: main.gd only lets the pointer
+		# draw then) goes to them.
+		_board.ink.connect(func(op: Array): _guest_ink.append(op))
 
 ## A number from the network, or `default` for anything else.
 static func _num(v: Variant, default: float) -> float:
@@ -235,6 +278,8 @@ func push_voice(pcm: PackedByteArray) -> void:
 		return
 	voice_in += 1
 	_voice_at_ms = Time.get_ticks_msec()
+	if not hear:
+		return
 	var frames := Room.decode_voice(pcm)
 	var queued := _voice_capacity - _voice_pb.get_frames_available()
 	if queued + frames.size() > VOICE_MAX:
@@ -275,10 +320,13 @@ func occluder_points() -> Array:
 func remote_panels() -> Array:
 	return _panels.values().filter(func(p): return is_instance_valid(p) and p.visible)
 
-## "" (not sharing), "connecting", "live" (n screens), "refused", "unreachable".
+## "" (not sharing), "hidden" (we turned them off), "connecting", "live" (n
+## screens), "refused", "unreachable".
 func watch_state() -> String:
 	if _share.is_empty():
 		return ""
+	if not see_screens:
+		return "hidden"
 	if _refused:
 		return "refused"
 	if _net == null:
@@ -286,7 +334,7 @@ func watch_state() -> String:
 	return "live" if not _panels.is_empty() else "connecting"
 
 func _update_watch(delta: float) -> void:
-	if _share.is_empty() or _refused:
+	if _share.is_empty() or _refused or not see_screens:
 		return
 	if _net == null:
 		_retry_s -= delta
