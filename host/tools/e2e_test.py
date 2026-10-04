@@ -439,8 +439,11 @@ def multiplayer(host):
     ben.wait_for(r"remote board peer=Ana shown=true strokes=2", 20)
     print("      Ana let Ben draw on her board: his line is on hers, and on his copy")
     mark = ana.mark()
+    host_mark = host.mark()
     ben.signal(signal.SIGINT)  # quits cleanly: leaves the room
     ana.wait_for(r"\[Room\] Ben left", 40, mark)
+    host.wait_for(r"shares its screens with its room", 10, host_mark)
+    print("      Ben left: Ana's PC got a new watch code (his no longer works)")
     lines = ana.lines + ben.lines + eve.lines
     for p in (ana, ben, host2):
         p.stop()

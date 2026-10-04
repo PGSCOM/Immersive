@@ -16,10 +16,12 @@
 ## its history). Someone we let draw sends their ops to us (`_draw_on`) and we
 ## pass them on; ops we refuse (they may not, or no more) get them our board
 ## as it is, so their copy drops what we did not take. What we see and hear of
-## each person, and who draws on our board, is up to us (pref(), the menu's
-## Permissions page; this session only).
+## each person, who draws on our board and who may watch our screens is up to
+## us (pref(), the menu's Permissions page; this session only).
 ## The screens never go through the room: each PC streams them straight to the
-## headsets that watch it (Participant, protocol.h WatchCode).
+## headsets that watch it (Participant, protocol.h WatchCode). How to watch
+## ours (the code) goes only to whom we let (_profile_for()), and a new code
+## replaces it whenever one of them should not watch any more (watch_revoked).
 ##
 ## Everything is in the room frame (this node's, i.e. the world), not the
 ## tracking origin: walking (main.gd moves XROrigin3D) carries us towards the
@@ -38,6 +40,10 @@ signal changed
 signal rooms_found(rooms: Array)
 ## A voice packet from someone (client/tests/room_bot.gd repeats them).
 signal voice_heard(peer_id: int, pcm: PackedByteArray)
+## Someone who may know how to watch our PC should not any more: they left,
+## or we turned off their "Sees my screens". main.gd gives the PC a new
+## watch code (which drops every watcher) and tells it only to the others.
+signal watch_revoked(peer_id: int)
 
 enum State { OFF, JOINING, IN }
 
@@ -320,7 +326,7 @@ func _on_peer_connected(id: int) -> void:
 		_prefs[id] = {"draw": true}
 		_publish_board()
 	p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
-	_take_profile.rpc_id(id, _profile)
+	_take_profile.rpc_id(id, _profile_for(id))
 	if board and board.visible:
 		_sync_board(id)
 	changed.emit()
@@ -337,6 +343,7 @@ func _on_peer_disconnected(id: int) -> void:
 	if pref(id, "draw"):
 		_prefs.erase(id)
 		_publish_board()
+	watch_revoked.emit(id)  # they still know the code
 	changed.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -515,9 +522,9 @@ func _flush_ink() -> void:
 	for id in _synced:
 		_take_ink.rpc_id(id, inked)
 
-## What we see and hear of person `id`, and whether they may draw on our
-## board: "board", "screens", "voice" (all on unless turned off), "draw" (off
-## unless turned on).
+## What we see and hear of person `id`, whether they may draw on our board
+## and watch our screens: "board", "screens", "voice", "watch" (all on unless
+## turned off), "draw" (off unless turned on).
 func pref(id: int, what: String) -> bool:
 	return _prefs.get(id, {}).get(what, what != "draw")
 
@@ -530,6 +537,10 @@ func set_pref(id: int, what: String, on: bool) -> void:
 		p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
 	if what == "draw":
 		_publish_board()
+	if what == "watch":
+		if not on:
+			watch_revoked.emit(id)  # main.gd: a new code, for the others only
+		_publish()
 	changed.emit()
 
 func sharing() -> bool:
@@ -537,8 +548,19 @@ func sharing() -> bool:
 
 func _publish() -> void:
 	if state == State.IN and _peer:
-		_take_profile.rpc(_profile)
+		for id in _people:
+			_take_profile.rpc_id(id, _profile_for(id))
 	changed.emit()
+
+## Our profile as person `id` gets it: without how to watch our PC unless
+## they may ("Sees my screens").
+func _profile_for(id: int) -> Dictionary:
+	if pref(id, "watch") or _profile.share.is_empty():
+		return _profile
+	var p := _profile.duplicate()
+	p.share = {}
+	p.screens = []
+	return p
 
 func _my_pose() -> PackedFloat32Array:
 	var o := global_transform.affine_inverse()
@@ -652,7 +674,7 @@ static func decode_voice(pcm: PackedByteArray) -> PackedVector2Array:
 ## Who is here, us first: [{id, name, me, host, tone, mic, speaking, screens
 ## (Participant.watch_state(), or "live" for us while sharing), count,
 ## and for the others board (they show one), see_board, see_screens, hear,
-## draw (see pref()), may_draw (we may draw on theirs)}].
+## draw, watch (see pref()), may_draw (we may draw on theirs)}].
 func people() -> Array:
 	var me := multiplayer.get_unique_id()
 	var out := [{"id": me, "name": my_name, "me": true, "host": is_host, "tone": _tone_for(me),
@@ -666,7 +688,8 @@ func people() -> Array:
 			"mic": p.mic_on, "speaking": p.is_speaking(), "screens": p.watch_state(),
 			"count": p.remote_panels().size(), "board": p.shows_board(),
 			"see_board": pref(id, "board"), "see_screens": pref(id, "screens"),
-			"hear": pref(id, "voice"), "draw": pref(id, "draw"), "may_draw": p.may_draw()})
+			"hear": pref(id, "voice"), "draw": pref(id, "draw"), "watch": pref(id, "watch"),
+			"may_draw": p.may_draw()})
 	return out
 
 ## Points on everyone else and what they show (world), so main.gd can tell

@@ -65,6 +65,10 @@ var _refused := false
 var _probe_s := 0.0
 var _probe_id := 0
 var _panels := {}            ## monitor id -> ScreenPanel
+## Monitor id -> where we put that screen by hand (local transform): kept when
+## the stream comes back (their PC's watch code changes whenever someone
+## leaves the room, and every watcher reconnects).
+var _moved := {}
 var _layouts := {}           ## monitor id -> {xform, w, curve}
 var _decoders := {}          ## monitor id -> SoftwareVideoDecoder
 ## Their whiteboard, replayed here (made when they first draw or show it),
@@ -394,6 +398,9 @@ func _on_stream_started(mid: int, w: int, h: int, codec: int) -> void:
 		p.set_meta("monitor_id", mid)
 		add_child(p)
 		_panels[mid] = p
+		if _moved.has(mid):
+			p.transform = _moved[mid]
+			p.set_meta("moved", true)
 	p.set_resolution(w, h, codec)
 	_place_screens()
 	var sw := SoftwareVideoDecoder.new()
@@ -410,6 +417,8 @@ func _on_stream_stopped(mid: int) -> void:
 func _drop_screen(mid: int) -> void:
 	_close_decoder(mid)
 	if is_instance_valid(_panels.get(mid)):
+		if _panels[mid].get_meta("moved", false):
+			_moved[mid] = _panels[mid].transform
 		_panels[mid].queue_free()
 	_panels.erase(mid)
 
@@ -418,15 +427,16 @@ func _close_decoder(mid: int) -> void:
 		_decoders[mid].close()
 		_decoders.erase(mid)
 
-## Each screen where they have it, unless it was moved by hand here. One with
-## no layout yet stays hidden (it would sit on the floor at their seat).
+## Each screen where they have it, unless it was moved by hand here (then it
+## only takes their width and curve). One with no layout yet stays hidden (it
+## would sit on the floor at their seat).
 func _place_screens() -> void:
 	for mid in _panels:
 		var p: MeshInstance3D = _panels[mid]
-		if p.get_meta("moved", false):
-			continue
-		p.visible = _layouts.has(mid)
-		if not p.visible:
+		var moved: bool = p.get_meta("moved", false)
+		if not moved:
+			p.visible = _layouts.has(mid)
+		if not _layouts.has(mid):
 			continue
 		var l: Dictionary = _layouts[mid]
 		if p.get_meta("curve", -1.0) != l.curve:
@@ -434,7 +444,8 @@ func _place_screens() -> void:
 			p.set_curvature(l.curve > 0.001, l.curve)
 		if absf(p.panel_width - l.w) > 0.001:
 			p.set_panel_width(l.w)
-		p.transform = l.xform
+		if not moved:
+			p.transform = l.xform
 
 ## Centre pixel of each screen they share, and their board, for the test harness.
 func debug_lines() -> Array:

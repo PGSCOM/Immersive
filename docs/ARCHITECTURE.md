@@ -143,8 +143,9 @@ No server and no account: a room is a handful of headsets talking directly.
   drops them from the guest's copy too.
 - **Permissions** (the Room tab's page, `Room.pref()`): per person, whether we
   see their whiteboard and their screens (off: not even downloaded) and hear
-  their voice, all only on our side, and whether they may draw on our board.
-  This session only. About
+  their voice, all only on our side, whether they may draw on our board, and
+  whether they may watch our screens ("Sees my screens": off, their profile
+  of us comes without the watch code). This session only. About
   3 KB/s of poses and 32 KB/s of voice per person talking.
 - **Screens never go through the room.** A headset that shares sends its PC a
   random WATCH_CODE and, once the host has it, tells the room the PC's
@@ -155,6 +156,11 @@ No server and no account: a room is a handful of headsets talking directly.
   client decodes it (a PC too), it takes a few Mbps whatever the sharer
   streams at, and the sharer's own stream never depends on who watches. A
   watcher can do nothing but watch. Sharing is off by default and never saved.
+  Whenever someone who knows the code should not watch any more (they leave
+  the room, or lose "Sees my screens"), the sharer's PC gets a new code
+  (`Room.watch_revoked` → `main.gd::_rotate_watch_code()`), which drops every
+  watcher, and only the others learn it; a screen someone moved by hand stays
+  where they put it when its stream comes back.
 - **One room frame.** Poses, screens and whiteboards are sent in the room's
   frame (the world), not the tracking origin, so people can move: walking
   carries XROrigin3D through the world (left stick walks, right stick turns

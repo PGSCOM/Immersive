@@ -256,7 +256,7 @@ var _perm_ids: Array = []          ## whose rows the table has now
 var _perm_switches := {}           ## [peer id, key] -> CheckButton
 ## The Permissions page's columns: [heading, Room.pref() key, people() field].
 const PERMISSIONS := [["Their whiteboard", "board", "see_board"], ["Their screens", "screens", "see_screens"],
-	["Their voice", "voice", "hear"], ["Draws on mine", "draw", "draw"]]
+	["Their voice", "voice", "hear"], ["Draws on mine", "draw", "draw"], ["Sees my screens", "watch", "watch"]]
 
 # Styles
 var _st_button: Dictionary
@@ -1961,7 +1961,7 @@ func _build_permissions_page(body: VBoxContainer) -> void:
 	body.add_child(_perm_grid)
 	_lbl_perm_empty = _label("Nobody else is in the room yet.", 19, UiTheme.INK_3)
 	body.add_child(_lbl_perm_empty)
-	var note := _label("Turning off their whiteboard, screens or voice is only for you; their screens are not even downloaded then. \"Draws on mine\" lets them draw on your whiteboard.", 17, UiTheme.INK_3)
+	var note := _label("Turning off their whiteboard, screens or voice is only for you; their screens are not even downloaded then. \"Draws on mine\" lets them draw on your whiteboard. \"Sees my screens\" off: they cannot watch what you share (your PC gets a new code, which they never learn).", 17, UiTheme.INK_3)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_child(note)
 

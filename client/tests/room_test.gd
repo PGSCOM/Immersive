@@ -214,6 +214,21 @@ func _whiteboards() -> void:
 	room.queue_ink(["b", "ece6dc", 5.0, 10.0, 10.0])
 	room._flush_ink()
 	check(room._ink_out.is_empty(), "ink drawn outside a room is dropped (the snapshot will carry it)")
+
+	# Who may watch our screens: the code goes only to them, and turning
+	# someone off, or anyone leaving, asks main.gd for a new code.
+	var revoked := []
+	room.watch_revoked.connect(func(id): revoked.append(id))
+	room.set_share({"ip": "192.168.1.20", "port": 19800, "code": 4242})
+	room.set_screens([{"id": 0, "x": [], "w": 1.6, "c": 0.0}])
+	room.set_pref(5, "watch", false)
+	check(room._profile_for(5).share.is_empty() and room._profile_for(5).screens.is_empty()
+		and room._profile_for(6).share.code == 4242 and room._profile.share.code == 4242,
+		"someone who may not watch gets no code (the others do)")
+	room.set_pref(5, "watch", true)
+	room._on_peer_disconnected(6)
+	check(revoked == [5, 6] and room._profile_for(5).share.code == 4242,
+		"turning someone off and someone leaving both ask for a new code -> %s" % [revoked])
 	host_copy.queue_free()
 	own.queue_free()
 	room.queue_free()

@@ -1118,6 +1118,7 @@ func _init_room() -> void:
 	room.board = whiteboard
 	add_child(room)
 	room.changed.connect(_on_room_changed)
+	room.watch_revoked.connect(func(_id: int): _rotate_watch_code())
 	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
 	whiteboard.ink.connect(room.queue_ink)
 	if _cmdline_board:
@@ -1176,6 +1177,19 @@ func _update_share() -> void:
 		_watch_probe = -1
 		room.set_share({})
 		room.set_screens([])
+
+## Someone who knows our watch code should not watch any more (they left, or
+## lost "Sees my screens"): the room forgets where to watch (the others stop
+## at once instead of trying the old code), and the PC gets a new code, which
+## drops every watcher; the room hears the new one once the host has it, and
+## only those who may watch get it (Room._profile_for()).
+func _rotate_watch_code() -> void:
+	if _watch_code == 0:
+		return
+	room.set_share({})
+	_watch_code = 0
+	_watch_probe = -1
+	_update_share()
 
 ## The host has our code: tell the room where to watch from. The PC's network
 ## address, as we reach it or as it says in HELLO_ACK (over the USB cable we
