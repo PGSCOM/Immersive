@@ -5,7 +5,11 @@
 ## answers LAN discovery on `port` + 1, so the others find it in a list) and
 ## relays between the rest, who join with its address and the room's six-digit
 ## PIN (SceneMultiplayer authentication; five wrong ones lock an address out
-## for a minute). Through the room go each person's profile (name, microphone,
+## for a minute). Everything in the room is encrypted (DTLS, a self-signed
+## certificate made once per run): nobody else on the network reads the PIN,
+## the voices or how to watch someone's PC. The certificate is not checked
+## (there is nothing to check it against), so it keeps out who listens, not
+## someone who sits between us and the room. Through the room go each person's profile (name, microphone,
 ## how to watch their PC and where their shared screens hang), their pose
 ## (head and hands relative to their XROrigin3D, POSE_HZ) and their voice
 ## (16 kHz mono PCM in 20 ms packets, only while louder than a noise gate).
@@ -59,6 +63,8 @@ const VOICE_CHUNK := 320           ## 20 ms
 const GATE_RMS := 0.012
 const GATE_HOLD_S := 0.35
 const MIC_BUS := "RoomMic"
+## The name in the room's certificate (DTLS); joiners do not check it.
+const TLS_NAME := "immersive-room"
 
 var state := State.OFF
 var is_host := false
@@ -110,6 +116,9 @@ var _last_summary := ""
 var _disc: PacketPeerUDP = null    ## answers LAN discovery while we host
 var _finder: HostDiscovery = null  ## finds rooms while we are in none
 var _failures := {}                ## address -> {n, until}: wrong PINs
+## The room's DTLS key and certificate, made the first time we open one.
+static var _tls_key: CryptoKey = null
+static var _tls_cert: X509Certificate = null
 
 # Microphone: captured on a muted bus, mixed to mono, box-filtered down to
 # VOICE_RATE, gated, and sent VOICE_CHUNK samples at a time.
@@ -190,9 +199,14 @@ func open(at_port: int = PORT, with_pin: int = 0) -> bool:
 		_peer = null
 		_say("Could not open a room: UDP port %d is in use on this headset." % at_port)
 		return false
+	if _peer.host.dtls_server_setup(_tls_server()) != OK:
+		_peer.close()
+		_peer = null
+		_say("Could not open a room: encryption (DTLS) is not available here.")
+		return false
 	is_host = true
 	port = at_port
-	pin = with_pin if with_pin >= 100000 else randi_range(100000, 999999)
+	pin = with_pin if with_pin >= 100000 else random_pin()
 	address = lan_address()
 	multiplayer.multiplayer_peer = _peer
 	_disc = PacketPeerUDP.new()
@@ -205,7 +219,8 @@ func open(at_port: int = PORT, with_pin: int = 0) -> bool:
 func join(ip: String, at_port: int, with_pin: int) -> void:
 	leave()
 	_peer = ENetMultiplayerPeer.new()
-	if _peer.create_client(ip, at_port) != OK:
+	if _peer.create_client(ip, at_port) != OK \
+			or _peer.host.dtls_client_setup(TLS_NAME, TLSOptions.client_unsafe()) != OK:
 		_peer = null
 		_say("Could not reach %s." % ip)
 		return
@@ -260,6 +275,27 @@ func look_for_rooms(on: bool) -> void:
 		_finder.start()
 	else:
 		_finder.stop()
+
+## A room PIN: six digits from the system's random source (not randi(), whose
+## state other outputs could give away).
+static func random_pin() -> int:
+	return 100000 + Crypto.new().generate_random_bytes(4).decode_u32(0) % 900000
+
+## A watch code (protocol.h WatchCode): 1 to 2^31-1, from the same source.
+static func random_code() -> int:
+	var code := 0
+	while code == 0:
+		code = Crypto.new().generate_random_bytes(4).decode_u32(0) & 0x7FFFFFFF
+	return code
+
+## The DTLS server side: an RSA key and a self-signed certificate, made the
+## first time a room opens in this run (a moment's work) and kept until quit.
+static func _tls_server() -> TLSOptions:
+	if _tls_key == null:
+		var crypto := Crypto.new()
+		_tls_key = crypto.generate_rsa(2048)
+		_tls_cert = crypto.generate_self_signed_certificate(_tls_key, "CN=%s" % TLS_NAME)
+	return TLSOptions.server(_tls_key, _tls_cert)
 
 ## This headset's address on the local network, for others to type.
 static func lan_address() -> String:

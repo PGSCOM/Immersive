@@ -1166,7 +1166,7 @@ func _update_share() -> void:
 	var connected := current_state == State.CONNECTED or current_state == State.STREAMING
 	var want := share_screens and connected and room.state == Room.State.IN
 	if want and _watch_code == 0:
-		_watch_code = randi_range(1, 0x7FFFFFFF)
+		_watch_code = Room.random_code()
 		network_client.send_watch_code(_watch_code)
 		_watch_probe = _probe_id + 1
 		_latency_timer = LATENCY_INTERVAL  # that probe goes out now

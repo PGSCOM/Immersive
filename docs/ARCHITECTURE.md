@@ -119,7 +119,12 @@ No server and no account: a room is a handful of headsets talking directly.
   headset opens it (UDP 19820, `--im2-room-port` in tests) and relays between
   the others; it also answers LAN discovery on 19821, so the Room tab lists
   it. Joining takes its address and its six-digit PIN (SceneMultiplayer
-  authentication; five wrong PINs lock an address out for a minute). Over the
+  authentication; five wrong PINs lock an address out for a minute). The room
+  is encrypted (ENet's DTLS, a self-signed RSA certificate made the first time
+  a room opens in that run; joiners do not verify it, so it stops anyone
+  listening on the network, not someone in the middle). PINs and watch codes
+  come from `Crypto.generate_random_bytes()`, not `randi()`. The HELLO a
+  watcher sends the sharer's PC is not encrypted, like any HELLO with a PIN. Over the
   internet that means a VPN (Tailscale, ZeroTier...) or a forwarded port: the
   room and each sharer's PC must be reachable. If the headset that opened the
   room leaves, the room closes.

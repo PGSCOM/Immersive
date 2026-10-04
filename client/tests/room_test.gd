@@ -232,6 +232,38 @@ func _whiteboards() -> void:
 	host_copy.queue_free()
 	own.queue_free()
 	room.queue_free()
+	await _encrypted()
+
+## The room speaks DTLS only: a plain ENet client never gets in, one that
+## speaks DTLS does. PINs and watch codes come from the system's random source.
+func _encrypted() -> void:
+	var room := Room.new()
+	root.add_child(room)
+	await process_frame
+	var port := 45610
+	check(room.open(port, 135790), "a room opens, encrypted")
+	var plain := ENetMultiplayerPeer.new()
+	plain.create_client("127.0.0.1", port)
+	var dtls := ENetMultiplayerPeer.new()
+	dtls.create_client("127.0.0.1", port)
+	dtls.host.dtls_client_setup(Room.TLS_NAME, TLSOptions.client_unsafe())
+	for i in 150:  # real time (--fixed-fps runs frames as fast as it can): 1.5 s
+		plain.poll()
+		dtls.poll()
+		OS.delay_msec(10)
+		await process_frame
+	check(plain.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED
+		and dtls.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED,
+		"a plain client is not let in, a DTLS one is -> %d / %d" % [plain.get_connection_status(),
+			dtls.get_connection_status()])
+	plain.close()
+	dtls.close()
+	room.leave()
+	var pins := range(20).map(func(_i): return Room.random_pin())
+	var codes := range(20).map(func(_i): return Room.random_code())
+	check(pins.all(func(p): return p >= 100000 and p <= 999999) and codes.all(func(c): return c >= 1 and c <= 0x7FFFFFFF)
+		and pins.any(func(p): return p != pins[0]), "random PINs have six digits, codes 31 bits")
+	room.queue_free()
 
 ## Walking, turning and pulling move the tracking origin; the head keeps its
 ## place in a turn; a screen in between hides what is behind it.
