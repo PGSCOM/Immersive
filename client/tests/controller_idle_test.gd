@@ -19,6 +19,9 @@ extends SceneTree
 ##   - put down, a slow drift of its tracking, a one-frame jump (the cameras
 ##     finding it again) or its position wandering with the orientation frozen
 ##     (the Pico in passthrough) does not wake it, a hand lifting it does;
+##   - just put down, its position wandering with the orientation frozen does
+##     not keep it in use, and lying there its tracking lost and found again
+##     does not wake it (the hands keep the pointer);
 ##   - with a grip pose the model sits on it and the ray starts at the model's
 ##     tip, still at the ray angle.
 ##
@@ -302,6 +305,19 @@ func _run() -> void:
 		right.rotate_object_local(Vector3.RIGHT, 0.01)
 		await process_frame
 	check(model.visible, "picked up: back at once")
+	# Put down and lost by the Pico at once (passthrough): the orientation
+	# frozen, the position wandering 1.2 cm every half second.
+	for i in 72 * 4:
+		if i % 36 == 0:
+			right.position.x += 0.012 if (i / 36) % 2 == 0 else -0.012
+		await process_frame
+	check(not model.visible and not r.in_use(),
+		"just put down, its position wandering with the orientation frozen: put down all the same")
+	pads[&"right_hand"].invalidate_pose(&"default")
+	await _frames(10)
+	pads[&"right_hand"].set_pose(&"default", right.transform, Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	await _frames(3)
+	check(not model.visible and not r.in_use(), "lying there, its tracking lost and found again does not wake it")
 
 	# --- Model on the grip pose, ray from its tip ---------------------------
 	var pad: XRControllerTracker = pads[&"right_hand"]

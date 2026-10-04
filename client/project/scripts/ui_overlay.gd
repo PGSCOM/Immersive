@@ -480,6 +480,11 @@ func touch(who: int, tip: Vector3) -> bool:
 		_inject_button(_finger_down, MOUSE_BUTTON_LEFT)
 	return true
 
+## True while the fingertip that owns it came close enough to rest its
+## hand's ray (FingerTouch.resting); hovering further out, the ray points on.
+func finger_rests() -> bool:
+	return _finger.owner >= 0 and _finger.resting
+
 func _finger_up() -> void:
 	if _finger_down:
 		_finger_down = false

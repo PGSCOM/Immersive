@@ -41,8 +41,12 @@ const PUSH_PULL_SPEED := 1.6   ## metres per second at full deflection
 const RESIZE_SPEED := 0.9      ## metres of width per second
 ## A controller left still this long (put down on the desk) disappears, laser
 ## included, and stops driving the pointer until it moves again.
+## Still in use, a move counts only with some turn too (IDLE_MIN_TURN_RAD,
+## for the frozen orientation below): otherwise a controller the Pico lost
+## just after it was put down would wander on and never let the hands point.
 const IDLE_HIDE_S := 3.0
 const IDLE_MOVE_M := 0.01
+const IDLE_MIN_TURN_RAD := 0.003  # 0.17°: any hand, never a frozen pose
 const IDLE_TURN_RAD := 0.05
 ## A put-down controller wakes when picked up: moved WAKE_MOVE_M or turned
 ## WAKE_TURN_RAD away from where it lies, measured against its pose smoothed
@@ -51,7 +55,9 @@ const IDLE_TURN_RAD := 0.05
 ## again (it lies on the desk), not a hand: it moves the rest pose instead.
 ## Nor is a move without the least turn: a hand always tilts what it lifts,
 ## while the Pico (in passthrough) freezes the orientation of a controller its
-## cameras lost and lets the position wander, 3-4 cm at a time.
+## cameras lost and lets the position wander, 3-4 cm at a time. Its
+## tracking coming back is no pick-up either (the cameras found it on the
+## desk); a hand that took it meanwhile moves it, or presses something.
 const WAKE_MOVE_M := 0.03
 const WAKE_MIN_TURN_RAD := 0.017  # 1°
 const WAKE_TURN_RAD := 0.35
@@ -613,14 +619,17 @@ func _set_grip_state(pressed: bool) -> void:
 
 ## Counts how long the controller has sat still (put down after IDLE_HIDE_S).
 ## A held trigger or grip means it is in a hand, however still. Put down, only
-## a real pick-up wakes it (see WAKE_MOVE_M), or its tracking coming back.
+## a real pick-up wakes it (see WAKE_MOVE_M); its tracking coming back keeps
+## it in use only if it still was.
 func _update_idle(delta: float) -> void:
 	var now := controller.global_transform
 	var tracked := controller.get_has_tracking_data()
-	var woke := tracked and not _was_tracked
+	var woke := tracked and not _was_tracked and _idle_s < IDLE_HIDE_S
 	_was_tracked = tracked
 	if _idle_s < IDLE_HIDE_S:
-		woke = woke or _moved(now, _idle_ref) > IDLE_MOVE_M or _turned(now, _idle_ref) > IDLE_TURN_RAD
+		var turned := _turned(now, _idle_ref)
+		woke = woke or turned > IDLE_TURN_RAD \
+			or (_moved(now, _idle_ref) > IDLE_MOVE_M and turned > IDLE_MIN_TURN_RAD)
 		_rest = now
 	elif _moved(now, _last_pose) > JUMP_M or _turned(now, _last_pose) > JUMP_TURN_RAD:
 		if Time.get_ticks_msec() - _jump_logged_ms > 2000:

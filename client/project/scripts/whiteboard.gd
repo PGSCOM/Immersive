@@ -118,6 +118,11 @@ func touch(who: int, tip: Vector3) -> bool:
 	_point(uv, _finger.pressed)
 	return true
 
+## True while the fingertip that owns it came close enough to rest its
+## hand's ray (FingerTouch.resting); hovering further out, the ray points on.
+func finger_rests() -> bool:
+	return _finger.owner >= 0 and _finger.resting
+
 ## The pointer went elsewhere: end the stroke, hide the ring.
 func pointer_leave() -> void:
 	if _finger.owner < 0:

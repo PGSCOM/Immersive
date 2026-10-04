@@ -14,7 +14,8 @@
 ##     drags the page (wheel), on the screens and the menu.
 ##   • Either hand — touch the keyboard, the menu or the whiteboard with the
 ##     index fingertip to type, press or draw (main.gd's finger_touch,
-##     FingerTouch); while it does, the pointing hand's ray rests.
+##     FingerTouch); once the tip comes within FingerTouch.REST_M the pointing
+##     hand's ray rests, never while it pinches or holds something.
 ##   • Other hand — turn its palm towards your face and a menu mark shows next
 ##     to it; a short pinch toggles the menu (as on the Quest). A long pinch is
 ##     left to the headset's own gestures.
@@ -80,8 +81,18 @@ const TWIST_BETA := 5.0
 const SCROLL_PER_M := 12000.0
 const SCROLL_SLOP_M := 0.012
 const RIGHT_CLICK_MAX_S := 0.6
+## A middle pinch is a deliberate one: tips closer than MID_PRESS_M (the
+## index's PINCH_PRESS_M is looser), the index clearly open (farther than
+## PINCH_RELEASE_M from the thumb) and the middle finger reaching out to the
+## thumb, its tip over MID_REACH_M from its knuckle. Pointing curls the middle
+## finger into the palm with the thumb resting on it (the Pico guesses those
+## hidden fingers, often tip to tip): that is no pinch, and it must never keep
+## the index from clicking.
+const MID_PRESS_M := 0.015
+const MID_REACH_M := 0.045
 const INDEX_TIP := XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP
 const MIDDLE_TIP := XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP
+const MIDDLE_KNUCKLE := XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL
 const MAX_RAY_LENGTH := 8.0
 ## Palm menu: the palm faces the eyes within ~53° and the eyes look at it
 ## within ~41°; the mark floats this far off the palm; a pinch held longer
@@ -104,6 +115,7 @@ var _pinch_active: bool = false     # button held down on a target
 var _point_pinching: bool = false   # fingers pinched (with hysteresis)
 var _point_armed: bool = false      # seen open since the hand got the pointer
 var _point_tracked: bool = false
+var _resting: bool = false          # a fingertip on a panel rests the ray (logged)
 var _owns: bool = false             # no controller in use: the hands point
 var _knuckle: Vector3 = Vector3.ZERO  # where the beam starts this frame
 var _press_origin: Vector3 = Vector3.ZERO
@@ -112,6 +124,7 @@ var _hold_origin: Vector3 = Vector3.ZERO   # the ray last frame (kept while a pi
 var _hold_dir: Vector3 = Vector3.FORWARD
 # Middle-finger pinch: right click, or scroll once moved.
 var _mid_pinching: bool = false
+var _mid_armed: bool = false        # the middle pinch seen open since the hand got the pointer
 var _mid_s: float = 0.0
 var _mid_from: Vector3 = Vector3.ZERO
 var _mid_last: Vector3 = Vector3.ZERO
@@ -189,7 +202,14 @@ func _process(delta: float) -> void:
 	if tracked != _point_tracked:
 		_point_tracked = tracked
 		print("[HandInput] %s hand %s" % ["Left" if _point_left else "Right", "tracked" if tracked else "lost"])
-	if tracked and _touch(_point_left):
+	# A pinch (or a grab) in progress keeps the ray: the curling index may
+	# brush a panel, which must neither type nor drop what the hand holds.
+	var resting := tracked and not (_point_pinching or _mid_pinching or _grab != null) \
+		and _touch(_point_left)
+	if resting != _resting:
+		_resting = resting
+		print("[HandInput] %s" % ("Fingertip on a panel: the ray rests" if resting else "Fingertip off the panels: the hand points"))
+	if resting:
 		_let_go()  # the fingertip touches a panel: no ray meanwhile
 	elif tracked:
 		_process_pointing_hand(delta)
@@ -228,6 +248,7 @@ func _let_go() -> void:
 	_point_pinching = false
 	_point_armed = false
 	_mid_pinching = false
+	_mid_armed = false
 	_torso_yaw = NAN
 	_drop_grab()
 	_end_pinch_if_active()
@@ -256,21 +277,27 @@ func _process_pointing_hand(delta: float) -> void:
 	# view) is not a click: the Pico reports a pinched hand for a controller
 	# lying on the desk. It must open first.
 	var pinching := _is_pinching(_point_left, _point_pinching, delta)
-	var mid := _is_pinching(_point_left, _mid_pinching, delta, MIDDLE_TIP)
-	# One pinch at a time: the finger nearer the thumb, until it opens.
+	var mid := _is_pinching(_point_left, _mid_pinching, delta, MIDDLE_TIP, MID_PRESS_M)
+	# Each pinch arms on its own: whatever the middle finger does, an index
+	# seen open can click.
+	if not pinching:
+		_point_armed = true
+	if not mid:
+		_mid_armed = true
+	# One pinch at a time, the index first (see MID_PRESS_M).
 	if _point_pinching:
 		mid = false
 	elif _mid_pinching:
-		pinching = false
-	elif pinching and mid:
-		if _pinch_distance(tracker, MIDDLE_TIP) < _pinch_distance(tracker):
-			pinching = false
-		else:
+		if pinching and not _scrolling:
+			# The index closed too: an index pinch after all, no right click.
 			mid = false
-	if not pinching and not mid:
-		_point_armed = true
+			_mid_s = RIGHT_CLICK_MAX_S
+		else:
+			pinching = false
+	elif mid and (pinching or not _mid_pinch_shape(tracker)):
+		mid = false
 	var should_press := pinching and _point_armed
-	var mid_press := mid and _point_armed
+	var mid_press := mid and _point_armed and _mid_armed
 	var mid_was := _mid_pinching
 	var pressed_now := should_press and not _point_pinching
 	if should_press != _point_pinching:
@@ -401,6 +428,18 @@ func _point_at_panel(hit: Dictionary, should_press: bool, origin: Vector3, direc
 	_last_monitor_id = monitor_id
 	_last_pixel = pixel
 	_update_pointer_visual(origin, direction, hit.get("distance", MAX_RAY_LENGTH), true)
+
+## A thumb + middle pinch as it is made on purpose: the index open, the middle
+## finger reaching out (see MID_PRESS_M). An unreported joint does not count
+## against it.
+func _mid_pinch_shape(tracker: XRHandTracker) -> bool:
+	var index_gap := _pinch_distance(tracker)
+	if index_gap >= 0.0 and index_gap < PINCH_RELEASE_M:
+		return false
+	if not (_joint_has_valid_position(tracker, MIDDLE_KNUCKLE) and _joint_has_valid_position(tracker, MIDDLE_TIP)):
+		return true
+	return tracker.get_hand_joint_transform(MIDDLE_KNUCKLE).origin.distance_to(
+		tracker.get_hand_joint_transform(MIDDLE_TIP).origin) > MID_REACH_M
 
 ## Middle pinch: once the hand has moved, the page under the pointer follows
 ## it (wheel); a short one that never moved right-clicks there as it opens.
@@ -692,14 +731,15 @@ func _filter_direction(direction: Vector3, delta: float) -> Vector3:
 static func _euro_alpha(cutoff: float, delta: float) -> float:
 	return 1.0 / (1.0 + 1.0 / (TAU * cutoff * delta))
 
-## Thumb and `finger` tips together, with hysteresis on `was_pinching` and a
-## short hold before letting go (see PINCH_RELEASE_HOLD_S).
-func _is_pinching(left: bool, was_pinching: bool, delta: float, finger: int = INDEX_TIP) -> bool:
+## Thumb and `finger` tips together (closer than `press_m`), with hysteresis
+## on `was_pinching` and a short hold before letting go (PINCH_RELEASE_HOLD_S).
+func _is_pinching(left: bool, was_pinching: bool, delta: float, finger: int = INDEX_TIP,
+		press_m: float = PINCH_PRESS_M) -> bool:
 	var dist := _pinch_distance(hand_tracker(left), finger)
 	if dist < 0.0:
 		return was_pinching  # tips not tracked this frame: keep what we had
 	var key := Vector2i(int(left), finger)
-	if dist < (PINCH_RELEASE_M if was_pinching else PINCH_PRESS_M):
+	if dist < (PINCH_RELEASE_M if was_pinching else press_m):
 		_open_s[key] = 0.0
 		return true
 	_open_s[key] = _open_s.get(key, 0.0) + delta

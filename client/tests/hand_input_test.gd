@@ -15,7 +15,12 @@ extends SceneTree
 ##   - fingers parting with a jolt end a drag where it was;
 ##   - thumb + middle finger: a short pinch right-clicks, held and moved it
 ##     scrolls the screen (touch-like) or the menu, the pointer holding still;
-##   - a fingertip on a panel (main.finger_touch) rests the ray;
+##   - a fingertip on a panel (main.finger_touch) rests the ray, but not while
+##     a pinch is held;
+##   - the middle finger never keeps the index from clicking: curled against
+##     the thumb (pointing) it is no pinch, nearer the thumb than the index as
+##     the pinch closes the index still wins, and an index joining a middle
+##     pinch makes it an index click (no right click);
 ##   - the other hand's palm turned to the face shows the menu mark and a short
 ##     pinch toggles the menu (a long one or a palm turned away does not);
 ##   - the hand's silhouette sits on the palm joint; in passthrough it takes
@@ -127,6 +132,8 @@ func _new_hand(tracker_name: StringName) -> XRHandTracker:
 	var h := XRHandTracker.new()
 	h.name = tracker_name
 	h.has_tracking_data = true
+	h.hand = XRPositionalTracker.TRACKER_HAND_LEFT if String(tracker_name).ends_with("left") \
+		else XRPositionalTracker.TRACKER_HAND_RIGHT  # the silhouette's bones are named after it
 	h.hand_tracking_source = XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
 	XRServer.add_tracker(h)
 	return h
@@ -166,6 +173,18 @@ func _pose_mid(knuckle: Vector3, gap: float) -> void:
 	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP, knuckle + Vector3(0, 0, -0.08))
 	_joint(hand, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP, tip)
 	_joint(hand, XRHandTracker.HAND_JOINT_THUMB_TIP, tip + Vector3(0, -gap, 0))
+
+## Thumb tip fixed below the knuckle; the index tip `index_gap` and the middle
+## tip `mid_gap` from it, the middle tip `mid_reach` from its own knuckle
+## (about 3 cm curled into the palm, 6-7 cm reaching out to the thumb).
+func _pose_fingers(knuckle: Vector3, index_gap: float, mid_gap: float, mid_reach: float) -> void:
+	var thumb := knuckle + Vector3(-0.03, -0.08, -0.05)
+	var mid_tip := thumb + Vector3(mid_gap, 0, 0)
+	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL, knuckle)
+	_joint(hand, XRHandTracker.HAND_JOINT_THUMB_TIP, thumb)
+	_joint(hand, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP, thumb + Vector3(0, index_gap, 0))
+	_joint(hand, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP, mid_tip)
+	_joint(hand, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL, mid_tip + Vector3(0, 0, mid_reach))
 
 ## A hand whose palm (centre `c`) faces along `n`, fingers up, built from joint
 ## positions only: wrist, palm, index and little knuckles, pinch tips.
@@ -514,6 +533,60 @@ func _run() -> void:
 	_pose(KNUCKLE, 0.08)
 	await _frames(40)
 	check(input._laser.visible, "lifted away, the hand points again")
+	mark = main.sent.size()
+	_pose(KNUCKLE, 0.005)
+	await _frames(3)
+	main.touching = true  # the curling index brushes a panel mid-pinch
+	await _frames(5)
+	check(input._laser.visible and _last()[2] == 1 and main.sent.slice(mark).any(func(e): return e[2] == 1),
+		"a pinch held: a panel under the fingertip neither rests the ray nor lets the click go -> %s" % [main.sent.slice(mark)])
+	main.touching = false
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
+
+	# --- The middle finger never keeps the index from clicking ---------------
+	# Pointing: the middle finger curled into the palm, the thumb resting on
+	# it (tips 1 cm apart, its tip 3 cm from its knuckle).
+	_pose_fingers(KNUCKLE, 0.09, 0.01, 0.03)
+	await _frames(40)
+	check(input._laser.visible and not input._mid_pinching and _near(_last(), aim) and _last()[2] == 0,
+		"pointing with the middle finger curled against the thumb: no middle pinch, the hand points -> %s" % [_last()])
+	mark = main.sent.size()
+	_pose_fingers(KNUCKLE, 0.005, 0.01, 0.03)
+	await _frames(3)
+	var curled: Array = main.sent.slice(mark)
+	check(curled.any(func(e): return _near(e, aim) and e[2] == 1) and not curled.any(func(e): return e[2] == 2),
+		"and its index pinch clicks -> %s" % [curled])
+	_pose_fingers(KNUCKLE, 0.09, 0.01, 0.03)
+	await _frames(15)
+	check(_last()[2] == 0, "and lets go")
+	# Both tips close as the index pinch closes, the middle's nearer the thumb.
+	_pose_fingers(KNUCKLE, 0.09, 0.06, 0.07)
+	await _frames(20)
+	mark = main.sent.size()
+	_pose_fingers(KNUCKLE, 0.01, 0.008, 0.07)
+	await _frames(3)
+	_pose_fingers(KNUCKLE, 0.09, 0.06, 0.07)
+	await _frames(15)
+	var both: Array = main.sent.slice(mark)
+	check(both.any(func(e): return _near(e, aim) and e[2] == 1) and not both.any(func(e): return e[2] == 2)
+		and _last()[2] == 0, "the middle tip nearer the thumb than the index's: still a left click -> %s" % [both])
+	# A middle pinch the index then joins, before it scrolled: an index pinch.
+	mark = main.sent.size()
+	_pose_fingers(KNUCKLE, 0.09, 0.005, 0.07)
+	await _frames(3)
+	check(input._mid_pinching, "a middle pinch made on purpose (index open, middle reaching out) is one")
+	_pose_fingers(KNUCKLE, 0.005, 0.005, 0.07)
+	await _frames(3)
+	_pose_fingers(KNUCKLE, 0.09, 0.06, 0.07)
+	await _frames(15)
+	var joined: Array = main.sent.slice(mark)
+	check(joined.any(func(e): return _near(e, aim) and e[2] == 1) and not joined.any(func(e): return e[2] == 2)
+		and _last()[2] == 0, "the index joining it makes it a left click, no right click -> %s" % [joined])
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP, 0)
+	hand.set_hand_joint_flags(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL, 0)
+	_pose(KNUCKLE, 0.08)
+	await _frames(15)
 
 	# --- A new hand tracker (the session restarted) is picked up ------------
 	XRServer.remove_tracker(hand)

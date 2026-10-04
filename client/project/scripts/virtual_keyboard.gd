@@ -154,6 +154,11 @@ func touch(who: int, tip: Vector3) -> bool:
 	_point(uv, _finger.pressed)
 	return true
 
+## True while the fingertip that owns it came close enough to rest its
+## hand's ray (FingerTouch.resting); hovering further out, the ray points on.
+func finger_rests() -> bool:
+	return _finger.owner >= 0 and _finger.resting
+
 func _point(uv: Vector2, pressing: bool) -> void:
 	_pointer_px = uv * Vector2(VIEW_SIZE)
 	var motion := InputEventMouseMotion.new()

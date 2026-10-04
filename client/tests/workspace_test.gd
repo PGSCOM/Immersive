@@ -13,7 +13,10 @@ extends SceneTree
 ##   - main.gd::pick() returns the NEAREST of menu, keyboard, screens and the
 ##     grab bars under them;
 ##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only;
-##     two index fingertips type on it in turn, and the ray waits meanwhile.
+##     two index fingertips type on it in turn, and the ray waits meanwhile;
+##     a fingertip hovering over it (a hand pointing past it) keeps its ray
+##     until it comes within FingerTouch.REST_M, and one from behind takes
+##     nothing (also through main.gd::finger_touch).
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/workspace_test.gd"
@@ -364,6 +367,21 @@ func _run(main: Node3D) -> void:
 	check(main.keys.size() == 3, "a ray pressing a key while a fingertip hovers types nothing")
 	kb.touch(0, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
 	kb.touch(1, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
+	var q := _key_point(kb, "q")
+	var z: Vector3 = kb._quad.global_basis.z
+	check(kb.touch(0, q + z * 0.06) and not kb.finger_rests(),
+		"a fingertip 6 cm over the keys hovers: its hand's ray points on")
+	check(kb.touch(0, q + z * 0.025) and kb.finger_rests(), "within 3 cm the ray rests")
+	check(kb.touch(0, q + z * 0.06) and kb.finger_rests(), "and keeps resting while the tip stays over the keys")
+	kb.touch(0, q + z * 0.2)
+	check(not kb.touch(1, q - z * 0.03) and not kb.finger_rests(),
+		"a fingertip coming from behind the keyboard takes nothing")
+	var router = load("res://scripts/main.gd").new()  # not in the tree: just its finger_touch()
+	router.virtual_keyboard = kb
+	check(not router.finger_touch(0, q + z * 0.06), "main.finger_touch: hovering, the ray points on")
+	check(router.finger_touch(0, q + z * 0.02), "main.finger_touch: close, the ray rests")
+	kb.touch(0, q + z * 0.2)
+	router.free()
 	var miss_d: float = kb.pointer_ray(head.position, Vector3.UP, false)
 	check(miss_d < 0.0, "a ray above the keyboard misses it")
 	var kb_bar: float = kb.grab_bar.hit(head.position, (kb.grab_bar.global_position - head.position).normalized())
