@@ -88,8 +88,6 @@ var share_screens: bool = false
 var _watch_code: int = 0
 var _watch_probe: int = -1
 var _room_screens_s: float = 0.0
-## Whiteboard changes not yet handed to the room (Whiteboard.ink).
-var _ink_out: Array = []
 var _room_notice: String = ""
 ## The room joined last (the menu's address field starts there) and its port.
 var _room_address: String = ""
@@ -1121,7 +1119,7 @@ func _init_room() -> void:
 	add_child(room)
 	room.changed.connect(_on_room_changed)
 	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
-	whiteboard.ink.connect(func(op: Array): _ink_out.append(op))
+	whiteboard.ink.connect(room.queue_ink)
 	if _cmdline_board:
 		whiteboard.set_shown.call_deferred(true)
 		_draw_test_line.call_deferred(whiteboard)
@@ -1198,9 +1196,6 @@ func _update_room(delta: float) -> void:
 	if not room:
 		return
 	room.look_for_rooms(ui_overlay.is_shown() and ui_overlay.showing_room_tab())
-	if not _ink_out.is_empty():
-		room.send_ink(_ink_out)  # kept even outside a room, for whoever joins later
-		_ink_out = []
 	if room.state != Room.State.IN:
 		return
 	# Where the whiteboard and the shared screens hang, twice a second (the

@@ -7,7 +7,9 @@
 ## draws. The tool row along the bottom picks the ink, the width, the eraser,
 ## undo and clear (clear can be undone too). The bar under it moves it, the
 ## corner brackets resize it (ResizeHandle, as on the screens), the grip and
-## stick move and size it. Strokes live as long as the app does.
+## stick move and size it. Strokes live as long as the app does; in a room,
+## who sees the board for the first time gets it as it is (snapshot()), not
+## the history of every op.
 ##
 ## In a multiplayer room (room.gd) every change goes out as it happens, as
 ## `ink` ops, and the others' copies of this board replay them (apply_ink).
@@ -66,6 +68,8 @@ var _inked := {}
 ## owner replays our ops under that id).
 const OWNER := 0
 var local_author := OWNER
+## Points one stroke from the network may have (a flood stops there).
+const MAX_POINTS := 5000
 
 var _pointer_pressed := false
 var _pointer_px := Vector2(-100, -100)
@@ -316,24 +320,55 @@ func _new_stroke(color: Color, width: float, at: Vector2, author: int) -> Line2D
 
 ## Replay one op someone else drew (see `ink`), `author` telling apart whose
 ## stroke a point goes on. It comes from the network: anything malformed is
-## skipped.
-func apply_ink(op: Variant, author: int = 0) -> void:
+## skipped. Returns whether the op was applied (only those are passed on).
+func apply_ink(op: Variant, author: int = 0) -> bool:
 	if typeof(op) != TYPE_ARRAY or op.is_empty() or typeof(op[0]) != TYPE_STRING:
-		return
+		return false
 	var is_number := func(v): return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
 	match op[0]:
 		"b":
 			if op.size() == 5 and typeof(op[1]) == TYPE_STRING and op.slice(2).all(is_number):
 				_inked[author] = _new_stroke(Color.from_string(op[1], INKS[0]),
 					clampf(op[2], 1.0, ERASER_PX), _on_canvas(op[3], op[4]), author)
+				return true
 		"p":
 			var line: Line2D = _inked.get(author)
-			if is_instance_valid(line) and op.size() == 3 and op.slice(1).all(is_number):
+			if is_instance_valid(line) and op.size() == 3 and op.slice(1).all(is_number) \
+					and line.get_point_count() < MAX_POINTS:
 				line.add_point(_on_canvas(op[1], op[2]))
+				return true
 		"u":
 			_undo_by(author)
+			return true
 		"c":
 			_clear_by(author)
+			return true
+	return false
+
+## The board as it is now, as the [author, op] pairs that rebuild it on an
+## empty copy (apply_ink in order): every stroke still on it and every clear
+## that undo can still take back, with what it hid. What was undone is gone
+## and is not in it, and neither is the history that led here.
+func snapshot() -> Array:
+	var out := []
+	for c in _ink.get_children():
+		var a: int = c.get_meta("author", OWNER)
+		if c is Line2D:
+			var pts: PackedVector2Array = c.points
+			out.append([a, ["b", c.default_color.to_html(false), c.width, pts[0].x, pts[0].y]])
+			for i in range(2, pts.size()):  # the 2nd point is _new_stroke's own
+				out.append([a, ["p", pts[i].x, pts[i].y]])
+		elif c.has_meta("cleared"):
+			out.append([a, ["c"]])
+	return out
+
+## Empty, for a snapshot() to rebuild it.
+func reset() -> void:
+	_stroke = null
+	_inked.clear()
+	for c in _ink.get_children():
+		_ink.remove_child(c)
+		c.queue_free()
 
 func _on_canvas(x: float, y: float) -> Vector2:
 	return Vector2(clampf(x, -100.0, VIEW_SIZE.x + 100.0), clampf(y, -100.0, VIEW_SIZE.y + 100.0))

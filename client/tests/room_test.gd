@@ -180,21 +180,42 @@ func _whiteboards() -> void:
 	owner_board.queue_free()
 	guest_copy.queue_free()
 
-	# The owner's own ink goes out as Room.OWNER, never as a peer id: drawn
-	# outside a room it would be the offline peer's 1, the room host's, and
-	# the host's copy (here: we are peer 1) skips its own.
-	var room := Room.new()
-	root.add_child(room)
-	var sent := []
-	room.send_ink([["b", "ece6dc", 5.0, 10.0, 10.0]])
-	room._ink_log.map(func(pair): sent.append(pair[0]))
+	# The owner's own ink goes out as OWNER, never as a peer id: drawn outside
+	# a room it would be the offline peer's 1, the room host's, and the host's
+	# copy (here: we are peer 1) skips its own. Whoever comes later gets the
+	# board as it is: what was undone is not in it, a clear that undo can
+	# still take back is.
+	var own := Whiteboard.new()
+	root.add_child(own)
+	await process_frame
+	for op in [["b", "ece6dc", 5.0, 10.0, 10.0], ["p", 40.0, 10.0], ["p", 80.0, 10.0]]:
+		own.apply_ink(op, Whiteboard.OWNER)
+	own.apply_ink(["b", "e39a7f", 12.0, 300.0, 300.0], Whiteboard.OWNER)
+	own.apply_ink(["u"], Whiteboard.OWNER)
+	own.apply_ink(["b", "a3b18a", 5.0, 600.0, 600.0], 7)
+	own.apply_ink(["c"], Whiteboard.OWNER)
+	var snap := own.snapshot()
 	var host_copy := Participant.new()
 	root.add_child(host_copy)
 	await process_frame
-	host_copy.apply_ink(room._ink_log)
-	check(sent == [Room.OWNER] and root.multiplayer.get_unique_id() == 1 and host_copy.board_node().stroke_count() == 1,
-		"ink drawn before the room shows on the room host's copy -> authors %s" % [sent])
+	host_copy.apply_board([[Whiteboard.OWNER, ["b", "ffffff", 5.0, 1.0, 1.0]]], true)
+	host_copy.apply_board(snap, true)  # a fresh snapshot replaces what was there
+	var copy := host_copy.board_node()
+	var kinds := func(b: Whiteboard): return b._ink.get_children().map(func(c): return [c.get_meta("author"),
+		(c as Line2D).points.size() if c is Line2D else "clear"])
+	check(root.multiplayer.get_unique_id() == 1 and kinds.call(copy) == kinds.call(own)
+		and kinds.call(own) == [[0, 4], [7, 2], [0, "clear"]] and copy.stroke_count() == 0,
+		"the board as it is reaches the room host's copy, undone strokes left out -> %s" % [kinds.call(copy)])
+	copy.apply_ink(["u"], Whiteboard.OWNER)
+	own.apply_ink(["u"], Whiteboard.OWNER)
+	check(copy.stroke_count() == 2 and own.stroke_count() == 2, "and an undo of that clear after it works on both")
+	var room := Room.new()
+	root.add_child(room)
+	room.queue_ink(["b", "ece6dc", 5.0, 10.0, 10.0])
+	room._flush_ink()
+	check(room._ink_out.is_empty(), "ink drawn outside a room is dropped (the snapshot will carry it)")
 	host_copy.queue_free()
+	own.queue_free()
 	room.queue_free()
 
 ## Walking, turning and pulling move the tracking origin; the head keeps its

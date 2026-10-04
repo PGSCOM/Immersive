@@ -130,10 +130,17 @@ No server and no account: a room is a handful of headsets talking directly.
   an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms PCM-16
   packets, only while it passes a noise gate); their *ink*: every change to
   their whiteboard as it happens (`Whiteboard.ink` ops: a stroke begins, goes
-  on, undo, clear; reliable, each with its author), all of it again for
-  whoever joins later. Someone the owner lets draw (the profile lists them)
+  on, undo, clear; reliable, each with its author: `Whiteboard.OWNER` (0) for
+  the owner's own, the peer id for a guest's). Whoever sees a board for the
+  first time gets it as it is now (`Whiteboard.snapshot()`: what was undone is
+  not in it, a clear that undo can still take back is), not the history of
+  every op; outside a room nothing is kept. Undo takes back the author's own
+  last stroke or clear, so every copy ends up the same whatever order two
+  authors' ops arrive in. Someone the owner lets draw (the profile lists them)
   draws on their copy; the ops go to the owner (`_draw_on`), who replays them
-  and passes them on, so the owner's board is the one that counts.
+  and passes them on, so the owner's board is the one that counts: ops it
+  refuses (no permission, or no more) get the guest a fresh snapshot, which
+  drops them from the guest's copy too.
 - **Permissions** (the Room tab's page, `Room.pref()`): per person, whether we
   see their whiteboard and their screens (off: not even downloaded) and hear
   their voice, all only on our side, and whether they may draw on our board.

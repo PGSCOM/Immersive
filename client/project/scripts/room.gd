@@ -11,8 +11,11 @@
 ## (16 kHz mono PCM in 20 ms packets, only while louder than a noise gate).
 ## Our whiteboard goes too: where it hangs and who may draw on it (in the
 ## profile), and every stroke as it is drawn (`ink` ops with their author,
-## reliable; whoever joins later gets them all). Someone we let draw sends
-## their ops to us (`_draw_on`) and we pass them on. What we see and hear of
+## reliable). Whoever sees it for the first time (joins while it is shown, or
+## is there when we show it) gets it as it is now (Whiteboard.snapshot(), not
+## its history). Someone we let draw sends their ops to us (`_draw_on`) and we
+## pass them on; ops we refuse (they may not, or no more) get them our board
+## as it is, so their copy drops what we did not take. What we see and hear of
 ## each person, and who draws on our board, is up to us (pref(), the menu's
 ## Permissions page; this session only).
 ## The screens never go through the room: each PC streams them straight to the
@@ -78,9 +81,14 @@ var _people := {}                  ## peer id -> Participant
 var _profile := {"name": "", "mic": true, "share": {}, "screens": [], "board": {}}
 ## Our own whiteboard (main.gd's): guests' ink is replayed on it.
 var board: Whiteboard = null
-## Every op on our whiteboard so far, as [author (OWNER or a guest's peer id), op], for people who
-## join later.
-var _ink_log: Array = []
+## Peer id -> true: they have our board (a snapshot, then every op).
+var _synced := {}
+## Peer id -> true: we refused their ink, they get our board again soon.
+var _resync := {}
+var _resync_s := 0.0
+const RESYNC_S := 0.5
+## Our own ink not sent yet (queue_ink).
+var _ink_out: Array = []
 ## Peer id -> {board, screens, voice: what we see / hear of them; draw: they
 ## may draw on our board}. Missing = the default (see pref()).
 var _prefs := {}
@@ -138,12 +146,20 @@ func _exit_tree() -> void:
 
 func _process(delta: float) -> void:
 	_answer_discovery()
+	_flush_ink()
 	if state == State.JOINING and Time.get_ticks_msec() > _join_deadline_ms:
 		leave("No room answered at %s." % address)
 	if state != State.IN:
 		return
 	_seat_people()
 	_capture_voice(delta)
+	_resync_s += delta
+	if _resync_s >= RESYNC_S and not _resync.is_empty():
+		_resync_s = 0.0
+		for id in _resync:
+			if _people.has(id):
+				_sync_board(id)
+		_resync.clear()
 	_pose_s += delta
 	if _pose_s >= 1.0 / POSE_HZ and not _people.is_empty() and _origin and _camera:
 		_pose_s = 0.0
@@ -210,6 +226,8 @@ func leave(why: String = "") -> void:
 	for p in _people.values():
 		p.queue_free()
 	_people.clear()
+	_synced.clear()
+	_resync.clear()
 	is_host = false
 	if why or state != State.OFF:
 		_say(why)
@@ -303,8 +321,8 @@ func _on_peer_connected(id: int) -> void:
 		_publish_board()
 	p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
 	_take_profile.rpc_id(id, _profile)
-	for i in range(0, _ink_log.size(), INK_BATCH):
-		_take_ink.rpc_id(id, _ink_log.slice(i, i + INK_BATCH))
+	if board and board.visible:
+		_sync_board(id)
 	changed.emit()
 
 func _on_peer_disconnected(id: int) -> void:
@@ -313,6 +331,8 @@ func _on_peer_disconnected(id: int) -> void:
 		print("[Room] %s left" % p.display_name)
 		p.queue_free()
 	_people.erase(id)
+	_synced.erase(id)
+	_resync.erase(id)
 	_retone()
 	if pref(id, "draw"):
 		_prefs.erase(id)
@@ -342,19 +362,44 @@ func _take_ink(inked: Array) -> void:
 	if who:
 		who.apply_ink(inked)
 
+## The sender's board as it is now (Whiteboard.snapshot()), in batches; the
+## first one empties our copy first.
+@rpc("any_peer", "call_remote", "reliable", 3)
+func _take_board(inked: Array, first: bool) -> void:
+	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
+	if who:
+		who.apply_board(inked, first)
+
+## Our board as it is now, to `id` (same channel as the ops: they follow it).
+func _sync_board(id: int) -> void:
+	if board == null:
+		return
+	_flush_ink()  # to the others; this snapshot has it
+	var snap := board.snapshot()
+	_take_board.rpc_id(id, snap.slice(0, INK_BATCH), true)
+	for i in range(INK_BATCH, snap.size(), INK_BATCH):
+		_take_board.rpc_id(id, snap.slice(i, i + INK_BATCH), false)
+	_synced[id] = true
+
 ## A guest's ink on OUR board: drawn here if we let them, then passed on to
-## everyone else (they drew it on their copy already).
+## everyone else who has our board (the guest drew it on their copy already).
+## Refused (they may not draw, or no more): they get our board as it is, so
+## the strokes we did not take leave their copy too.
 @rpc("any_peer", "call_remote", "reliable", 3)
 func _draw_on(ops: Array) -> void:
 	var from := multiplayer.get_remote_sender_id()
-	if not pref(from, "draw") or board == null:
+	if board == null or not _people.has(from):
+		return
+	if not pref(from, "draw"):
+		_resync[from] = true
 		return
 	var inked := []
 	for op in ops.slice(0, INK_BATCH):
-		board.apply_ink(op, from)
-		inked.append([from, op])
-	_ink_log.append_array(inked)
-	for id in _people:
+		if board.apply_ink(op, from):
+			inked.append([from, op])
+	if inked.is_empty():
+		return
+	for id in _synced:
 		if id != from:
 			_take_ink.rpc_id(id, inked)
 
@@ -433,9 +478,14 @@ func set_screens(screens: Array) -> void:
 		_publish()
 
 ## Where our whiteboard hangs: {on, x: 12 floats in the room frame, w}.
+## Shown, it goes to whoever does not have it yet.
 func set_board(place: Dictionary) -> void:
 	_board_place = place
 	_publish_board()
+	if place.get("on", false) == true and state == State.IN:
+		for id in _people:
+			if not _synced.has(id):
+				_sync_board(id)
 
 ## The placement plus who may draw on it ("guests": peer ids).
 func _publish_board() -> void:
@@ -445,15 +495,25 @@ func _publish_board() -> void:
 		_profile.board = b
 		_publish()
 
-## Changes we made to our whiteboard (Whiteboard.ink): to everyone now, and
-## kept for whoever joins later. Their author is OWNER (0), not our peer id:
-## ops drawn outside a room would carry the offline peer's id, 1, which is
-## the room host's, and its copy of our board skips its own ops.
-func send_ink(ops: Array) -> void:
-	var inked := ops.map(func(op): return [OWNER, op])
-	_ink_log.append_array(inked)
-	if state == State.IN and _peer and not _people.is_empty():
-		_take_ink.rpc(inked)
+## A change we made to our whiteboard (Whiteboard.ink), sent with the others
+## of this frame (_flush_ink).
+func queue_ink(op: Array) -> void:
+	_ink_out.append(op)
+
+## Our queued ink to everyone who has our board (the others get a snapshot
+## when they first see it, which has it already: a snapshot always flushes
+## first). Outside a room it is dropped. Its author is OWNER (0), not our
+## peer id: the room host's copy of our board would skip ops under its own
+## id, 1.
+func _flush_ink() -> void:
+	if _ink_out.is_empty():
+		return
+	var inked := _ink_out.map(func(op): return [OWNER, op])
+	_ink_out = []
+	if state != State.IN or not _peer:
+		return
+	for id in _synced:
+		_take_ink.rpc_id(id, inked)
 
 ## What we see and hear of person `id`, and whether they may draw on our
 ## board: "board", "screens", "voice" (all on unless turned off), "draw" (off

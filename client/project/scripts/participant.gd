@@ -190,6 +190,18 @@ func apply_ink(inked: Array) -> void:
 		if typeof(pair) == TYPE_ARRAY and pair.size() == 2 and typeof(pair[0]) == TYPE_INT and pair[0] != me:
 			_board.apply_ink(pair[1], pair[0])
 
+## Their board as it is now (Room._take_board): `first` empties our copy
+## (and drops what we drew and have not sent), then it is rebuilt as theirs
+## is, our own strokes on it too (they took them).
+func apply_board(inked: Array, first: bool) -> void:
+	_ensure_board()
+	if first:
+		_board.reset()
+		_guest_ink.clear()
+	for pair in inked:
+		if typeof(pair) == TYPE_ARRAY and pair.size() == 2 and typeof(pair[0]) == TYPE_INT:
+			_board.apply_ink(pair[1], pair[0])
+
 ## They show a whiteboard; we see it here; they let us draw on it.
 func shows_board() -> bool:
 	return _board_info.get("on", false) == true
