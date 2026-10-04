@@ -270,7 +270,8 @@ func _on_tcp_connected() -> void:
 	# A watcher takes any free port and tells the host which.
 	var bind_err := OK if _tcp_media else udp_client.bind(0 if _watch_code else _udp_port, "*", 8 * 1024 * 1024)
 	if bind_err != OK:
-		push_error("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err])
+		push_error(("[Network] Failed to bind a free UDP port (error %d) — no video will be received." % bind_err) if _watch_code
+			else ("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err]))
 
 	if _watch_code:
 		tcp_client.put_data(hello_message(false, _watch_code, " watching", HELLO_FLAG_WATCH,
