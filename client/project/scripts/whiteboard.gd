@@ -13,7 +13,9 @@
 ## `ink` ops, and the others' copies of this board replay them (apply_ink).
 ## Someone allowed to draw on it draws on their copy; the ops go to the owner,
 ## who replays them here and passes them on. Strokes are kept apart by author,
-## so two people can draw at once.
+## so two people can draw at once, and undo takes back the author's own last
+## stroke or clear, never someone else's: every copy then ends up the same
+## whatever order two authors' ops arrive in.
 
 extends Node3D
 class_name Whiteboard
@@ -57,10 +59,13 @@ var _erasing := false
 var _dots: Array = []      ## [Dot, kind ("ink" / "width"), value]
 var _btn_eraser: Button
 
-## Replaying someone's ops (apply_ink): what that changes is not `ink` again.
-var _replaying := false
 ## The stroke each other author is drawing on this board now.
 var _inked := {}
+## Who draws with the pointer and the buttons here, as the others know them:
+## OWNER on our own board, our peer id on our copy of someone else's (the
+## owner replays our ops under that id).
+const OWNER := 0
+var local_author := OWNER
 
 var _pointer_pressed := false
 var _pointer_px := Vector2(-100, -100)
@@ -187,24 +192,38 @@ func local_point(u: float, v: float) -> Vector3:
 func stroke_count() -> int:
 	return _ink.get_children().filter(func(c): return c is Line2D and c.visible).size()
 
+## Undo (the button): our own last stroke or clear.
 func undo() -> void:
-	if not _replaying:
-		ink.emit(["u"])
-	_stroke = null
-	_inked.clear()
-	var last: Node = _ink.get_child(-1) if _ink.get_child_count() > 0 else null
-	if last == null:
+	ink.emit(["u"])
+	_undo_by(local_author)
+
+## Clear (the button): hide every stroke behind one marker, so undo brings
+## them all back.
+func clear() -> void:
+	ink.emit(["c"])
+	_clear_by(local_author)
+
+## Take back `author`'s newest stroke or clear (a clear shows again what it
+## hid). Whatever anyone else drew stays, and so does their stroke in
+## progress.
+func _undo_by(author: int) -> void:
+	_inked.erase(author)
+	if author == local_author:
+		_stroke = null
+	var mine := _ink.get_children().filter(func(c): return c.get_meta("author", OWNER) == author)
+	if mine.is_empty():
 		return
+	var last: Node = mine[-1]
 	if last.has_meta("cleared"):
 		for s in last.get_meta("cleared"):
-			s.visible = true
+			if is_instance_valid(s):
+				s.visible = true
 	_ink.remove_child(last)
 	last.queue_free()
 
-## Hide every stroke behind one marker, so undo brings them all back.
-func clear() -> void:
-	if not _replaying:
-		ink.emit(["c"])
+## A clear by `author`: every stroke shown now hides behind its marker, and
+## every stroke in progress ends (on every copy alike).
+func _clear_by(author: int) -> void:
 	_stroke = null
 	_inked.clear()
 	var shown := _ink.get_children().filter(func(c): return c is Line2D and c.visible)
@@ -214,6 +233,7 @@ func clear() -> void:
 		s.visible = false
 	var marker := Control.new()
 	marker.set_meta("cleared", shown)
+	marker.set_meta("author", author)
 	_ink.add_child(marker)
 
 # ---------------------------------------------------------------------------
@@ -277,12 +297,13 @@ func _on_canvas_input(ev: InputEvent) -> void:
 			ink.emit(["p", snappedf(_smoothed.x, 0.5), snappedf(_smoothed.y, 0.5)])
 
 func _begin(at: Vector2) -> void:
-	_stroke = _new_stroke(SLATE if _erasing else _color, ERASER_PX if _erasing else _width, at)
+	_stroke = _new_stroke(SLATE if _erasing else _color, ERASER_PX if _erasing else _width, at, local_author)
 	_smoothed = at
 	ink.emit(["b", _stroke.default_color.to_html(false), _stroke.width, at.x, at.y])
 
-func _new_stroke(color: Color, width: float, at: Vector2) -> Line2D:
+func _new_stroke(color: Color, width: float, at: Vector2, author: int) -> Line2D:
 	var line := Line2D.new()
+	line.set_meta("author", author)
 	line.width = width
 	line.default_color = color
 	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
@@ -300,21 +321,19 @@ func apply_ink(op: Variant, author: int = 0) -> void:
 	if typeof(op) != TYPE_ARRAY or op.is_empty() or typeof(op[0]) != TYPE_STRING:
 		return
 	var is_number := func(v): return typeof(v) == TYPE_INT or typeof(v) == TYPE_FLOAT
-	_replaying = true
 	match op[0]:
 		"b":
 			if op.size() == 5 and typeof(op[1]) == TYPE_STRING and op.slice(2).all(is_number):
 				_inked[author] = _new_stroke(Color.from_string(op[1], INKS[0]),
-					clampf(op[2], 1.0, ERASER_PX), _on_canvas(op[3], op[4]))
+					clampf(op[2], 1.0, ERASER_PX), _on_canvas(op[3], op[4]), author)
 		"p":
 			var line: Line2D = _inked.get(author)
 			if is_instance_valid(line) and op.size() == 3 and op.slice(1).all(is_number):
 				line.add_point(_on_canvas(op[1], op[2]))
 		"u":
-			undo()
+			_undo_by(author)
 		"c":
-			clear()
-	_replaying = false
+			_clear_by(author)
 
 func _on_canvas(x: float, y: float) -> Vector2:
 	return Vector2(clampf(x, -100.0, VIEW_SIZE.x + 100.0), clampf(y, -100.0, VIEW_SIZE.y + 100.0))

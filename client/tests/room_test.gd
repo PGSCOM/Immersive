@@ -141,8 +141,44 @@ func _whiteboards() -> void:
 		"two people drawing at once keep their own strokes -> %s points" % [lines.map(func(l): return l.points.size())])
 	theirs.apply_ink(["u"], 7)
 	check(echoed.is_empty() and theirs.stroke_count() == 1, "a replayed undo is not sent on again")
+	check(theirs._ink.get_children().filter(func(c): return c is Line2D and c.visible)[0].get_meta("author") == 9,
+		"7's undo took back 7's stroke, not 9's newer one")
 	mine.queue_free()
 	theirs.queue_free()
+
+	# Undo is per author: the owner (OWNER) and a guest (7) each take back
+	# their own, while the other's stroke in progress goes on, and two copies
+	# that saw the ops in another order end up the same.
+	var owner_board := Whiteboard.new()
+	var guest_copy := Whiteboard.new()
+	guest_copy.local_author = 7
+	root.add_child(owner_board)
+	root.add_child(guest_copy)
+	await process_frame
+	var o_ops := [["b", "ece6dc", 5.0, 100.0, 100.0], ["p", 120.0, 100.0]]
+	var g_ops := [["b", "e39a7f", 5.0, 500.0, 500.0], ["p", 520.0, 500.0]]
+	for op in o_ops:
+		owner_board.apply_ink(op, Whiteboard.OWNER)
+	for op in g_ops:
+		owner_board.apply_ink(op, 7)
+	for op in g_ops:
+		guest_copy.apply_ink(op, 7)
+	for op in o_ops:
+		guest_copy.apply_ink(op, Whiteboard.OWNER)
+	owner_board.apply_ink(["u"], Whiteboard.OWNER)  # the owner's undo, mid-way through the guest's stroke
+	guest_copy.apply_ink(["u"], Whiteboard.OWNER)
+	owner_board.apply_ink(["p", 540.0, 500.0], 7)
+	guest_copy.apply_ink(["p", 540.0, 500.0], 7)
+	var left := func(b: Whiteboard): return b._ink.get_children().filter(func(c): return c is Line2D and c.visible) \
+		.map(func(l): return [l.get_meta("author"), l.points.size()])
+	check(left.call(owner_board) == [[7, 4]] and left.call(guest_copy) == [[7, 4]],
+		"the owner's undo takes the owner's stroke, the guest's goes on, on both copies -> %s / %s" %
+		[left.call(owner_board), left.call(guest_copy)])
+	guest_copy.undo()  # the button on the guest's copy: the guest's own
+	owner_board.apply_ink(["u"], 7)
+	check(owner_board.stroke_count() == 0 and guest_copy.stroke_count() == 0, "the guest's undo takes the guest's stroke")
+	owner_board.queue_free()
+	guest_copy.queue_free()
 
 	# The owner's own ink goes out as Room.OWNER, never as a peer id: drawn
 	# outside a room it would be the offline peer's 1, the room host's, and

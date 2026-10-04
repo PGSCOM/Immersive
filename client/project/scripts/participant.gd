@@ -208,6 +208,8 @@ func _ensure_board() -> void:
 	if _board == null:
 		_board = Whiteboard.new()
 		_board.name = "Board"
+		# What we draw here is ours under our peer id, as the owner replays it.
+		_board.local_author = multiplayer.get_unique_id()
 		add_child(_board)
 		# What we draw on it (when they let us: main.gd only lets the pointer
 		# draw then) goes to them.
