@@ -1257,6 +1257,7 @@ private:
     /// address, with the same cost and lock-out for wrong ones.
     uint8_t check_code(struct in_addr peer, uint32_t pin, uint32_t want) {
         const auto now = std::chrono::steady_clock::now();
+        auto delay = std::chrono::milliseconds(500);
         {
             std::lock_guard<std::mutex> lock(auth_mutex_);
             auto& st = auth_failures_[peer.s_addr];
@@ -1267,8 +1268,24 @@ private:
                 st.failures = 0;
                 st.locked_until = now + std::chrono::seconds(60);
             }
+            // Many addresses guessing at once (one per address stays under
+            // the lockout): past kGlobalFailures in a minute, every wrong
+            // code is slow. Slow, not locked: a lockout for everyone would
+            // let anyone keep the real headset out.
+            while (!recent_failures_.empty() && now - recent_failures_.front() > std::chrono::seconds(60))
+                recent_failures_.pop_front();
+            if (recent_failures_.size() < 4 * kGlobalFailures) recent_failures_.push_back(now);
+            if (recent_failures_.size() >= kGlobalFailures) {
+                delay = std::chrono::seconds(5);
+                if (now >= next_guess_warning_) {
+                    next_guess_warning_ = now + std::chrono::minutes(10);
+                    std::cerr << "[Server] Over " << kGlobalFailures
+                              << " wrong PINs in a minute from this network: someone may be guessing it."
+                                 " Each wrong one now takes 5 s. Make a new PIN in the settings if in doubt\n";
+                }
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(delay);
         return protocol::REJECT_WRONG_PIN;
     }
 
@@ -1567,6 +1584,10 @@ private:
     std::mutex auth_mutex_;
     std::unordered_map<uint32_t, AuthState> auth_failures_;  ///< by peer IPv4
     std::set<uint32_t> kicked_;  ///< peers disconnected from the panel (auth_mutex_)
+    /// Wrong codes from every address in the last minute (auth_mutex_).
+    static constexpr size_t kGlobalFailures = 20;
+    std::deque<std::chrono::steady_clock::time_point> recent_failures_;
+    std::chrono::steady_clock::time_point next_guess_warning_{};
     std::atomic<uint32_t> pin_{0};
     std::atomic<uint8_t>  host_flags_{0};
 

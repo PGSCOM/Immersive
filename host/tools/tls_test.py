@@ -16,6 +16,8 @@ temporary directory (IM2_TCP_PORT / IM2_UDP_PORT choose the ports). Checks:
   certificate there too, MEDIA_KEY never;
 - plain TCP from the network is refused (REJECT_ENCRYPTION_REQUIRED), unless
   the host runs with --allow-plaintext;
+- 20 wrong PINs in a minute from as many addresses make the next wrong one
+  slow (5 s) and warn, while the right PIN still pairs at once;
 - after a restart the identity is the same.
 Needs the `cryptography` package (python3-cryptography) for AES and HMAC.
 """
@@ -29,6 +31,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -224,6 +227,37 @@ def check_plain(der):
     print("[tls] plain from this PC: accepted, IDENTITY on request, no MEDIA_KEY OK")
 
 
+def wrong_pin(ip):
+    s = socket.create_connection((HOST, TCP_PORT), timeout=10, source_address=(ip, 0))
+    s.sendall(hello("Guess", pin=111111 if PIN != 111111 else 222222))
+    got = messages(s, 8, until=0x09)
+    s.close()
+    return got[-1][1][:1] if got and got[-1][0] == 0x09 else None
+
+
+def check_guessing():
+    """One wrong PIN from each of 20 addresses: the 21st is slow, the right PIN is not."""
+    ips = [f"127.0.0.{n}" for n in range(10, 30)]
+    for batch in (ips[:6], ips[6:12], ips[12:18], ips[18:]):  # under the pending-socket cap
+        threads = [threading.Thread(target=wrong_pin, args=(ip,)) for ip in batch]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    t0 = time.time()
+    reason = wrong_pin("127.0.0.40")
+    slow = time.time() - t0
+    if reason != b"\x02" or slow < 4.5:
+        fail(f"the 21st wrong PIN in a minute should take 5 s: {slow:.1f} s, reason {reason}")
+    s = tls_connect(ip="127.0.0.41")
+    s.sendall(hello("TlsTest", pin=PIN))
+    t0 = time.time()
+    if 0x02 not in [t for t, _ in messages(s, 3, until=0x02)] or time.time() - t0 > 1.5:
+        fail("the right PIN should still pair at once")
+    s.close()
+    print(f"[tls] 20 wrong PINs from 20 addresses: the next took {slow:.1f} s, the right one pairs at once OK")
+
+
 def check_lan(lan, allowed):
     s = socket.create_connection((lan, TCP_PORT), timeout=5, source_address=(lan, 0))
     s.sendall(hello("PlainTest", pin=PIN))
@@ -258,8 +292,11 @@ def main():
                 check_lan(lan, allowed=False)
             else:
                 print("[tls] no network address here: skipping the checks from the network")
+            check_guessing()
         finally:
             text = stop_host(host, log)
+        if "someone may be guessing it" not in text:
+            fail("no warning about the wrong PINs:\n" + text[-1500:])
         if logged_fingerprint(text) != fingerprint(der):
             fail(f"printed fingerprint {logged_fingerprint(text)} is not the certificate's {fingerprint(der)}")
         print(f"[tls] fingerprint {fingerprint(der)} printed OK")

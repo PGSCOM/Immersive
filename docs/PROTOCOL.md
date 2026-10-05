@@ -91,7 +91,8 @@ Everything the host does — sending the desktop, injecting mouse and keyboard
   HELLO, so a headset can learn it with a HELLO without PIN, then reconnect
   pinned to it and only then send the PIN (`docs/SECURITY.md`).
 - A wrong PIN costs half a second; five from one address lock it out for a
-  minute (`REJECT_LOCKED_OUT`).
+  minute (`REJECT_LOCKED_OUT`). Past 20 wrong PINs in a minute from all
+  addresses together, each further one costs 5 s.
 - Any other message before an accepted HELLO drops the connection. A socket
   that sends no accepted HELLO within 5 s is closed, and `--max-clients`
   counts paired clients only, so idle connections cannot lock a headset out.
