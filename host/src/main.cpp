@@ -7,6 +7,7 @@
 #include "encoder/encoder.h"
 #include "encoder/mf_encoder.h"
 #include "network/server.h"
+#include "network/tls.h"
 #include "input/input_injector.h"
 #include "driver/idd_manager.h"
 #include "audio/audio_capture.h"
@@ -261,6 +262,9 @@ namespace {
                   << "                      default a random one is created once and kept in\n"
                   << "                      the settings folder\n"
                   << "  --no-pin            Let any device on the network connect without a PIN\n"
+                  << "  --allow-plaintext   Also let headsets on the network connect unencrypted\n"
+                  << "                      (older versions of the app). Their PIN, input and\n"
+                  << "                      screens then cross the network in the clear\n"
                   << "  --view-only         Share the screens but ignore mouse and keyboard\n"
                   << "                      from headsets (no remote control)\n"
                   << "  --stub              Fake displays and logged-only input, for protocol\n"
@@ -319,6 +323,7 @@ int main(int argc, char* argv[]) {
     bool     stub         = false;
     int64_t  pin_arg      = settings.pin_enabled ? -1 : 0;  // -1: persistent random PIN, 0: --no-pin
     bool     ui_enable    = true;
+    bool     allow_plaintext = false;  // --allow-plaintext
     uint16_t panel_port   = 19803;
     bool     port_given   = false;
 
@@ -349,6 +354,8 @@ int main(int argc, char* argv[]) {
             usb_enable = false;
         } else if (arg == "--no-pin") {
             pin_arg = 0;
+        } else if (arg == "--allow-plaintext") {
+            allow_plaintext = true;
         } else if (arg == "--view-only") {
             view_only = true;
         } else if (arg == "--pin" && i + 1 < argc) {
@@ -1570,10 +1577,19 @@ int main(int argc, char* argv[]) {
                                : [] { uint32_t p = 0; std::ifstream(config_dir() / "pairing-pin") >> p; return p; }();
     settings.pin_enabled = pin_arg != 0;
     srv_config.pin = settings.pin_enabled ? settings.pin.load() : 0;
+    // This PC's TLS identity (docs/SECURITY.md): headsets pin it when they
+    // pair, and show its fingerprint next to the PIN prompt.
+    srv_config.identity = immersive::tls::Identity::load_or_create(config_dir());
+    srv_config.allow_plaintext = allow_plaintext;
+    const std::string fingerprint = srv_config.identity ? srv_config.identity->fingerprint() : "";
+    if (!srv_config.identity)
+        std::cerr << "[Host] No TLS: only this PC" << (allow_plaintext ? " and unencrypted headsets" : "")
+                  << " can connect\n";
+    settings.fingerprint = fingerprint;
 
     // A headset asked to pair: show the PIN on this PC's screen, since the
     // host may be running with no visible console. At most one every 5 s.
-    server->set_on_pin_requested([&settings](const std::string& peer_ip) {
+    server->set_on_pin_requested([&settings, fingerprint](const std::string& peer_ip) {
         static std::atomic<int64_t> last_s{-5};
         const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1581,7 +1597,9 @@ int main(int argc, char* argv[]) {
         if (now - prev < 5 || !last_s.compare_exchange_strong(prev, now)) return;
         const std::string p = std::to_string(settings.pin.load());
         notify_desktop("Immersive-2 PIN: " + p.substr(0, 3) + " " + p.substr(3),
-                       "A headset at " + peer_ip + " wants to connect. Type this PIN in it.");
+                       "A headset at " + peer_ip + " wants to connect. Type this PIN in it" +
+                       (fingerprint.empty() ? std::string(".")
+                                            : " if it shows this PC's code " + fingerprint + "."));
     });
 
     if (!server->start(srv_config)) {
@@ -1656,6 +1674,10 @@ int main(int argc, char* argv[]) {
     } else {
         std::cout << "    PIN       off: any device on this network can connect\n";
     }
+    if (!fingerprint.empty())
+        std::cout << "    Identity  " << fingerprint << "   (the headset shows it when it asks for the PIN)\n";
+    std::cout << "    Network   " << (srv_config.identity ? "encrypted (TLS)" : "this PC only")
+              << (allow_plaintext ? ", unencrypted headsets allowed too (--allow-plaintext)" : "") << "\n";
     std::cout << "    Control   " << (view_only ? "off (--view-only): headsets can only watch"
                                                : "on: headsets drive the mouse and keyboard") << "\n"
               << "    Virtual   " << (vdm_ok ? "headsets can add up to 4 virtual screens"

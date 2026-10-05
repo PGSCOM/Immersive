@@ -14,6 +14,8 @@
 
 namespace immersive {
 
+namespace tls { class Identity; }
+
 /// Callback for when a client connects
 using ClientConnectedCallback = std::function<void(uint32_t client_id)>;
 
@@ -61,6 +63,12 @@ struct ServerConfig {
     uint8_t  monitor_count = 0;
     /// protocol::HOST_FLAG_* sent in HELLO_ACK (and view-only in discovery).
     uint8_t  host_flags = 0;
+    /// This PC's TLS key and certificate (tls.h). Without one, only plain
+    /// connections work: from this PC, or anywhere with allow_plaintext.
+    std::shared_ptr<tls::Identity> identity;
+    /// Let headsets on the network connect unencrypted (old versions of the
+    /// app): their PIN, input and screens cross the network in the clear.
+    bool allow_plaintext = false;
 };
 
 /// Network server interface

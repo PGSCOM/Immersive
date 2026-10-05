@@ -19,6 +19,21 @@ The host's UDP socket is send-only and binds an ephemeral port; the client owns
 19801/19802 for receiving. (Binding them on the host too would stop a client on
 the same machine from receiving video at all.)
 
+**Encryption.** A client on another machine wraps the control connection in
+**TLS 1.2** (ECDHE-ECDSA with AES-GCM or ChaCha20-Poly1305, nothing else):
+the host tells the two apart by the first byte, `0x16` (a TLS handshake
+record) or `0x01` (HELLO). Everything below then runs inside TLS unchanged.
+The host refuses plain TCP from anywhere but `127.0.0.0/8` with
+`REJECT_ENCRYPTION_REQUIRED`, unless it runs with `--allow-plaintext` (older
+apps). The host's certificate is its identity: self-signed, ECDSA P-256,
+`CN=immersive-host`, made once and kept in the settings folder
+(`identity-key.pem`, `identity-cert.pem`). Its **fingerprint** is the first 8
+bytes of the SHA-256 of the certificate (DER) in hex, in groups of four
+(`C175 98B2 31A4 9F12`); the host prints it, shows it next to the PIN, and the
+headset shows it on its PIN prompt. Over TLS, UDP video and audio are sealed
+with a key the host sends in `MEDIA_KEY`, see [Sealed datagrams](#sealed-datagrams).
+How the headset pins the certificate is in `docs/SECURITY.md`.
+
 **TCP media mode (USB).** A client that sets `HELLO_FLAG_TCP_MEDIA` in HELLO gets
 no UDP at all: video and audio arrive on the control socket as `VIDEO_FRAME`
 (0x50) and `AUDIO_DATA` (0x51) messages. This is how a headset on a USB cable
@@ -72,6 +87,9 @@ Everything the host does — sending the desktop, injecting mouse and keyboard
   settings folder (`%APPDATA%\Immersive2\pairing-pin`,
   `~/.config/immersive2/pairing-pin`). `--pin NNNNNN` sets it, `--no-pin`
   turns pairing off.
+- Over TLS the host sends `IDENTITY` (its certificate) before it answers the
+  HELLO, so a headset can learn it with a HELLO without PIN, then reconnect
+  pinned to it and only then send the PIN (`docs/SECURITY.md`).
 - A wrong PIN costs half a second; five from one address lock it out for a
   minute (`REJECT_LOCKED_OUT`).
 - Any other message before an accepted HELLO drops the connection. A socket
@@ -133,7 +151,7 @@ Sent immediately after TCP connection is established.
 |-------|------|-------------|
 | version | uint8 | Protocol version (currently 1) |
 | client_name | char[32] | UTF-8 null-terminated display name |
-| flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP. Bit 1 `HELLO_FLAG_WATCH`: only watch, see [Pairing](#pairing) |
+| flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP. Bit 1 `HELLO_FLAG_WATCH`: only watch, see [Pairing](#pairing). Bit 2 `HELLO_FLAG_IDENTITY`: send `IDENTITY` on a plain connection too (over TLS it always comes) |
 | pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing); with `HELLO_FLAG_WATCH`, the watch code |
 | udp_port | uint16 LE | Optional (absent = 0 = the host's UDP port). Only read with `HELLO_FLAG_WATCH`: the UDP port a watcher picked for its video. Other clients always get video at the host's UDP port, whatever they put here |
 
@@ -175,7 +193,7 @@ Sent instead of HELLO_ACK; the host closes the connection right after.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| reason | uint8 | 1 `REJECT_PIN_REQUIRED` (no PIN sent), 2 `REJECT_WRONG_PIN`, 3 `REJECT_SERVER_FULL` (`--max-clients` reached), 4 `REJECT_LOCKED_OUT` (too many wrong PINs, retry in a minute) |
+| reason | uint8 | 1 `REJECT_PIN_REQUIRED` (no PIN sent), 2 `REJECT_WRONG_PIN`, 3 `REJECT_SERVER_FULL` (`--max-clients` reached), 4 `REJECT_LOCKED_OUT` (too many wrong PINs, retry in a minute), 5 `REJECT_ENCRYPTION_REQUIRED` (plain TCP from the network: use TLS, or start the host with `--allow-plaintext`) |
 
 A client should ask the user for the PIN on 1 and 2 instead of retrying, and
 stop retrying on 4. A headset disconnected from the host's settings window
@@ -458,6 +476,34 @@ from watchers.
 
 ---
 
+### `0x27` IDENTITY — Host → Client
+
+| Field | Type | Description |
+|-------|------|-------------|
+| certificate | bytes | The host's TLS certificate, PEM (ASCII, up to a few hundred bytes) |
+
+Sent right after a HELLO arrives and before HELLO_ACK or HELLO_REJECT: always
+over TLS, and on a plain connection when the HELLO has `HELLO_FLAG_IDENTITY`
+(so a headset on the USB cable learns the certificate of the PC it pairs
+with). It is the certificate of this TLS session; a client that cannot read
+the peer certificate from its TLS library uses it to pin the host on its next
+connection.
+
+---
+
+### `0x28` MEDIA_KEY — Host → Client
+
+| Field | Type | Description |
+|-------|------|-------------|
+| key | 48 bytes | AES-128 key (16), then HMAC-SHA-256 key (32) |
+
+Over TLS only, before HELLO_ACK (watchers: before STREAM_START), never with
+`HELLO_FLAG_TCP_MEDIA`. Random per connection. From then on every UDP datagram
+the host sends this client, video and audio, is sealed with it, see [Sealed
+datagrams](#sealed-datagrams).
+
+---
+
 ### `0x30` FRAME_ACK — Client → Host
 
 Acknowledges a video frame the client has completed (sent for every one).
@@ -687,13 +733,41 @@ The host resamples and downmixes the WASAPI endpoint's mix format (often
 
 ---
 
+## Sealed datagrams
+
+A client that got `MEDIA_KEY` receives each video and audio datagram as
+
+```
+ 0        16                         16+C       16+C+16
+ +--------+--------------------------+----------+
+ | IV     | ciphertext (C bytes)     | tag      |
+ +--------+--------------------------+----------+
+```
+
+- ciphertext: AES-128-CBC with `key[0..15]` and the IV over the plain datagram
+  (the formats above) plus PKCS#7 padding, so C is a multiple of 16;
+- tag: the first 16 bytes of HMAC-SHA-256 with `key[16..47]` over IV and
+  ciphertext (encrypt-then-MAC).
+
+The client checks the tag before anything else (constant time) and drops the
+datagram if it does not match; it also drops plain datagrams once it expects
+sealed ones. The host's IVs are unpredictable (AES of a counter under a key
+of its own). A 1415-byte video datagram becomes 1456 bytes: still one
+Ethernet frame. Why not AES-GCM: the Godot client has AES and HMAC but no
+AEAD, see `docs/SECURITY.md`.
+
+---
+
 ## Connection Sequence
 
 ```
 Client                                   Host
   |                                        |
   |--- TCP connect ----------------------->|
+  |=== TLS 1.2 handshake =================>|   (not from 127.0.0.0/8)
   |--- HELLO (0x01) ---------------------->|
+  |<-- IDENTITY (0x27) --------------------|   (TLS, or HELLO_FLAG_IDENTITY)
+  |<-- MEDIA_KEY (0x28) -------------------|   (TLS, UDP media)
   |<-- HELLO_ACK (0x02) -------------------|
   |<-- MONITOR_LIST (0x03) ----------------|
   |<-- AUDIO_START (0x07) -----------------|   (if host audio is enabled)
@@ -722,4 +796,4 @@ Client                                   Host
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors); WATCH_CODE, `HELLO_FLAG_WATCH`, HELLO `udp_port` and HELLO_ACK `lan_ipv4` (multiplayer rooms) — additive, old clients are unaffected |
+| 1 (current) | HELLO handshake, monitor list, single- and multi-monitor streaming, mouse/keyboard input, MJPEG/H.264/HEVC/AV1 video, PCM audio channel, latency probing, frame ACK, keyframe request; HELLO flags + VIDEO_FRAME/AUDIO_DATA for TCP media (USB); HELLO_ACK/discovery/MONITOR_LIST flags and VIRTUAL_DISPLAY_* (view-only hosts, virtual monitors); WATCH_CODE, `HELLO_FLAG_WATCH`, HELLO `udp_port` and HELLO_ACK `lan_ipv4` (multiplayer rooms); TLS, IDENTITY, MEDIA_KEY, `HELLO_FLAG_IDENTITY`, sealed datagrams and `REJECT_ENCRYPTION_REQUIRED` — additive, except that plain clients from the network need `--allow-plaintext` |

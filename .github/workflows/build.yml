@@ -52,7 +52,7 @@ jobs:
             libdbus-1-dev libpipewire-0.3-dev libpulse-dev \
             libavcodec-dev libavutil-dev libswscale-dev \
             xvfb x11-xserver-utils x11-utils xdotool python3-pil ffmpeg \
-            dbus python3-dbus python3-gi
+            dbus python3-dbus python3-gi python3-cryptography
 
       - name: Configure CMake
         run: |
@@ -77,6 +77,9 @@ jobs:
 
       - name: Watcher test (multiplayer rooms, WATCH_CODE)
         run: python3 host/tools/watch_test.py
+
+      - name: TLS test (identity, PIN inside TLS, sealed media, plain TCP only from this PC)
+        run: python3 host/tools/tls_test.py
 
       - name: Settings panel + tray test (private config, private D-Bus)
         run: python3 host/tools/panel_test.py

@@ -517,7 +517,8 @@ private:
         j << "{\"pc\":{\"name\":" << json_str(local_host_name())
           << ",\"address\":" << json_str(ip) << ",\"port\":" << opt_.tcp_port << "}"
           << ",\"pin\":{\"enabled\":" << (s_.pin_enabled ? "true" : "false")
-          << ",\"value\":" << json_str(s_.pin >= 100000 ? pin : "") << "}";
+          << ",\"value\":" << json_str(s_.pin >= 100000 ? pin : "")
+          << ",\"identity\":" << json_str(s_.fingerprint) << "}";
 
         const auto monitors = hooks_.monitors();
         auto monitor_name = [&](uint8_t id) {

@@ -57,6 +57,8 @@ enum class MessageType : uint8_t {
     VIRTUAL_DISPLAY_RESULT = 0x24, ///< Host → client: outcome of CREATE / REMOVE
     SCREEN_OFF           = 0x25, ///< Both ways: the PC's main screen dark / lit (ScreenOff)
     WATCH_CODE           = 0x26, ///< Client → host: who may watch its screens (WatchCode)
+    IDENTITY             = 0x27, ///< Host → client: its TLS certificate, PEM (see HELLO_FLAG_IDENTITY)
+    MEDIA_KEY            = 0x28, ///< Host → client: the key of its UDP video and audio (MediaKey)
     FRAME_ACK            = 0x30, ///< Acknowledge a received frame (flow control)
     REQUEST_KEYFRAME     = 0x31, ///< Client asks the host to emit an IDR (loss recovery)
     LATENCY_PROBE        = 0x40, ///< Sent by client to measure round-trip latency
@@ -83,6 +85,10 @@ constexpr uint8_t HELLO_FLAG_TCP_MEDIA = 0x01;
 /// code instead of the PIN; the host never takes input or requests from a
 /// watcher, and sends it the video at Hello.udp_port.
 constexpr uint8_t HELLO_FLAG_WATCH     = 0x02;
+/// Hello.flags bit: send IDENTITY (the host's certificate) even on a plain
+/// connection, e.g. over the USB cable, so the headset can pin it. Over TLS
+/// the host always sends it, before HELLO_ACK or HELLO_REJECT.
+constexpr uint8_t HELLO_FLAG_IDENTITY  = 0x04;
 
 struct Hello {
     uint8_t  protocol_version;
@@ -114,6 +120,7 @@ constexpr uint8_t REJECT_PIN_REQUIRED = 1;  ///< Host needs a PIN and none was s
 constexpr uint8_t REJECT_WRONG_PIN    = 2;
 constexpr uint8_t REJECT_SERVER_FULL  = 3;  ///< --max-clients reached
 constexpr uint8_t REJECT_LOCKED_OUT   = 4;  ///< Too many wrong PINs from this address; retry later
+constexpr uint8_t REJECT_ENCRYPTION_REQUIRED = 5;  ///< Plain TCP from the network: connect with TLS
 
 /// Sent instead of HELLO_ACK when the host refuses the client. Only
 /// connections from 127.0.0.1 (USB via `adb reverse`, a local bridge) skip the
@@ -211,6 +218,15 @@ constexpr uint32_t SCREEN_OFF_LEASE_MS = 10000;
 /// code, or the client leaving, drops every watcher. Ignored from watchers.
 struct WatchCode {
     uint32_t code;
+};
+
+/// MEDIA_KEY (over TLS only, before HELLO_ACK): every UDP datagram the host
+/// sends this client from now on, video and audio, is sealed with it:
+///   IV (16) | AES-128-CBC(key[0..15], IV, datagram + PKCS#7 padding) |
+///   HMAC-SHA-256(key[16..47], IV | ciphertext), first 16 bytes.
+/// The client drops whatever does not check. See docs/SECURITY.md.
+struct MediaKey {
+    uint8_t key[48];
 };
 
 struct MonitorSelect {

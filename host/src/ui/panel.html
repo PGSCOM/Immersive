@@ -518,6 +518,7 @@ body {
           <button class="btn" id="newPin" type="button">New PIN</button>
         </div>
         <p class="caption">Type this PIN in the headset when it asks. The headset finds <b class="pc-name">this PC</b> by itself.</p>
+        <p class="caption" id="identityLine" hidden>The headset shows this PC's code next to the PIN prompt: <b class="data" id="identity"></b>. If it shows another one, do not type the PIN.</p>
       </div>
       <div id="openView" hidden>
         <p class="open-title">Open to this network</p>
@@ -776,6 +777,8 @@ function render(s) {
   $("pcFact").hidden = !paired;
   $("frameFoot").hidden = false;
   if (!pinScramble) showPin(s.pin.value);
+  $("identity").textContent = s.pin.identity || "";
+  $("identityLine").hidden = !s.pin.identity;
   if (paired) renderHeadsets(s.headsets);
 
   const st = s.settings;
