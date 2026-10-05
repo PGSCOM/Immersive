@@ -33,11 +33,21 @@
 ## nothing. A pinch that is already closed when the hands get the pointer
 ## must open before it clicks.
 ##
-## Requirements:
-##   • project setting  xr/openxr/extensions/hand_tracking = true  (project.godot)
-##   • Pico:  <meta-data android:name="handtracking" android:value="1"/> in the
-##            Android manifest (added by addons/im2_decoder/im2_decoder.gd)
-##   • Quest: export preset xr_features/hand_tracking >= 1
+## Requirements (all of them; the runtime gates on the manifest and Godot prints
+## nothing when it says no — watch "[HandInput] OpenXR hand tracking"):
+##   • project setting  xr/openxr/extensions/hand_tracking = true  (project.godot).
+##     It defaults to FALSE since Godot 4.4, and it is what makes Godot request
+##     XR_EXT_hand_tracking at all.
+##   • AndroidManifest.xml, written by addons/im2_decoder/im2_decoder.gd:
+##     <meta-data android:name="handtracking" android:value="1"/>, pvr.app.type=vr
+##     and the com.picovr.permission.HAND_TRACKING permission (PICO); Quest wants
+##     oculus.software.handtracking / com.oculus.permission.HAND_TRACKING instead.
+##   • Nothing in the action map: the joint trackers come from
+##     XR_EXT_hand_tracking alone, not from an interaction profile.
+##   • No controller in use (PICO has no XR_META_simultaneous_hands_and_
+##     controllers, so it stops feeding joints while a controller is held).
+## PICO 4 supports XR_EXT_hand_tracking but not XR_EXT_hand_tracking_data_source,
+## so hand_tracking_source always reads UNKNOWN there — hence _has_hand().
 
 extends Node
 
@@ -773,7 +783,16 @@ func _to_world(t: Transform3D) -> Transform3D:
 func _log_runtime() -> void:
 	var xr := XRServer.find_interface("OpenXR")
 	if xr and xr.is_initialized():
-		_log_once("support", "[HandInput] OpenXR hand tracking %s" % xr.is_hand_tracking_supported())
+		# The one number that decides everything: Godot only registers
+		# /user/hand_tracker/* while the runtime reports hand tracking
+		# supported, and it prints nothing when it does not.
+		var supported: bool = xr.is_hand_tracking_supported()
+		_log_once("support", "[HandInput] OpenXR hand tracking %s" % supported)
+		if not supported:
+			_log_once("unsupported", "[HandInput] No hand tracking from the runtime: on PICO it " +
+				"needs handtracking=1 plus pvr.app.type=vr and com.picovr.permission.HAND_TRACKING " +
+				"in AndroidManifest.xml (Im2VideoDecoder's plugin writes them), and xr/openxr/" +
+				"extensions/hand_tracking on in project.godot")
 	for left in [true, false]:
 		var h := hand_tracker(left)
 		_log_once(left, "[HandInput] %s hand joints %s (source %d)" % [

@@ -304,6 +304,35 @@ pick one up and it has the pointer again.
 | Fingertip on the keyboard, menu or whiteboard | Type, press, draw |
 | Left palm to your face, then pinch | Toggle the menu (its Keyboard button opens the keyboard) |
 
+### Hand tracking on a standalone headset
+
+Put the controllers down (still for 3 s) or switch them off: the bare hand takes
+over. It needs three things, and the runtime is the strict one about all of them:
+
+- `xr/openxr/extensions/hand_tracking = true` in `project.godot`. It is **off by
+  default since Godot 4.4**, and it is what makes Godot request
+  `XR_EXT_hand_tracking` at all.
+- The Android manifest entries, which `addons/im2_decoder/im2_decoder.gd` writes
+  at export time: `handtracking=1` and `pvr.app.type=vr`, plus
+  `com.picovr.permission.HAND_TRACKING` on PICO (`oculus.software.handtracking`
+  and `com.oculus.permission.HAND_TRACKING` on Quest). They used to be export
+  options, but Godot removed them in 4.2, so setting them there does nothing.
+- No controller in use. PICO has no `XR_META_simultaneous_hands_and_controllers`:
+  it stops feeding joints while a controller is held.
+
+If the hands never appear, read one line from logcat (`adb logcat -s godot`):
+
+```
+[HandInput] OpenXR hand tracking true|false
+[HandInput] left hand joints tracked|none|- (source N)
+```
+
+`false` means the runtime is withholding it (check the manifest above); `none`
+means Godot never registered `/user/hand_tracker/*`, which only happens when the
+extension was not requested at all. `source 0` is `UNKNOWN` and is expected:
+only some runtimes implement `XR_EXT_hand_tracking_data_source` (Quest and
+SteamVR do, PICO 4 does not).
+
 The VR keyboard is a full US layout (Esc, Tab, symbols, arrows, Ctrl, Alt,
 Win); Shift, Ctrl, Alt and Win latch for the next key, and held keys repeat.
 
