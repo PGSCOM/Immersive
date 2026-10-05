@@ -182,6 +182,8 @@ func _permissions() -> void:
 	check(events.back() == ["perm", 501, "draw", true], "Permissions: let Ana draw on my board -> %s" % [events.back()])
 	await _click(ben_screens)
 	check(events.back() == ["perm", 902, "screens", true], "Permissions: show the other one's screens -> %s" % [events.back()])
+	await _click(ov._perm_switches[[501, "watch"]])
+	check(events.back() == ["perm", 501, "watch", false], "Permissions: Ana may not watch my screens -> %s" % [events.back()])
 	var before: Node = ov._perm_switches[[501, "voice"]]
 	ov.set_room(ov._room)  # the room refreshes as people talk
 	await _frames(2)

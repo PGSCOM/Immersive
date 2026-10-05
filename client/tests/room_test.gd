@@ -73,6 +73,13 @@ func _run() -> void:
 	p.set_profile({"name": "Ana", "share": {"ip": "10.0.0.2", "port": {}, "code": "7"}})
 	check(p.display_name == "Ana" and p.watch_state() == "" and p.mic_on and p._layouts.is_empty(),
 		"bad share and screen fields are ignored -> screens '%s'" % p.watch_state())
+	var ok_ips := ["10.0.0.2", "172.16.4.1", "172.31.255.1", "192.168.1.20", "100.101.102.103", "169.254.0.21"]
+	var bad_ips := ["127.0.0.1", "0.0.0.0", "8.8.8.8", "172.32.0.1", "192.169.1.1", "224.0.0.1",
+		"255.255.255.255", "100.128.0.1", "::1", "fe80::1", "192.168.1"]
+	check(ok_ips.all(Participant.watchable_ip) and not bad_ips.any(Participant.watchable_ip),
+		"a PC to watch must be on a local network or a VPN -> %s" % [bad_ips.filter(Participant.watchable_ip)])
+	p.set_profile({"name": "Ana", "share": {"ip": "127.0.0.1", "port": 19800, "code": 7}})
+	check(p.watch_state() == "", "a share at 127.0.0.1 (our own PC over USB) is ignored")
 	var at := Transform3D(Basis(Vector3.UP, 0.3), Vector3(-0.4, 1.5, -1.2))
 	var b := at.basis
 	p.set_profile({"name": "Ana", "screens": [{"id": 1, "w": 1.2, "c": 0.0,
@@ -141,8 +148,129 @@ func _whiteboards() -> void:
 		"two people drawing at once keep their own strokes -> %s points" % [lines.map(func(l): return l.points.size())])
 	theirs.apply_ink(["u"], 7)
 	check(echoed.is_empty() and theirs.stroke_count() == 1, "a replayed undo is not sent on again")
+	check(theirs._ink.get_children().filter(func(c): return c is Line2D and c.visible)[0].get_meta("author") == 9,
+		"7's undo took back 7's stroke, not 9's newer one")
 	mine.queue_free()
 	theirs.queue_free()
+
+	# Undo is per author: the owner (OWNER) and a guest (7) each take back
+	# their own, while the other's stroke in progress goes on, and two copies
+	# that saw the ops in another order end up the same.
+	var owner_board := Whiteboard.new()
+	var guest_copy := Whiteboard.new()
+	guest_copy.local_author = 7
+	root.add_child(owner_board)
+	root.add_child(guest_copy)
+	await process_frame
+	var o_ops := [["b", "ece6dc", 5.0, 100.0, 100.0], ["p", 120.0, 100.0]]
+	var g_ops := [["b", "e39a7f", 5.0, 500.0, 500.0], ["p", 520.0, 500.0]]
+	for op in o_ops:
+		owner_board.apply_ink(op, Whiteboard.OWNER)
+	for op in g_ops:
+		owner_board.apply_ink(op, 7)
+	for op in g_ops:
+		guest_copy.apply_ink(op, 7)
+	for op in o_ops:
+		guest_copy.apply_ink(op, Whiteboard.OWNER)
+	owner_board.apply_ink(["u"], Whiteboard.OWNER)  # the owner's undo, mid-way through the guest's stroke
+	guest_copy.apply_ink(["u"], Whiteboard.OWNER)
+	owner_board.apply_ink(["p", 540.0, 500.0], 7)
+	guest_copy.apply_ink(["p", 540.0, 500.0], 7)
+	var left := func(b: Whiteboard): return b._ink.get_children().filter(func(c): return c is Line2D and c.visible) \
+		.map(func(l): return [l.get_meta("author"), l.points.size()])
+	check(left.call(owner_board) == [[7, 4]] and left.call(guest_copy) == [[7, 4]],
+		"the owner's undo takes the owner's stroke, the guest's goes on, on both copies -> %s / %s" %
+		[left.call(owner_board), left.call(guest_copy)])
+	guest_copy.undo()  # the button on the guest's copy: the guest's own
+	owner_board.apply_ink(["u"], 7)
+	check(owner_board.stroke_count() == 0 and guest_copy.stroke_count() == 0, "the guest's undo takes the guest's stroke")
+	owner_board.queue_free()
+	guest_copy.queue_free()
+
+	# The owner's own ink goes out as OWNER, never as a peer id: drawn outside
+	# a room it would be the offline peer's 1, the room host's, and the host's
+	# copy (here: we are peer 1) skips its own. Whoever comes later gets the
+	# board as it is: what was undone is not in it, a clear that undo can
+	# still take back is.
+	var own := Whiteboard.new()
+	root.add_child(own)
+	await process_frame
+	for op in [["b", "ece6dc", 5.0, 10.0, 10.0], ["p", 40.0, 10.0], ["p", 80.0, 10.0]]:
+		own.apply_ink(op, Whiteboard.OWNER)
+	own.apply_ink(["b", "e39a7f", 12.0, 300.0, 300.0], Whiteboard.OWNER)
+	own.apply_ink(["u"], Whiteboard.OWNER)
+	own.apply_ink(["b", "a3b18a", 5.0, 600.0, 600.0], 7)
+	own.apply_ink(["c"], Whiteboard.OWNER)
+	var snap := own.snapshot()
+	var host_copy := Participant.new()
+	root.add_child(host_copy)
+	await process_frame
+	host_copy.apply_board([[Whiteboard.OWNER, ["b", "ffffff", 5.0, 1.0, 1.0]]], true)
+	host_copy.apply_board(snap, true)  # a fresh snapshot replaces what was there
+	var copy := host_copy.board_node()
+	var kinds := func(b: Whiteboard): return b._ink.get_children().map(func(c): return [c.get_meta("author"),
+		(c as Line2D).points.size() if c is Line2D else "clear"])
+	check(root.multiplayer.get_unique_id() == 1 and kinds.call(copy) == kinds.call(own)
+		and kinds.call(own) == [[0, 4], [7, 2], [0, "clear"]] and copy.stroke_count() == 0,
+		"the board as it is reaches the room host's copy, undone strokes left out -> %s" % [kinds.call(copy)])
+	copy.apply_ink(["u"], Whiteboard.OWNER)
+	own.apply_ink(["u"], Whiteboard.OWNER)
+	check(copy.stroke_count() == 2 and own.stroke_count() == 2, "and an undo of that clear after it works on both")
+	var room := Room.new()
+	root.add_child(room)
+	room.queue_ink(["b", "ece6dc", 5.0, 10.0, 10.0])
+	room._flush_ink()
+	check(room._ink_out.is_empty(), "ink drawn outside a room is dropped (the snapshot will carry it)")
+
+	# Who may watch our screens: the code goes only to them, and turning
+	# someone off, or anyone leaving, asks main.gd for a new code.
+	var revoked := []
+	room.watch_revoked.connect(func(id): revoked.append(id))
+	room.set_share({"ip": "192.168.1.20", "port": 19800, "code": 4242})
+	room.set_screens([{"id": 0, "x": [], "w": 1.6, "c": 0.0}])
+	room.set_pref(5, "watch", false)
+	check(room._profile_for(5).share.is_empty() and room._profile_for(5).screens.is_empty()
+		and room._profile_for(6).share.code == 4242 and room._profile.share.code == 4242,
+		"someone who may not watch gets no code (the others do)")
+	room.set_pref(5, "watch", true)
+	room._on_peer_disconnected(6)
+	check(revoked == [5, 6] and room._profile_for(5).share.code == 4242,
+		"turning someone off and someone leaving both ask for a new code -> %s" % [revoked])
+	host_copy.queue_free()
+	own.queue_free()
+	room.queue_free()
+	await _encrypted()
+
+## The room speaks DTLS only: a plain ENet client never gets in, one that
+## speaks DTLS does. PINs and watch codes come from the system's random source.
+func _encrypted() -> void:
+	var room := Room.new()
+	root.add_child(room)
+	await process_frame
+	var port := 45610
+	check(room.open(port, 135790), "a room opens, encrypted")
+	var plain := ENetMultiplayerPeer.new()
+	plain.create_client("127.0.0.1", port)
+	var dtls := ENetMultiplayerPeer.new()
+	dtls.create_client("127.0.0.1", port)
+	dtls.host.dtls_client_setup(Room.TLS_NAME, TLSOptions.client_unsafe())
+	for i in 150:  # real time (--fixed-fps runs frames as fast as it can): 1.5 s
+		plain.poll()
+		dtls.poll()
+		OS.delay_msec(10)
+		await process_frame
+	check(plain.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED
+		and dtls.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED,
+		"a plain client is not let in, a DTLS one is -> %d / %d" % [plain.get_connection_status(),
+			dtls.get_connection_status()])
+	plain.close()
+	dtls.close()
+	room.leave()
+	var pins := range(20).map(func(_i): return Room.random_pin())
+	var codes := range(20).map(func(_i): return Room.random_code())
+	check(pins.all(func(p): return p >= 100000 and p <= 999999) and codes.all(func(c): return c >= 1 and c <= 0x7FFFFFFF)
+		and pins.any(func(p): return p != pins[0]), "random PINs have six digits, codes 31 bits")
+	room.queue_free()
 
 ## Walking, turning and pulling move the tracking origin; the head keeps its
 ## place in a turn; a screen in between hides what is behind it.
@@ -168,6 +296,19 @@ func _moving() -> void:
 	check(origin.position.is_equal_approx(Vector3(0, 0, -0.3 * m.PULL_GAIN)), "pulling the room walks us forward, level -> %s" % origin.position)
 	m.back_to_seat()
 	check(origin.transform == Transform3D.IDENTITY, "back to my seat")
+	check(not m.can_move(), "alone (no room), the sticks and a pinch in the air do not move us")
+	var r := Room.new()
+	root.add_child(r)
+	m.room = r
+	r.state = Room.State.IN
+	m._on_room_changed()
+	m.walk(Vector2(0, 1), 1.0)
+	check(m.can_move() and origin.transform != Transform3D.IDENTITY, "in a room they do")
+	r.state = Room.State.OFF
+	m._on_room_changed()
+	check(origin.transform == Transform3D.IDENTITY and not m.can_move(), "leaving the room takes us back to our seat")
+	m.room = null
+	r.queue_free()
 
 	var screen: Node3D = MeshInstance3D.new()
 	screen.script = load("res://scripts/screen_panel.gd")

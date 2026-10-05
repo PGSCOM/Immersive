@@ -88,8 +88,6 @@ var share_screens: bool = false
 var _watch_code: int = 0
 var _watch_probe: int = -1
 var _room_screens_s: float = 0.0
-## Whiteboard changes not yet handed to the room (Whiteboard.ink).
-var _ink_out: Array = []
 var _room_notice: String = ""
 ## The room joined last (the menu's address field starts there) and its port.
 var _room_address: String = ""
@@ -296,22 +294,33 @@ func _process(delta: float) -> void:
 	_handle_debug_capture(delta)
 	_update_decoders()
 	_update_snap_preview()
-	_sort_layers()
+	_sort_layers(delta)
 	_update_room(delta)
 
 ## Compositor layers ignore depth: farther screens get a lower sort_order so a
-## nearer one is drawn over them where they overlap.
-func _sort_layers() -> void:
+## nearer one is drawn over them where they overlap. Whether a screen hides
+## something of the room (one ray per screen and per point of everyone else,
+## Room.occluder_points(): dozens of people's worth on a headset's CPU) is
+## worked out OCCLUSION_S apart, not every frame, and not at all outside a room.
+const OCCLUSION_S := 0.1
+var _occlusion_s := 0.0
+
+func _sort_layers(delta: float = 0.0) -> void:
 	if not compositor_layers or not xr_camera:
 		return
 	var eye := xr_camera.global_position
 	var panels := _live_panels().filter(func(p): return p.has_compositor_layer())
 	panels.sort_custom(func(a, b): return eye.distance_squared_to(a.global_position) \
 		< eye.distance_squared_to(b.global_position))
-	var room_points: Array = room.occluder_points() if room else []
 	for i in panels.size():
 		panels[i].set_layer_order(-1 - i)
-		panels[i].draw_mesh_over_layer(_hides_any(panels[i], eye, room_points))
+	_occlusion_s += delta
+	if _occlusion_s < OCCLUSION_S:
+		return
+	_occlusion_s = 0.0
+	var room_points: Array = room.occluder_points() if room and room.state == Room.State.IN else []
+	for p in panels:
+		p.draw_mesh_over_layer(not room_points.is_empty() and _hides_any(p, eye, room_points))
 
 ## Whether `panel` stands between the eye and one of `points` (world).
 func _hides_any(panel: Node3D, eye: Vector3, points: Array) -> bool:
@@ -1075,6 +1084,12 @@ const WALK_SPEED := 1.6     ## m/s with the stick all the way
 const TURN_STEP_DEG := 30.0
 const PULL_GAIN := 2.0      ## metres moved per metre the hand pulls
 
+## Whether the sticks and a pinch in the air move us: only in a room, where
+## there is somewhere to go and "Back to my seat". Leaving the room takes us
+## back to it (_on_room_changed), so our own screens are where we left them.
+func can_move() -> bool:
+	return room != null and room.state == Room.State.IN
+
 ## Walk along the floor, where we look: stick up = forward.
 func walk(stick: Vector2, delta: float) -> void:
 	var fwd := -xr_camera.global_basis.z
@@ -1120,8 +1135,9 @@ func _init_room() -> void:
 	room.board = whiteboard
 	add_child(room)
 	room.changed.connect(_on_room_changed)
+	room.watch_revoked.connect(func(_id: int): _rotate_watch_code())
 	room.rooms_found.connect(func(rooms: Array): ui_overlay.set_found_rooms(rooms))
-	whiteboard.ink.connect(func(op: Array): _ink_out.append(op))
+	whiteboard.ink.connect(room.queue_ink)
 	if _cmdline_board:
 		whiteboard.set_shown.call_deferred(true)
 		_draw_test_line.call_deferred(whiteboard)
@@ -1141,9 +1157,15 @@ func _person_name() -> String:
 	var model := OS.get_model_name()
 	return model if not model.is_empty() and model != "GenericDevice" else "Someone"
 
+var _was_in_room := false
+
 func _on_room_changed() -> void:
 	if not room:
 		return
+	var in_room := room.state == Room.State.IN
+	if _was_in_room and not in_room:
+		back_to_seat()
+	_was_in_room = in_room
 	_update_share()
 	if not ui_overlay:
 		return
@@ -1167,7 +1189,7 @@ func _update_share() -> void:
 	var connected := current_state == State.CONNECTED or current_state == State.STREAMING
 	var want := share_screens and connected and room.state == Room.State.IN
 	if want and _watch_code == 0:
-		_watch_code = randi_range(1, 0x7FFFFFFF)
+		_watch_code = Room.random_code()
 		network_client.send_watch_code(_watch_code)
 		_watch_probe = _probe_id + 1
 		_latency_timer = LATENCY_INTERVAL  # that probe goes out now
@@ -1178,6 +1200,19 @@ func _update_share() -> void:
 		_watch_probe = -1
 		room.set_share({})
 		room.set_screens([])
+
+## Someone who knows our watch code should not watch any more (they left, or
+## lost "Sees my screens"): the room forgets where to watch (the others stop
+## at once instead of trying the old code), and the PC gets a new code, which
+## drops every watcher; the room hears the new one once the host has it, and
+## only those who may watch get it (Room._profile_for()).
+func _rotate_watch_code() -> void:
+	if _watch_code == 0:
+		return
+	room.set_share({})
+	_watch_code = 0
+	_watch_probe = -1
+	_update_share()
 
 ## The host has our code: tell the room where to watch from. The PC's network
 ## address, as we reach it or as it says in HELLO_ACK (over the USB cable we
@@ -1191,6 +1226,9 @@ func _announce_share() -> void:
 	if not ip.is_valid_ip_address():
 		ui_overlay.set_notice("Your screens cannot be shared: the PC did not say its network address.")
 		return
+	if not Participant.watchable_ip(ip):  # the others would not connect there
+		ui_overlay.set_notice("Your screens cannot be shared: the PC's address %s is not on a local network or a VPN." % ip)
+		return
 	room.set_share({"ip": ip, "port": host_tcp_port, "code": _watch_code})
 	_room_screens_s = 1.0
 
@@ -1198,9 +1236,6 @@ func _update_room(delta: float) -> void:
 	if not room:
 		return
 	room.look_for_rooms(ui_overlay.is_shown() and ui_overlay.showing_room_tab())
-	if not _ink_out.is_empty():
-		room.send_ink(_ink_out)  # kept even outside a room, for whoever joins later
-		_ink_out = []
 	if room.state != Room.State.IN:
 		return
 	# Where the whiteboard and the shared screens hang, twice a second (the

@@ -77,7 +77,8 @@ struct ClientState {
     bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
     /// HELLO_FLAG_WATCH: only gets the frames of the client that set the
     /// watch code (watch_owner_); sends nothing the host acts on but
-    /// REQUEST_KEYFRAME, LATENCY_PROBE and PING.
+    /// LATENCY_PROBE and PING (not even REQUEST_KEYFRAME: the owner's
+    /// headset asks for those, and a lost frame waits for the next one).
     bool                watcher = false;
     std::string         name;
     struct FlowState {
@@ -328,7 +329,6 @@ public:
 
     void send_stream_start(uint32_t client_id,
                            const protocol::StreamStart& info) override {
-        std::vector<uint32_t> to{client_id};
         {
             // A new stream numbers its frames from info.first_frame: forget
             // the previous stream's acknowledgements.
@@ -350,19 +350,16 @@ public:
         std::vector<uint32_t> to;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
-            stream_starts_[info.monitor_id] = {owner, info};  // for watchers joining later
+            stream_starts_[{owner, info.monitor_id}] = info;  // for watchers joining later
             if (owner == watch_owner_) append_watchers_locked(to);
         }
         for (uint32_t id : to)
             send_control_message(id, protocol::MessageType::STREAM_START, &info, sizeof(info));
     }
 
+    /// Every frame of the owner's capture loop asks: no lock (atomics).
     bool has_watchers(uint32_t owner) const override {
-        std::lock_guard<std::mutex> lock(clients_mutex_);
-        if (owner != watch_owner_) return false;
-        for (const auto& [id, c] : clients_)
-            if (c.watcher) return true;
-        return false;
+        return owner != 0 && owner == watch_owner_.load() && watcher_count_.load() > 0;
     }
 
     void send_watch_packet(uint32_t owner, uint8_t monitor_id, uint32_t frame_number,
@@ -381,8 +378,7 @@ public:
         std::vector<uint32_t> to{client_id};
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
-            auto it = stream_starts_.find(monitor_id);
-            if (it != stream_starts_.end() && it->second.first == client_id) stream_starts_.erase(it);
+            stream_starts_.erase({client_id, monitor_id});
             if (client_id == watch_owner_) append_watchers_locked(to);
         }
         const protocol::StreamStop msg{monitor_id};
@@ -1126,9 +1122,12 @@ private:
             std::lock_guard<std::mutex> lock(clients_mutex_);
             auto it = clients_.find(client_id);
             if (it != clients_.end()) {
+                if (it->second.watcher) --watcher_count_;
                 closesocket(it->second.tcp_socket);
                 clients_.erase(it);
             }
+            for (auto s = stream_starts_.begin(); s != stream_starts_.end();)
+                s = s->first.first == client_id ? stream_starts_.erase(s) : std::next(s);
             if (client_id == watch_owner_) {
                 std::cout << "[Server] Client " << client_id << " left: its watchers go too\n";
                 drop_watchers_locked();
@@ -1241,12 +1240,13 @@ private:
                 reject = protocol::REJECT_WRONG_PIN;  // the code changed meanwhile
             } else {
                 it->second.authed = it->second.watcher = true;
+                ++watcher_count_;
                 it->second.name.assign(hello.client_name,
                                        strnlen(hello.client_name, sizeof(hello.client_name)));
                 it->second.udp_addr.sin_port = htons(hello.udp_port ? hello.udp_port : config_.udp_port);
                 owner = watch_owner_;
-                for (const auto& [mid, s] : stream_starts_)
-                    if (s.first == owner) starts.push_back(s.second);
+                for (const auto& [key, s] : stream_starts_)
+                    if (key.first == owner) starts.push_back(s);
             }
         }
         if (reject) {
@@ -1468,12 +1468,15 @@ private:
     std::atomic<uint32_t> pin_{0};
     std::atomic<uint8_t>  host_flags_{0};
 
-    // Watching (protocol::WatchCode), all under clients_mutex_: the code, the
-    // client whose screens watchers get, and the last watch STREAM_START of
-    // each monitor (and whose it is) for watchers that join later.
+    // Watching (protocol::WatchCode), all written under clients_mutex_: the
+    // code, the client whose screens watchers get, how many watchers there
+    // are (the last two atomic: has_watchers() reads them every frame without
+    // the lock), and the last watch STREAM_START of each (owner, monitor) for
+    // watchers that join later.
     uint32_t watch_code_ = 0;
-    uint32_t watch_owner_ = 0;
-    std::map<uint8_t, std::pair<uint32_t, protocol::StreamStart>> stream_starts_;
+    std::atomic<uint32_t> watch_owner_{0};
+    std::atomic<int> watcher_count_{0};
+    std::map<std::pair<uint32_t, uint8_t>, protocol::StreamStart> stream_starts_;
 
     // Per-client handler threads, joined in stop(). finished_threads_ marks the
     // ones that have run to completion so the accept loop can reap them.

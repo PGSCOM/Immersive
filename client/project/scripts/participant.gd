@@ -65,6 +65,10 @@ var _refused := false
 var _probe_s := 0.0
 var _probe_id := 0
 var _panels := {}            ## monitor id -> ScreenPanel
+## Monitor id -> where we put that screen by hand (local transform): kept when
+## the stream comes back (their PC's watch code changes whenever someone
+## leaves the room, and every watcher reconnects).
+var _moved := {}
 var _layouts := {}           ## monitor id -> {xform, w, curve}
 var _decoders := {}          ## monitor id -> SoftwareVideoDecoder
 ## Their whiteboard, replayed here (made when they first draw or show it),
@@ -133,7 +137,7 @@ func set_profile(p: Dictionary) -> void:
 		_label.text = display_name
 	var share := {}
 	var s = p.get("share", {})
-	if typeof(s) == TYPE_DICTIONARY and str(s.get("ip", "")).is_valid_ip_address():
+	if typeof(s) == TYPE_DICTIONARY and watchable_ip(str(s.get("ip", ""))):
 		var port := _num(s.get("port"), 0.0)
 		var code := _num(s.get("code"), 0.0)
 		if port >= 1 and port <= 65535 and code >= 1 and code <= 0x7FFFFFFF:
@@ -156,6 +160,18 @@ func set_profile(p: Dictionary) -> void:
 			_layouts[int(_num(sc.get("id"), -1.0))] = {"xform": t,
 				"w": clampf(_num(sc.get("w"), 1.6), 0.4, 4.0), "curve": clampf(_num(sc.get("c"), 0.0), 0.0, 1.0)}
 	_place_screens()
+
+## Whether a PC to watch may be at `ip` (from the network: anyone in the room
+## could name any address, and every headset would connect there): an IPv4
+## address of a local network or a VPN: 10/8, 172.16/12, 192.168/16, 100.64/10
+## (CGNAT: Tailscale) or link-local 169.254/16. Never loopback (over USB that
+## is our own PC), a public address, multicast or broadcast.
+static func watchable_ip(ip: String) -> bool:
+	if not ip.is_valid_ip_address() or ip.count(".") != 3:
+		return false
+	var o := Array(ip.split(".")).map(func(v): return int(v))
+	return o[0] == 10 or (o[0] == 172 and o[1] >= 16 and o[1] <= 31) or (o[0] == 192 and o[1] == 168) \
+		or (o[0] == 100 and o[1] >= 64 and o[1] <= 127) or (o[0] == 169 and o[1] == 254 and o[3] != 255)
 
 ## 12 numbers from the network (basis columns, origin) as a placement, or null.
 static func _xform(x: Variant) -> Variant:
@@ -190,6 +206,18 @@ func apply_ink(inked: Array) -> void:
 		if typeof(pair) == TYPE_ARRAY and pair.size() == 2 and typeof(pair[0]) == TYPE_INT and pair[0] != me:
 			_board.apply_ink(pair[1], pair[0])
 
+## Their board as it is now (Room._take_board): `first` empties our copy
+## (and drops what we drew and have not sent), then it is rebuilt as theirs
+## is, our own strokes on it too (they took them).
+func apply_board(inked: Array, first: bool) -> void:
+	_ensure_board()
+	if first:
+		_board.reset()
+		_guest_ink.clear()
+	for pair in inked:
+		if typeof(pair) == TYPE_ARRAY and pair.size() == 2 and typeof(pair[0]) == TYPE_INT:
+			_board.apply_ink(pair[1], pair[0])
+
 ## They show a whiteboard; we see it here; they let us draw on it.
 func shows_board() -> bool:
 	return _board_info.get("on", false) == true
@@ -208,6 +236,8 @@ func _ensure_board() -> void:
 	if _board == null:
 		_board = Whiteboard.new()
 		_board.name = "Board"
+		# What we draw here is ours under our peer id, as the owner replays it.
+		_board.local_author = multiplayer.get_unique_id()
 		add_child(_board)
 		# What we draw on it (when they let us: main.gd only lets the pointer
 		# draw then) goes to them.
@@ -380,6 +410,9 @@ func _on_stream_started(mid: int, w: int, h: int, codec: int) -> void:
 		p.set_meta("monitor_id", mid)
 		add_child(p)
 		_panels[mid] = p
+		if _moved.has(mid):
+			p.transform = _moved[mid]
+			p.set_meta("moved", true)
 	p.set_resolution(w, h, codec)
 	_place_screens()
 	var sw := SoftwareVideoDecoder.new()
@@ -396,6 +429,8 @@ func _on_stream_stopped(mid: int) -> void:
 func _drop_screen(mid: int) -> void:
 	_close_decoder(mid)
 	if is_instance_valid(_panels.get(mid)):
+		if _panels[mid].get_meta("moved", false):
+			_moved[mid] = _panels[mid].transform
 		_panels[mid].queue_free()
 	_panels.erase(mid)
 
@@ -404,15 +439,16 @@ func _close_decoder(mid: int) -> void:
 		_decoders[mid].close()
 		_decoders.erase(mid)
 
-## Each screen where they have it, unless it was moved by hand here. One with
-## no layout yet stays hidden (it would sit on the floor at their seat).
+## Each screen where they have it, unless it was moved by hand here (then it
+## only takes their width and curve). One with no layout yet stays hidden (it
+## would sit on the floor at their seat).
 func _place_screens() -> void:
 	for mid in _panels:
 		var p: MeshInstance3D = _panels[mid]
-		if p.get_meta("moved", false):
-			continue
-		p.visible = _layouts.has(mid)
-		if not p.visible:
+		var moved: bool = p.get_meta("moved", false)
+		if not moved:
+			p.visible = _layouts.has(mid)
+		if not _layouts.has(mid):
 			continue
 		var l: Dictionary = _layouts[mid]
 		if p.get_meta("curve", -1.0) != l.curve:
@@ -420,7 +456,8 @@ func _place_screens() -> void:
 			p.set_curvature(l.curve > 0.001, l.curve)
 		if absf(p.panel_width - l.w) > 0.001:
 			p.set_panel_width(l.w)
-		p.transform = l.xform
+		if not moved:
+			p.transform = l.xform
 
 ## Centre pixel of each screen they share, and their board, for the test harness.
 func debug_lines() -> Array:

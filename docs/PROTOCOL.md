@@ -135,7 +135,7 @@ Sent immediately after TCP connection is established.
 | client_name | char[32] | UTF-8 null-terminated display name |
 | flags | uint8 | Optional (older clients send 33 bytes = 0). Bit 0 `HELLO_FLAG_TCP_MEDIA`: send video/audio on this TCP socket instead of UDP. Bit 1 `HELLO_FLAG_WATCH`: only watch, see [Pairing](#pairing) |
 | pin | uint32 LE | Optional (absent = 0 = none). The pairing PIN, see [Pairing](#pairing); with `HELLO_FLAG_WATCH`, the watch code |
-| udp_port | uint16 LE | Optional (absent = 0 = the host's UDP port). Where to send the video; a watcher picks a port of its own |
+| udp_port | uint16 LE | Optional (absent = 0 = the host's UDP port). Only read with `HELLO_FLAG_WATCH`: the UDP port a watcher picked for its video. Other clients always get video at the host's UDP port, whatever they put here |
 
 The host answers with HELLO_ACK, then MONITOR_LIST (and AUDIO_START when it
 captures audio) — or with HELLO_REJECT and closes.

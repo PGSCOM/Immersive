@@ -119,7 +119,12 @@ No server and no account: a room is a handful of headsets talking directly.
   headset opens it (UDP 19820, `--im2-room-port` in tests) and relays between
   the others; it also answers LAN discovery on 19821, so the Room tab lists
   it. Joining takes its address and its six-digit PIN (SceneMultiplayer
-  authentication; five wrong PINs lock an address out for a minute). Over the
+  authentication; five wrong PINs lock an address out for a minute). The room
+  is encrypted (ENet's DTLS, a self-signed RSA certificate made the first time
+  a room opens in that run; joiners do not verify it, so it stops anyone
+  listening on the network, not someone in the middle). PINs and watch codes
+  come from `Crypto.generate_random_bytes()`, not `randi()`. The HELLO a
+  watcher sends the sharer's PC is not encrypted, like any HELLO with a PIN. Over the
   internet that means a VPN (Tailscale, ZeroTier...) or a forwarded port: the
   room and each sharer's PC must be reachable. If the headset that opened the
   room leaves, the room closes.
@@ -130,29 +135,47 @@ No server and no account: a room is a handful of headsets talking directly.
   an AudioEffectCapture, mixed to mono, box-filtered to 16 kHz, 20 ms PCM-16
   packets, only while it passes a noise gate); their *ink*: every change to
   their whiteboard as it happens (`Whiteboard.ink` ops: a stroke begins, goes
-  on, undo, clear; reliable, each with its author), all of it again for
-  whoever joins later. Someone the owner lets draw (the profile lists them)
+  on, undo, clear; reliable, each with its author: `Whiteboard.OWNER` (0) for
+  the owner's own, the peer id for a guest's). Whoever sees a board for the
+  first time gets it as it is now (`Whiteboard.snapshot()`: what was undone is
+  not in it, a clear that undo can still take back is), not the history of
+  every op; outside a room nothing is kept. Undo takes back the author's own
+  last stroke or clear, so every copy ends up the same whatever order two
+  authors' ops arrive in. Someone the owner lets draw (the profile lists them)
   draws on their copy; the ops go to the owner (`_draw_on`), who replays them
-  and passes them on, so the owner's board is the one that counts.
+  and passes them on, so the owner's board is the one that counts: ops it
+  refuses (no permission, or no more) get the guest a fresh snapshot, which
+  drops them from the guest's copy too.
 - **Permissions** (the Room tab's page, `Room.pref()`): per person, whether we
   see their whiteboard and their screens (off: not even downloaded) and hear
-  their voice, all only on our side, and whether they may draw on our board.
-  This session only. About
+  their voice, all only on our side, whether they may draw on our board, and
+  whether they may watch our screens ("Sees my screens": off, their profile
+  of us comes without the watch code). This session only. About
   3 KB/s of poses and 32 KB/s of voice per person talking.
 - **Screens never go through the room.** A headset that shares sends its PC a
   random WATCH_CODE and, once the host has it, tells the room the PC's
-  address, port and code. Everyone else connects to that PC directly as a
+  address, port and code. Headsets only connect to an address of a local
+  network or a VPN (`Participant.watchable_ip()`: 10/8, 172.16/12,
+  192.168/16, 100.64/10, 169.254/16), never loopback or a public one, so
+  nobody in the room can send everyone's headset somewhere else. Everyone else connects to that PC directly as a
   *watcher* (`protocol.h` `HELLO_FLAG_WATCH`) and gets a copy of its own:
   MJPEG at most 1280 wide and 8 fps, encoded on a thread of its own from the
   frames the PC streams to the sharer (`WatchStream` in `main.cpp`). Any
   client decodes it (a PC too), it takes a few Mbps whatever the sharer
   streams at, and the sharer's own stream never depends on who watches. A
   watcher can do nothing but watch. Sharing is off by default and never saved.
+  Whenever someone who knows the code should not watch any more (they leave
+  the room, or lose "Sees my screens"), the sharer's PC gets a new code
+  (`Room.watch_revoked` → `main.gd::_rotate_watch_code()`), which drops every
+  watcher, and only the others learn it; a screen someone moved by hand stays
+  where they put it when its stream comes back.
 - **One room frame.** Poses, screens and whiteboards are sent in the room's
   frame (the world), not the tracking origin, so people can move: walking
   carries XROrigin3D through the world (left stick walks, right stick turns
-  30°, a pinch in the air pulls; "Back to my seat" returns), the others stay
-  where they are, and they see us come.
+  30°, a pinch in the air pulls once the hand has moved 4 cm; "Back to my
+  seat" returns), the others stay where they are, and they see us come. Only
+  in a room (`main.gd::can_move()`): alone, the sticks and a pinch in the air
+  do nothing, and leaving a room takes us back to our seat.
 - **Seats** (`Room.seat()`): everyone in one row, ordered by peer id, 3.2 m
   apart, facing the same way. Each `Participant` node sits at its seat; under
   it, the avatar, the shared screens and the whiteboard are in that person's

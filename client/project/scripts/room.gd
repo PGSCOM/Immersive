@@ -5,18 +5,27 @@
 ## answers LAN discovery on `port` + 1, so the others find it in a list) and
 ## relays between the rest, who join with its address and the room's six-digit
 ## PIN (SceneMultiplayer authentication; five wrong ones lock an address out
-## for a minute). Through the room go each person's profile (name, microphone,
+## for a minute). Everything in the room is encrypted (DTLS, a self-signed
+## certificate made once per run): nobody else on the network reads the PIN,
+## the voices or how to watch someone's PC. The certificate is not checked
+## (there is nothing to check it against), so it keeps out who listens, not
+## someone who sits between us and the room. Through the room go each person's profile (name, microphone,
 ## how to watch their PC and where their shared screens hang), their pose
 ## (head and hands relative to their XROrigin3D, POSE_HZ) and their voice
 ## (16 kHz mono PCM in 20 ms packets, only while louder than a noise gate).
 ## Our whiteboard goes too: where it hangs and who may draw on it (in the
 ## profile), and every stroke as it is drawn (`ink` ops with their author,
-## reliable; whoever joins later gets them all). Someone we let draw sends
-## their ops to us (`_draw_on`) and we pass them on. What we see and hear of
-## each person, and who draws on our board, is up to us (pref(), the menu's
-## Permissions page; this session only).
+## reliable). Whoever sees it for the first time (joins while it is shown, or
+## is there when we show it) gets it as it is now (Whiteboard.snapshot(), not
+## its history). Someone we let draw sends their ops to us (`_draw_on`) and we
+## pass them on; ops we refuse (they may not, or no more) get them our board
+## as it is, so their copy drops what we did not take. What we see and hear of
+## each person, who draws on our board and who may watch our screens is up to
+## us (pref(), the menu's Permissions page; this session only).
 ## The screens never go through the room: each PC streams them straight to the
-## headsets that watch it (Participant, protocol.h WatchCode).
+## headsets that watch it (Participant, protocol.h WatchCode). How to watch
+## ours (the code) goes only to whom we let (_profile_for()), and a new code
+## replaces it whenever one of them should not watch any more (watch_revoked).
 ##
 ## Everything is in the room frame (this node's, i.e. the world), not the
 ## tracking origin: walking (main.gd moves XROrigin3D) carries us towards the
@@ -35,6 +44,10 @@ signal changed
 signal rooms_found(rooms: Array)
 ## A voice packet from someone (client/tests/room_bot.gd repeats them).
 signal voice_heard(peer_id: int, pcm: PackedByteArray)
+## Someone who may know how to watch our PC should not any more: they left,
+## or we turned off their "Sees my screens". main.gd gives the PC a new
+## watch code (which drops every watcher) and tells it only to the others.
+signal watch_revoked(peer_id: int)
 
 enum State { OFF, JOINING, IN }
 
@@ -50,6 +63,8 @@ const VOICE_CHUNK := 320           ## 20 ms
 const GATE_RMS := 0.012
 const GATE_HOLD_S := 0.35
 const MIC_BUS := "RoomMic"
+## The name in the room's certificate (DTLS); joiners do not check it.
+const TLS_NAME := "immersive-room"
 
 var state := State.OFF
 var is_host := false
@@ -78,15 +93,22 @@ var _people := {}                  ## peer id -> Participant
 var _profile := {"name": "", "mic": true, "share": {}, "screens": [], "board": {}}
 ## Our own whiteboard (main.gd's): guests' ink is replayed on it.
 var board: Whiteboard = null
-## Every op on our whiteboard so far, as [author peer id, op], for people who
-## join later.
-var _ink_log: Array = []
+## Peer id -> true: they have our board (a snapshot, then every op).
+var _synced := {}
+## Peer id -> true: we refused their ink, they get our board again soon.
+var _resync := {}
+var _resync_s := 0.0
+const RESYNC_S := 0.5
+## Our own ink not sent yet (queue_ink).
+var _ink_out: Array = []
 ## Peer id -> {board, screens, voice: what we see / hear of them; draw: they
 ## may draw on our board}. Missing = the default (see pref()).
 var _prefs := {}
 ## Our board's placement as main.gd last gave it (the guests are added to it).
 var _board_place := {}
 const INK_BATCH := 2000
+## The author of a board owner's own ink: never a peer id (those start at 1).
+const OWNER := 0
 var _join_deadline_ms := 0
 var _pose_s := 0.0
 var _summary_s := 0.0
@@ -94,6 +116,9 @@ var _last_summary := ""
 var _disc: PacketPeerUDP = null    ## answers LAN discovery while we host
 var _finder: HostDiscovery = null  ## finds rooms while we are in none
 var _failures := {}                ## address -> {n, until}: wrong PINs
+## The room's DTLS key and certificate, made the first time we open one.
+static var _tls_key: CryptoKey = null
+static var _tls_cert: X509Certificate = null
 
 # Microphone: captured on a muted bus, mixed to mono, box-filtered down to
 # VOICE_RATE, gated, and sent VOICE_CHUNK samples at a time.
@@ -136,12 +161,20 @@ func _exit_tree() -> void:
 
 func _process(delta: float) -> void:
 	_answer_discovery()
+	_flush_ink()
 	if state == State.JOINING and Time.get_ticks_msec() > _join_deadline_ms:
 		leave("No room answered at %s." % address)
 	if state != State.IN:
 		return
 	_seat_people()
 	_capture_voice(delta)
+	_resync_s += delta
+	if _resync_s >= RESYNC_S and not _resync.is_empty():
+		_resync_s = 0.0
+		for id in _resync:
+			if _people.has(id):
+				_sync_board(id)
+		_resync.clear()
 	_pose_s += delta
 	if _pose_s >= 1.0 / POSE_HZ and not _people.is_empty() and _origin and _camera:
 		_pose_s = 0.0
@@ -166,9 +199,14 @@ func open(at_port: int = PORT, with_pin: int = 0) -> bool:
 		_peer = null
 		_say("Could not open a room: UDP port %d is in use on this headset." % at_port)
 		return false
+	if _peer.host.dtls_server_setup(_tls_server()) != OK:
+		_peer.close()
+		_peer = null
+		_say("Could not open a room: encryption (DTLS) is not available here.")
+		return false
 	is_host = true
 	port = at_port
-	pin = with_pin if with_pin >= 100000 else randi_range(100000, 999999)
+	pin = with_pin if with_pin >= 100000 else random_pin()
 	address = lan_address()
 	multiplayer.multiplayer_peer = _peer
 	_disc = PacketPeerUDP.new()
@@ -181,7 +219,8 @@ func open(at_port: int = PORT, with_pin: int = 0) -> bool:
 func join(ip: String, at_port: int, with_pin: int) -> void:
 	leave()
 	_peer = ENetMultiplayerPeer.new()
-	if _peer.create_client(ip, at_port) != OK:
+	if _peer.create_client(ip, at_port) != OK \
+			or _peer.host.dtls_client_setup(TLS_NAME, TLSOptions.client_unsafe()) != OK:
 		_peer = null
 		_say("Could not reach %s." % ip)
 		return
@@ -208,6 +247,8 @@ func leave(why: String = "") -> void:
 	for p in _people.values():
 		p.queue_free()
 	_people.clear()
+	_synced.clear()
+	_resync.clear()
 	is_host = false
 	if why or state != State.OFF:
 		_say(why)
@@ -234,6 +275,27 @@ func look_for_rooms(on: bool) -> void:
 		_finder.start()
 	else:
 		_finder.stop()
+
+## A room PIN: six digits from the system's random source (not randi(), whose
+## state other outputs could give away).
+static func random_pin() -> int:
+	return 100000 + Crypto.new().generate_random_bytes(4).decode_u32(0) % 900000
+
+## A watch code (protocol.h WatchCode): 1 to 2^31-1, from the same source.
+static func random_code() -> int:
+	var code := 0
+	while code == 0:
+		code = Crypto.new().generate_random_bytes(4).decode_u32(0) & 0x7FFFFFFF
+	return code
+
+## The DTLS server side: an RSA key and a self-signed certificate, made the
+## first time a room opens in this run (a moment's work) and kept until quit.
+static func _tls_server() -> TLSOptions:
+	if _tls_key == null:
+		var crypto := Crypto.new()
+		_tls_key = crypto.generate_rsa(2048)
+		_tls_cert = crypto.generate_self_signed_certificate(_tls_key, "CN=%s" % TLS_NAME)
+	return TLSOptions.server(_tls_key, _tls_cert)
 
 ## This headset's address on the local network, for others to type.
 static func lan_address() -> String:
@@ -300,9 +362,9 @@ func _on_peer_connected(id: int) -> void:
 		_prefs[id] = {"draw": true}
 		_publish_board()
 	p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
-	_take_profile.rpc_id(id, _profile)
-	for i in range(0, _ink_log.size(), INK_BATCH):
-		_take_ink.rpc_id(id, _ink_log.slice(i, i + INK_BATCH))
+	_take_profile.rpc_id(id, _profile_for(id))
+	if board and board.visible:
+		_sync_board(id)
 	changed.emit()
 
 func _on_peer_disconnected(id: int) -> void:
@@ -311,10 +373,13 @@ func _on_peer_disconnected(id: int) -> void:
 		print("[Room] %s left" % p.display_name)
 		p.queue_free()
 	_people.erase(id)
+	_synced.erase(id)
+	_resync.erase(id)
 	_retone()
 	if pref(id, "draw"):
 		_prefs.erase(id)
 		_publish_board()
+	watch_revoked.emit(id)  # they still know the code
 	changed.emit()
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -340,19 +405,44 @@ func _take_ink(inked: Array) -> void:
 	if who:
 		who.apply_ink(inked)
 
+## The sender's board as it is now (Whiteboard.snapshot()), in batches; the
+## first one empties our copy first.
+@rpc("any_peer", "call_remote", "reliable", 3)
+func _take_board(inked: Array, first: bool) -> void:
+	var who: Participant = _people.get(multiplayer.get_remote_sender_id())
+	if who:
+		who.apply_board(inked, first)
+
+## Our board as it is now, to `id` (same channel as the ops: they follow it).
+func _sync_board(id: int) -> void:
+	if board == null:
+		return
+	_flush_ink()  # to the others; this snapshot has it
+	var snap := board.snapshot()
+	_take_board.rpc_id(id, snap.slice(0, INK_BATCH), true)
+	for i in range(INK_BATCH, snap.size(), INK_BATCH):
+		_take_board.rpc_id(id, snap.slice(i, i + INK_BATCH), false)
+	_synced[id] = true
+
 ## A guest's ink on OUR board: drawn here if we let them, then passed on to
-## everyone else (they drew it on their copy already).
+## everyone else who has our board (the guest drew it on their copy already).
+## Refused (they may not draw, or no more): they get our board as it is, so
+## the strokes we did not take leave their copy too.
 @rpc("any_peer", "call_remote", "reliable", 3)
 func _draw_on(ops: Array) -> void:
 	var from := multiplayer.get_remote_sender_id()
-	if not pref(from, "draw") or board == null:
+	if board == null or not _people.has(from):
+		return
+	if not pref(from, "draw"):
+		_resync[from] = true
 		return
 	var inked := []
 	for op in ops.slice(0, INK_BATCH):
-		board.apply_ink(op, from)
-		inked.append([from, op])
-	_ink_log.append_array(inked)
-	for id in _people:
+		if board.apply_ink(op, from):
+			inked.append([from, op])
+	if inked.is_empty():
+		return
+	for id in _synced:
 		if id != from:
 			_take_ink.rpc_id(id, inked)
 
@@ -431,9 +521,14 @@ func set_screens(screens: Array) -> void:
 		_publish()
 
 ## Where our whiteboard hangs: {on, x: 12 floats in the room frame, w}.
+## Shown, it goes to whoever does not have it yet.
 func set_board(place: Dictionary) -> void:
 	_board_place = place
 	_publish_board()
+	if place.get("on", false) == true and state == State.IN:
+		for id in _people:
+			if not _synced.has(id):
+				_sync_board(id)
 
 ## The placement plus who may draw on it ("guests": peer ids).
 func _publish_board() -> void:
@@ -443,18 +538,29 @@ func _publish_board() -> void:
 		_profile.board = b
 		_publish()
 
-## Changes we made to our whiteboard (Whiteboard.ink): to everyone now, and
-## kept for whoever joins later.
-func send_ink(ops: Array) -> void:
-	var me := multiplayer.get_unique_id()
-	var inked := ops.map(func(op): return [me, op])
-	_ink_log.append_array(inked)
-	if state == State.IN and _peer and not _people.is_empty():
-		_take_ink.rpc(inked)
+## A change we made to our whiteboard (Whiteboard.ink), sent with the others
+## of this frame (_flush_ink).
+func queue_ink(op: Array) -> void:
+	_ink_out.append(op)
 
-## What we see and hear of person `id`, and whether they may draw on our
-## board: "board", "screens", "voice" (all on unless turned off), "draw" (off
-## unless turned on).
+## Our queued ink to everyone who has our board (the others get a snapshot
+## when they first see it, which has it already: a snapshot always flushes
+## first). Outside a room it is dropped. Its author is OWNER (0), not our
+## peer id: the room host's copy of our board would skip ops under its own
+## id, 1.
+func _flush_ink() -> void:
+	if _ink_out.is_empty():
+		return
+	var inked := _ink_out.map(func(op): return [OWNER, op])
+	_ink_out = []
+	if state != State.IN or not _peer:
+		return
+	for id in _synced:
+		_take_ink.rpc_id(id, inked)
+
+## What we see and hear of person `id`, whether they may draw on our board
+## and watch our screens: "board", "screens", "voice", "watch" (all on unless
+## turned off), "draw" (off unless turned on).
 func pref(id: int, what: String) -> bool:
 	return _prefs.get(id, {}).get(what, what != "draw")
 
@@ -467,6 +573,10 @@ func set_pref(id: int, what: String, on: bool) -> void:
 		p.set_seen(pref(id, "board"), pref(id, "screens"), pref(id, "voice"))
 	if what == "draw":
 		_publish_board()
+	if what == "watch":
+		if not on:
+			watch_revoked.emit(id)  # main.gd: a new code, for the others only
+		_publish()
 	changed.emit()
 
 func sharing() -> bool:
@@ -474,8 +584,19 @@ func sharing() -> bool:
 
 func _publish() -> void:
 	if state == State.IN and _peer:
-		_take_profile.rpc(_profile)
+		for id in _people:
+			_take_profile.rpc_id(id, _profile_for(id))
 	changed.emit()
+
+## Our profile as person `id` gets it: without how to watch our PC unless
+## they may ("Sees my screens").
+func _profile_for(id: int) -> Dictionary:
+	if pref(id, "watch") or _profile.share.is_empty():
+		return _profile
+	var p := _profile.duplicate()
+	p.share = {}
+	p.screens = []
+	return p
 
 func _my_pose() -> PackedFloat32Array:
 	var o := global_transform.affine_inverse()
@@ -589,7 +710,7 @@ static func decode_voice(pcm: PackedByteArray) -> PackedVector2Array:
 ## Who is here, us first: [{id, name, me, host, tone, mic, speaking, screens
 ## (Participant.watch_state(), or "live" for us while sharing), count,
 ## and for the others board (they show one), see_board, see_screens, hear,
-## draw (see pref()), may_draw (we may draw on theirs)}].
+## draw, watch (see pref()), may_draw (we may draw on theirs)}].
 func people() -> Array:
 	var me := multiplayer.get_unique_id()
 	var out := [{"id": me, "name": my_name, "me": true, "host": is_host, "tone": _tone_for(me),
@@ -603,7 +724,8 @@ func people() -> Array:
 			"mic": p.mic_on, "speaking": p.is_speaking(), "screens": p.watch_state(),
 			"count": p.remote_panels().size(), "board": p.shows_board(),
 			"see_board": pref(id, "board"), "see_screens": pref(id, "screens"),
-			"hear": pref(id, "voice"), "draw": pref(id, "draw"), "may_draw": p.may_draw()})
+			"hear": pref(id, "voice"), "draw": pref(id, "draw"), "watch": pref(id, "watch"),
+			"may_draw": p.may_draw()})
 	return out
 
 ## Points on everyone else and what they show (world), so main.gd can tell
