@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const net = require('net');
+const tls = require('tls');
 const dgram = require('dgram');
 const crypto = require('crypto');
 
@@ -21,6 +22,7 @@ const MSG_INPUT_MOUSE = 0x10;
 const MSG_INPUT_KEYBOARD = 0x11;
 const MSG_STREAM_CONFIG = 0x21;
 const MSG_REQUEST_KEYFRAME = 0x31;
+const MSG_MEDIA_KEY = 0x28;
 
 const VIDEO_HEADER_SIZE = 9;
 
@@ -37,6 +39,7 @@ const REJECT_REASONS = {
   2: 'Wrong PIN. Check the PIN printed in the host console.',
   3: 'The host is full (--max-clients). Retrying in a few seconds.',
   4: 'Too many wrong PINs from this address. Wait a minute, then try again.',
+  5: 'The host only takes encrypted connections from the network.',
 };
 const RECONNECT_DELAY_MS = 3000;
 // A slow reader (phone on bad Wi-Fi) must not buffer frames in our memory
@@ -75,6 +78,13 @@ const state = {
   // on the host side, so a bridge on the PC itself needs none.
   pin: 0,
   pinRequired: false,
+  // A host off this PC is reached over TLS (docs/SECURITY.md). fingerprint:
+  // the code the PC shows next to its PIN, which its certificate must match
+  // (--fingerprint, or the first one seen this run); identity: the one seen.
+  fingerprint: null,
+  identity: null,
+  // MEDIA_KEY: UDP video then comes sealed with it (null: plain).
+  mediaKey: null,
   rejectReason: null,
   hostName: '',
   // HELLO_ACK flags: the host takes no input / can make virtual monitors.
@@ -135,6 +145,13 @@ function parseArgs(argv) {
         process.exit(1);
       }
       i += 1;
+    } else if (arg === '--fingerprint' && next) {
+      options.fingerprint = parseFingerprint(next);
+      if (!options.fingerprint) {
+        process.stderr.write('[WebBridge] --fingerprint takes the 16 hex digits the host prints as Identity\n');
+        process.exit(1);
+      }
+      i += 1;
     } else if (arg === '--open') {
       options.open = true;
     } else if (arg === '--connect') {
@@ -143,6 +160,33 @@ function parseArgs(argv) {
   }
 
   return options;
+}
+
+// "C175 98B2 31A4 9F12" from 16 hex digits, spaces optional; null otherwise.
+function parseFingerprint(value) {
+  const hex = String(value ?? '').replace(/\s/g, '').toUpperCase();
+  return /^[0-9A-F]{16}$/.test(hex) ? hex.match(/.{4}/g).join(' ') : null;
+}
+
+// The host's fingerprint of a certificate: the first 8 bytes of SHA-256 over
+// its DER, as the host prints it.
+function fingerprintOf(der) {
+  return parseFingerprint(crypto.createHash('sha256').update(der).digest('hex').slice(0, 16));
+}
+
+// A sealed UDP datagram (docs/PROTOCOL.md, Sealed datagrams), opened with
+// MEDIA_KEY; null if it was not sealed with it.
+function openSealed(pkt, key) {
+  const n = pkt.length;
+  if (n < 48 || (n - 32) % 16 !== 0) return null;
+  const tag = crypto.createHmac('sha256', key.subarray(16, 48)).update(pkt.subarray(0, n - 16)).digest();
+  if (!crypto.timingSafeEqual(tag.subarray(0, 16), pkt.subarray(n - 16))) return null;
+  try {
+    const d = crypto.createDecipheriv('aes-128-cbc', key.subarray(0, 16), pkt.subarray(0, 16));
+    return Buffer.concat([d.update(pkt.subarray(16, n - 16)), d.final()]);
+  } catch (_) {
+    return null;
+  }
 }
 
 // 6 digits (the host's PINs are 100000-999999); '' / 0 clears it.
@@ -189,16 +233,37 @@ function connectHost() {
   state.viewOnly = false;
   state.virtualDisplays = false;
   state.rejectReason = null;
+  state.mediaKey = null;
   bindUdpSocket();
 
   // Every handler checks it still owns the link: a destroyed socket's
   // 'close' fires a tick later and used to mark the NEW connection down.
-  const sock = new net.Socket();
+  // Off this PC: TLS, and the PIN only to the certificate whose code the PC
+  // shows (--fingerprint), or the first one seen this run.
+  const encrypted = !state.host.startsWith('127.') && state.host !== 'localhost';
+  const sock = encrypted
+    ? tls.connect({ host: state.host, port: state.tcpPort, servername: 'immersive-host',
+      rejectUnauthorized: false, minVersion: 'TLSv1.2' })
+    : new net.Socket();
   tcpSocket = sock;
   sock.setNoDelay(true);
 
-  sock.on('connect', () => {
+  sock.on(encrypted ? 'secureConnect' : 'connect', () => {
     if (tcpSocket !== sock) return;
+    if (encrypted) {
+      const seen = fingerprintOf(sock.getPeerCertificate().raw);
+      state.identity = seen;
+      if (state.fingerprint && seen !== state.fingerprint) {
+        state.wantConnected = false;
+        setLastError(`The PC at ${state.host} shows the code ${seen}, not ${state.fingerprint}: not sending it the PIN.`);
+        sock.destroy();
+        return;
+      }
+      if (!state.fingerprint) {
+        state.fingerprint = seen;
+        log(`The PC's code is ${seen}: check the PC shows the same (or pass --fingerprint).`);
+      }
+    }
     state.connected = true;
     state.lastError = null;
     state.lastRequestedCodec = null;
@@ -227,7 +292,7 @@ function connectHost() {
   });
 
   try {
-    sock.connect(state.tcpPort, state.host);
+    if (!encrypted) sock.connect(state.tcpPort, state.host);
   } catch (err) {
     // A bad port throws synchronously; don't leave a dead socket around.
     tcpSocket = null;
@@ -404,6 +469,8 @@ function handleControlMessage(type, payload) {
     // Only the user can fix a PIN problem: this attempt is over. (The host
     // closes right after; 'close' retries only a full host.)
     if (reason !== 3) state.wantConnected = false;
+  } else if (type === MSG_MEDIA_KEY) {
+    if (payload.length === 48) state.mediaKey = Buffer.from(payload);
   } else if (type === MSG_MONITOR_LIST) {
     state.pinRequired = false;
     parseMonitorList(payload);
@@ -473,6 +540,9 @@ function parseMonitorList(payload) {
 }
 
 function onUdpPacket(packet) {
+  if (packet && state.mediaKey) {
+    packet = openSealed(packet, state.mediaKey);  // forged or plain: dropped
+  }
   if (!packet || packet.length < VIDEO_HEADER_SIZE) {
     return;
   }
@@ -795,6 +865,8 @@ function getPublicStatus() {
     pinRequired: state.pinRequired,
     rejectReason: state.rejectReason,
     hasPin: state.pin > 0,
+    identity: state.identity,
+    encrypted: Boolean(state.mediaKey),
     wantConnected: state.wantConnected,
     headsetUrls: headsetUrls(),
     requestedCodec: state.lastRequestedCodec,
@@ -924,10 +996,19 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && parsed.pathname === '/api/connect') {
     try {
       const body = await parseJsonBody(req);
+      const oldHost = state.host;
       state.host = body.host || state.host;
       state.tcpPort = Number(body.tcpPort || state.tcpPort);
       state.udpPort = Number(body.udpPort || state.udpPort);
       state.monitorId = Number(body.monitorId ?? state.monitorId);
+      if (state.host !== oldHost) state.fingerprint = null;
+      if (body.fingerprint !== undefined) {
+        state.fingerprint = body.fingerprint ? parseFingerprint(body.fingerprint) : null;
+        if (body.fingerprint && !state.fingerprint) {
+          sendJson(res, 400, { ok: false, error: 'The code is the 16 hex digits the host shows as Identity.' });
+          return;
+        }
+      }
       if (body.pin !== undefined) {
         const pin = parsePin(body.pin);
         if (pin === null) {
@@ -1063,6 +1144,7 @@ function main() {
   state.udpPort = options.udpPort;
   state.monitorId = options.monitorId;
   state.pin = options.pin;
+  state.fingerprint = options.fingerprint || null;
   openAccess = options.open;
 
   server.listen(state.bridgePort, () => {
