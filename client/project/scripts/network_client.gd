@@ -119,6 +119,9 @@ var _pin: int = 0
 ## Watch only (a multiplayer room): the code another headset gave its PC,
 ## sent in place of the PIN (protocol.h HELLO_FLAG_WATCH). 0 = a normal client.
 var _watch_code: int = 0
+## Watching: who we are in the room, so the PC's log says who watches it
+## ("Ben watching"); "" = this device's model.
+var watch_label := ""
 ## The PC's network address from HELLO_ACK ("" if the host did not say), so a
 ## headset on the USB cable can tell its room where to watch from.
 var lan_address: String = ""
@@ -375,7 +378,7 @@ func _on_tcp_connected() -> void:
 	var flags := 0 if _tls else HELLO_FLAG_IDENTITY
 	if _watch_code:
 		_put(hello_message(false, _watch_code, " watching", flags | HELLO_FLAG_WATCH,
-			udp_client.get_local_port()))
+			udp_client.get_local_port(), watch_label))
 	else:
 		_put(hello_message(_tcp_media, _pin, "", flags))
 	connected_to_host.emit()
@@ -383,9 +386,10 @@ func _on_tcp_connected() -> void:
 ## A whole HELLO message: version, name[32] (shown in the host's log; `note`
 ## is appended to it), flags, pairing PIN (or watch code), video UDP port.
 static func hello_message(tcp_media: bool, pin: int, note: String = "", flags: int = 0,
-		udp_port: int = 0) -> PackedByteArray:
+		udp_port: int = 0, label: String = "") -> PackedByteArray:
 	var model := OS.get_model_name()
-	var name := model if model != "GenericDevice" and not model.is_empty() else "Immersive-2 VR"
+	var name := label if not label.is_empty() \
+		else model if model != "GenericDevice" and not model.is_empty() else "Immersive-2 VR"
 	var name_bytes := (name + note).to_utf8_buffer()
 	var msg := PackedByteArray()
 	msg.resize(5 + 40)

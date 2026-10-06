@@ -387,6 +387,8 @@ func _update_watch(delta: float) -> void:
 		_net.video_frame_received.connect(func(mid: int, data: PackedByteArray, _w: int, _h: int):
 			if _decoders.has(mid):
 				_decoders[mid].submit(data))
+		if get_parent() is Room:
+			_net.watch_label = get_parent().my_name
 		_net.connect_to_server(_share.ip, _share.port, 0, false, 0, _share.code, _share.cert)
 		print("[Room] watching %s's screens at %s:%d" % [display_name, _share.ip, _share.port])
 		return
