@@ -573,10 +573,12 @@ public:
         protocol::ControlHeader header;
         header.type = static_cast<uint8_t>(type);
         header.length = static_cast<uint32_t>(payload_size);
+        // One write: over TLS, one record per message instead of two.
+        std::vector<uint8_t> msg(sizeof(header) + (payload ? payload_size : 0));
+        std::memcpy(msg.data(), &header, sizeof(header));
+        if (payload && payload_size) std::memcpy(msg.data() + sizeof(header), payload, payload_size);
 
-        if (!write_client(it->second, &header, sizeof(header)) ||
-            (payload_size > 0 && payload &&
-             !write_client(it->second, payload, payload_size))) {
+        if (!write_client(it->second, msg.data(), msg.size())) {
             // A timed-out (SO_SNDTIMEO) write can stop mid-message; anything
             // sent after it would be parsed out of frame. Drop the connection
             // like send_media_locked does; the handler thread cleans it up.
