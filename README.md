@@ -371,9 +371,12 @@ leaves, the room closes), and each shared screen comes straight from its PC.
 - Everyone sits in one row, 3.2 m apart; names in the menu have the colour of
   their avatar. To go over to someone, pinch in the air and pull, or walk with
   the left stick (the right stick turns); **Back to my seat** returns.
-- Trying it alone: `python3 host/tools/room_sandbox.py` starts "Ben" on the
-  PC (a second person with his own fake PC: he looks at you, waves, repeats
-  what you say and draws on his whiteboard).
+- Trying it alone: `python3 host/tools/room_sandbox.py` starts "Ben" and
+  "Cleo" on the PC, each with a fake PC of their own: they look at you, wave,
+  share screens and draw on whiteboards; Ben repeats what you say. It prints
+  what to try in the headset, and takes commands while it runs (Cleo leaves
+  and comes back, a wrong room PIN, who watches whose screens and whether it
+  is encrypted). `--install` puts this build's app on the headset plugged in.
 - Over the internet the room and each sharer's PC must be reachable: a VPN
   such as Tailscale or ZeroTier, or forwarded ports (room UDP 19820, PC TCP
   19800 + UDP 19801).
