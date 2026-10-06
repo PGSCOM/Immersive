@@ -42,6 +42,14 @@ MSG_NAMES = {
     0x41: "LATENCY_RESPONSE", 0xFF: "PING",
 }
 
+def private_config():
+    """Environment for a host under test: its settings folder (PIN, TLS
+    identity) in a temporary directory, never this user's."""
+    import tempfile
+    conf = tempfile.mkdtemp(prefix="im2-test-")
+    return dict(os.environ, XDG_CONFIG_HOME=conf, APPDATA=conf)
+
+
 def recv_exact(s, n):
     buf = b""
     while len(buf) < n:

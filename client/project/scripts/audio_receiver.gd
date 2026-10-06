@@ -38,6 +38,9 @@ var _playback:  AudioStreamGeneratorPlayback
 
 ## UDP socket for receiving audio packets.
 var _udp: PacketPeerUDP
+## Opens them when the connection has a media key (NetworkClient.SealOpener);
+## null when they come plain.
+var _opener: RefCounted = null
 
 ## Whether we are currently listening.
 var _running: bool = false
@@ -71,10 +74,13 @@ func _exit_tree() -> void:
 # Public API
 # ---------------------------------------------------------------------------
 
-## Start receiving audio on the given UDP port.
-func start(host_ip: String, audio_port: int) -> bool:
+## Start receiving audio on the given UDP port. media_key: the connection's
+## MEDIA_KEY (empty: the packets come plain), see NetworkClient.SealOpener.
+func start(host_ip: String, audio_port: int, media_key := PackedByteArray()) -> bool:
 	if _running:
 		stop()
+	_opener = null if media_key.is_empty() \
+		else preload("res://scripts/network_client.gd").SealOpener.new(media_key)
 
 	_udp = PacketPeerUDP.new()
 	var err := _udp.bind(audio_port)
@@ -121,6 +127,8 @@ func set_volume(vol: float) -> void:
 func _receive_packets() -> void:
 	while _udp and _udp.get_available_packet_count() > 0:
 		var raw: PackedByteArray = _udp.get_packet()
+		if _opener:
+			raw = _opener.open(raw)  # empty (dropped) unless sealed with our key
 		parse_packet(raw)
 
 ## Queue one audio packet (AudioPacketHeader + PCM). Called for UDP packets

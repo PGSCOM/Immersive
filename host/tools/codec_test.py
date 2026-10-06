@@ -22,7 +22,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from smoke_client import (CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg,  # noqa: E402
+from smoke_client import (private_config, CLIENT_IP, HOST, TCP_PORT, UDP_PORT, recv_msg,  # noqa: E402
                           send_multi_select, send_stream_config, vdisplay)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -211,7 +211,7 @@ def main():
         ROOT, "host", "build", "immersive2_host")
     host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-ui", "--no-pin",
                              "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=private_config())
     try:
         time.sleep(2)
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

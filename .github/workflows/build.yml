@@ -52,7 +52,7 @@ jobs:
             libdbus-1-dev libpipewire-0.3-dev libpulse-dev \
             libavcodec-dev libavutil-dev libswscale-dev \
             xvfb x11-xserver-utils x11-utils xdotool python3-pil ffmpeg \
-            dbus python3-dbus python3-gi
+            dbus python3-dbus python3-gi python3-cryptography
 
       - name: Configure CMake
         run: |
@@ -78,6 +78,9 @@ jobs:
       - name: Watcher test (multiplayer rooms, WATCH_CODE)
         run: python3 host/tools/watch_test.py
 
+      - name: TLS test (identity, PIN inside TLS, sealed media, plain TCP only from this PC)
+        run: python3 host/tools/tls_test.py
+
       - name: Settings panel + tray test (private config, private D-Bus)
         run: python3 host/tools/panel_test.py
 
@@ -98,6 +101,49 @@ jobs:
             host/build/immersive2_host
             host/build/Release/immersive2_host
           if-no-files-found: warn
+
+  host-sanitizers:
+    name: Host network tests (ASan + UBSan)
+    runs-on: ubuntu-latest
+    env:
+      # Reports go to /tmp/san.<pid> (the tests keep the host's own output).
+      ASAN_OPTIONS: detect_leaks=0:log_path=/tmp/san
+      # Any undefined behaviour stops the host, so the test that hit it fails.
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1:log_path=/tmp/san
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libavcodec-dev libavutil-dev libswscale-dev python3-cryptography
+
+      - name: Configure CMake (AddressSanitizer + UndefinedBehaviorSanitizer)
+        run: |
+          SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake -S host -B host/build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_NVENC=OFF -DENABLE_AMF=OFF -DENABLE_QSV=OFF \
+            -DCMAKE_C_FLAGS="$SAN" -DCMAKE_CXX_FLAGS="$SAN" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build host/build -j4
+
+      - name: Smoke test (--stub)
+        run: |
+          ./host/build/immersive2_host --stub --no-usb --no-ui --pin 246810 > host.log 2>&1 &
+          sleep 3
+          python3 host/tools/smoke_client.py || { cat host.log; exit 1; }
+          kill -INT $! && wait $! || { cat host.log; exit 1; }
+
+      - name: TLS, watcher and view-only tests
+        run: |
+          python3 host/tools/tls_test.py
+          python3 host/tools/watch_test.py
+          python3 host/tools/view_only_test.py
+
+      - name: Sanitizer reports
+        if: failure()
+        run: cat /tmp/san.* || echo "no sanitizer report"
 
   host-macos:
     name: Build Host (macOS)

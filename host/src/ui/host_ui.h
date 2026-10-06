@@ -28,6 +28,9 @@ struct Settings {
     std::atomic<uint32_t> jpeg_quality{35};
     std::atomic<bool>     audio{true};
     std::atomic<bool>     usb{true};       ///< keep `adb reverse` running
+    /// This PC's TLS identity, as the headset shows it when pairing (set
+    /// once before the panel starts; empty without TLS).
+    std::string           fingerprint;
 };
 
 /// host.conf in `dir` into `s`: `key = value` lines; missing keys keep the

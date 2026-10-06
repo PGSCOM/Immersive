@@ -349,6 +349,21 @@ func _run() -> void:
 	check(ov._lbl_pin_error.visible, "a wrong PIN says so")
 	await _click(_btn("Cancel", ov._pin_box))
 	check(not ov._pin_box.visible, "Cancel closes the prompt")
+	ov.show_pin_prompt(1, "desk-pc", "4F3C C877 7CC3 E350")
+	await _frames(2)
+	check(ov._pin_code_box.visible and ov._lbl_pin_code.text == "4F3C C877 7CC3 E350"
+		and "also shows this code" in ov._lbl_pin_hint.text,
+		"the prompt shows the PC's code to compare with the one on the PC")
+	await _step("pin_code")
+	ov.show_pin_prompt(1, "desk-pc", "E233 763A 57F4 80B9", true)
+	await _frames(2)
+	check("reinstalled" in ov._lbl_pin_hint.text and ov._lbl_pin_code.text == "E233 763A 57F4 80B9",
+		"a PC whose identity changed: the prompt warns")
+	await _step("pin_changed")
+	ov.show_pin_prompt(1, "desk-pc")
+	await _frames(2)
+	check(not ov._pin_code_box.visible, "no code, no code line")
+	await _click(_btn("Cancel", ov._pin_box))
 
 	# --- Connected: status, screens -----------------------------------------
 	ov.set_state(ov.ConnectionState.CONNECTING)

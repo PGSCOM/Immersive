@@ -56,7 +56,9 @@ var _target_hands: Array[Transform3D] = [Transform3D.IDENTITY, Transform3D.IDENT
 var _hand_seen: Array[bool] = [false, false]
 var _torso_yaw := 0.0
 
-## What to watch, as they sent it: {ip, port, code}, or {} (not sharing).
+## What to watch, as they sent it: {ip, port, code, cert}, or {} (not
+## sharing). cert: their PC's certificate, which the watch connection must
+## find ("" from older versions: any, still encrypted).
 var _share := {}
 var _net: Node = null
 var _retry_s := 0.0
@@ -141,7 +143,12 @@ func set_profile(p: Dictionary) -> void:
 		var port := _num(s.get("port"), 0.0)
 		var code := _num(s.get("code"), 0.0)
 		if port >= 1 and port <= 65535 and code >= 1 and code <= 0x7FFFFFFF:
-			share = {"ip": str(s.ip), "port": int(port), "code": int(code)}
+			var cert = s.get("cert", "")
+			if typeof(cert) != TYPE_STRING or cert.length() > 4096 \
+					or not cert.begins_with("-----BEGIN CERTIFICATE-----") \
+					or X509Certificate.new().load_from_string(cert) != OK:
+				cert = ""
+			share = {"ip": str(s.ip), "port": int(port), "code": int(code), "cert": cert}
 	if share != _share:
 		_stop_watching()
 		_share = share
@@ -380,7 +387,9 @@ func _update_watch(delta: float) -> void:
 		_net.video_frame_received.connect(func(mid: int, data: PackedByteArray, _w: int, _h: int):
 			if _decoders.has(mid):
 				_decoders[mid].submit(data))
-		_net.connect_to_server(_share.ip, _share.port, 0, false, 0, _share.code)
+		if get_parent() is Room:
+			_net.watch_label = get_parent().my_name
+		_net.connect_to_server(_share.ip, _share.port, 0, false, 0, _share.code, _share.cert)
 		print("[Room] watching %s's screens at %s:%d" % [display_name, _share.ip, _share.port])
 		return
 	_probe_s += delta

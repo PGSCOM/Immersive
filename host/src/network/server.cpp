@@ -4,6 +4,7 @@
 /// and UDP channel for video streaming.
 
 #include "network/server.h"
+#include "network/tls.h"
 
 #include <algorithm>
 #include <array>
@@ -75,6 +76,10 @@ struct ClientState {
     /// TCP media: frames sent and not yet acknowledged, per monitor.
     std::unordered_map<uint8_t, std::deque<uint32_t>> tcp_unacked;
     bool                authed = false;     ///< HELLO accepted (PIN checked); nothing else is served before
+    /// TLS on the control socket (a client off this PC), and the key of its
+    /// UDP video and audio (MEDIA_KEY); both null for a plain connection.
+    std::shared_ptr<tls::Session>     tls;
+    std::shared_ptr<tls::MediaCipher> cipher;
     /// HELLO_FLAG_WATCH: only gets the frames of the client that set the
     /// watch code (watch_owner_); sends nothing the host acts on but
     /// LATENCY_PROBE and PING (not even REQUEST_KEYFRAME: the owner's
@@ -320,7 +325,7 @@ public:
         std::lock_guard<std::mutex> lock(clients_mutex_);
         for (auto& [id, client] : clients_) {
             if (client_id ? id != client_id : !client.authed || client.watcher) continue;
-            if (!send_tcp(client.tcp_socket, msg.data(), msg.size()))
+            if (!write_client(client, msg.data(), msg.size()))
                 shutdown(client.tcp_socket, SHUTDOWN_BOTH);
         }
     }
@@ -364,12 +369,12 @@ public:
 
     void send_watch_packet(uint32_t owner, uint8_t monitor_id, uint32_t frame_number,
                            const uint8_t* data, uint32_t size) override {
-        std::vector<struct sockaddr_in> dests;
+        std::vector<UdpDest> dests;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
             if (owner != watch_owner_) return;
             for (const auto& [id, c] : clients_)
-                if (c.watcher && c.udp_addr_set) dests.push_back(c.udp_addr);
+                if (c.watcher && c.udp_addr_set) dests.push_back({c.udp_addr, c.cipher});
         }
         send_udp_frame(dests, monitor_id, frame_number, data, size);
     }
@@ -397,19 +402,37 @@ public:
         // worker (and the ACK handler) behind one stream. Take the lock only
         // long enough to copy the destination out (none when the video goes
         // in-band on TCP).
-        std::vector<struct sockaddr_in> dests;
+        std::vector<UdpDest> dests;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
             auto it = clients_.find(client_id);
             if (it != clients_.end() && it->second.udp_addr_set &&
                 send_to_client_locked(it->second, monitor_id, frame_number, data, size))
-                dests.push_back(it->second.udp_addr);
+                dests.push_back({it->second.udp_addr, it->second.cipher});
         }
         send_udp_frame(dests, monitor_id, frame_number, data, size);
     }
 
+    /// Where a UDP datagram goes, sealed with that client's key if it has one.
+    struct UdpDest {
+        struct sockaddr_in addr;
+        std::shared_ptr<tls::MediaCipher> cipher;
+    };
+
+    /// One datagram to `dest`: as it is, or sealed (tls::MediaCipher).
+    void send_datagram(const UdpDest& dest, const uint8_t* data, size_t len) {
+        if (dest.cipher) {
+            thread_local std::vector<uint8_t> sealed;
+            sealed.resize(len + tls::MediaCipher::kOverhead);
+            len = dest.cipher->seal(data, len, sealed.data());
+            data = sealed.data();
+        }
+        sendto(udp_socket_, reinterpret_cast<const char*>(data), static_cast<int>(len), 0,
+               reinterpret_cast<const struct sockaddr*>(&dest.addr), sizeof(dest.addr));
+    }
+
     /// One frame as UDP chunks plus their FEC parity, to each of `dests`.
-    void send_udp_frame(const std::vector<struct sockaddr_in>& dests, uint8_t monitor_id,
+    void send_udp_frame(const std::vector<UdpDest>& dests, uint8_t monitor_id,
                         uint32_t frame_number, const uint8_t* data, uint32_t size) {
         if (dests.empty()) return;
         const uint16_t chunk_count = protocol::compute_chunk_count(size);
@@ -440,10 +463,7 @@ public:
         vph.chunk_count  = chunk_count;
 
         auto send_packet = [&](size_t len) {
-            for (const auto& dest : dests)
-                sendto(udp_socket_, reinterpret_cast<const char*>(packet.data()),
-                       static_cast<int>(len), 0, reinterpret_cast<const struct sockaddr*>(&dest),
-                       sizeof(dest));
+            for (const auto& dest : dests) send_datagram(dest, packet.data(), len);
         };
 
         for (uint16_t i = 0; i < chunk_count; ++i) {
@@ -553,10 +573,12 @@ public:
         protocol::ControlHeader header;
         header.type = static_cast<uint8_t>(type);
         header.length = static_cast<uint32_t>(payload_size);
+        // One write: over TLS, one record per message instead of two.
+        std::vector<uint8_t> msg(sizeof(header) + (payload ? payload_size : 0));
+        std::memcpy(msg.data(), &header, sizeof(header));
+        if (payload && payload_size) std::memcpy(msg.data() + sizeof(header), payload, payload_size);
 
-        if (!send_tcp(it->second.tcp_socket, &header, sizeof(header)) ||
-            (payload_size > 0 && payload &&
-             !send_tcp(it->second.tcp_socket, payload, payload_size))) {
+        if (!write_client(it->second, msg.data(), msg.size())) {
             // A timed-out (SO_SNDTIMEO) write can stop mid-message; anything
             // sent after it would be parsed out of frame. Drop the connection
             // like send_media_locked does; the handler thread cleans it up.
@@ -581,14 +603,9 @@ public:
                 continue;
             }
             if (!client.udp_addr_set) continue;
-            auto dest = client.udp_addr;
-            dest.sin_port = htons(port);
-            sendto(udp_socket_,
-                   reinterpret_cast<const char*>(data),
-                   static_cast<int>(size),
-                   0,
-                   reinterpret_cast<struct sockaddr*>(&dest),
-                   sizeof(dest));
+            UdpDest dest{client.udp_addr, client.cipher};
+            dest.addr.sin_port = htons(port);
+            send_datagram(dest, data, size);
         }
     }
 
@@ -649,8 +666,8 @@ public:
             if (!client.authed) continue;
             protocol::ControlHeader header{static_cast<uint8_t>(protocol::MessageType::HELLO_ACK),
                                            static_cast<uint32_t>(sizeof(ack))};
-            if (!send_tcp(client.tcp_socket, &header, sizeof(header)) ||
-                !send_tcp(client.tcp_socket, &ack, sizeof(ack)))
+            if (!write_client(client, &header, sizeof(header)) ||
+                !write_client(client, &ack, sizeof(ack)))
                 shutdown(client.tcp_socket, SHUTDOWN_BOTH);
         }
     }
@@ -746,7 +763,7 @@ private:
                               << ": client limit (" << config_.max_clients
                               << ") reached\n";
                     // Say why, so the headset shows it instead of retrying blind.
-                    send_reject(client_sock, protocol::REJECT_SERVER_FULL);
+                    send_reject(client_sock, nullptr, protocol::REJECT_SERVER_FULL);
                     closesocket(client_sock);
                     continue;
                 }
@@ -812,10 +829,40 @@ private:
             sock = it->second.tcp_socket;
             peer = it->second.udp_addr.sin_addr;
         }
+        // From this PC (127/8, the USB cable's `adb reverse` too) nothing
+        // crosses a network: plain TCP is fine there.
+        const bool local = (ntohl(peer.s_addr) >> 24) == 127;
 
-        while (running_) {
+        // A TLS ClientHello starts with a handshake record (0x16); a plain
+        // client's first byte is HELLO (0x01).
+        std::shared_ptr<tls::Session> tls;
+        bool ok = true;
+        {
+            char first = 0;
+            if (recv(sock, &first, 1, MSG_PEEK) == 1 && static_cast<uint8_t>(first) == 0x16) {
+                std::string error;
+                if (config_.identity)
+                    tls = tls::Session::accept(*config_.identity, static_cast<std::uintptr_t>(sock),
+                                               kHelloTimeoutS, &error);
+                else
+                    error = "this host has no TLS identity";
+                if (tls) {
+                    std::lock_guard<std::mutex> lock(clients_mutex_);
+                    auto it = clients_.find(client_id);
+                    if (it != clients_.end()) {
+                        it->second.tls = tls;
+                        it->second.cipher = std::make_shared<tls::MediaCipher>();
+                    }
+                } else {
+                    std::cerr << "[Server] Client " << client_id << " TLS handshake failed: " << error << "\n";
+                    ok = false;
+                }
+            }
+        }
+
+        while (ok && running_) {
             protocol::ControlHeader header;
-            if (!recv_exact(sock, &header, sizeof(header))) break;
+            if (!read_exact(sock, tls.get(), &header, sizeof(header))) break;
 
             if (header.length > kMaxControlPayload) {
                 std::cerr << "[Server] Client " << client_id
@@ -827,7 +874,7 @@ private:
             // Read payload
             std::vector<uint8_t> payload(header.length);
             if (header.length > 0) {
-                if (!recv_exact(sock, payload.data(), header.length)) break;
+                if (!read_exact(sock, tls.get(), payload.data(), header.length)) break;
             }
 
             // Dispatch by message type
@@ -853,7 +900,24 @@ private:
                     std::cout << "[Server] Client " << client_id << " says hello: "
                               << std::string(hello.client_name,
                                              strnlen(hello.client_name, sizeof(hello.client_name)))
-                              << (tcp_media ? " (video/audio over TCP)" : "") << "\n";
+                              << (tcp_media ? " (video/audio over TCP)" : "")
+                              << (tls ? " (encrypted)" : "") << "\n";
+
+                    // Off this PC, the PIN, the input and the screens only
+                    // go encrypted (unless --allow-plaintext, for old headsets).
+                    if (!tls && !local && !config_.allow_plaintext) {
+                        std::cerr << "[Server] Client " << client_id
+                                  << " refused: not encrypted (an old version of the app?)\n";
+                        send_reject(sock, nullptr, protocol::REJECT_ENCRYPTION_REQUIRED);
+                        rejected = true;
+                        break;
+                    }
+                    // Who we are, before the PIN: the headset pins it, and
+                    // shows its fingerprint next to the PIN prompt.
+                    if (config_.identity && (tls || (hello.flags & protocol::HELLO_FLAG_IDENTITY))) {
+                        const std::string& pem = config_.identity->cert_pem();
+                        send_control_message(client_id, protocol::MessageType::IDENTITY, pem.data(), pem.size());
+                    }
 
                     bool kicked;  // disconnected from the panel: ask for the PIN once
                     {
@@ -861,8 +925,8 @@ private:
                         kicked = kicked_.erase(peer.s_addr) > 0;
                     }
                     if (hello.flags & protocol::HELLO_FLAG_WATCH) {
-                        watcher = !kicked && accept_watcher(client_id, sock, peer, hello);
-                        if (kicked) send_reject(sock, protocol::REJECT_PIN_REQUIRED);
+                        watcher = !kicked && accept_watcher(client_id, sock, tls.get(), peer, hello);
+                        if (kicked) send_reject(sock, tls.get(), protocol::REJECT_PIN_REQUIRED);
                         authed = watcher;
                         rejected = !watcher;
                         break;
@@ -876,7 +940,7 @@ private:
                                       : reject == protocol::REJECT_WRONG_PIN ? "wrong PIN"
                                       : "too many wrong PINs, locked out for a minute")
                                   << " (the PIN is shown in this window)\n";
-                        send_reject(sock, reject);
+                        send_reject(sock, tls.get(), reject);
                         if (reject != protocol::REJECT_LOCKED_OUT && !kicked && on_pin_requested_)
                             on_pin_requested_(inet_ntoa(peer));
                         rejected = true;
@@ -890,7 +954,7 @@ private:
                             std::cerr << "[Server] Client " << client_id
                                       << " refused: client limit (" << config_.max_clients
                                       << ") reached\n";
-                            send_reject(sock, protocol::REJECT_SERVER_FULL);
+                            send_reject(sock, tls.get(), protocol::REJECT_SERVER_FULL);
                             rejected = true;
                             break;
                         }
@@ -903,6 +967,7 @@ private:
                     }
                     authed = true;
                     set_recv_timeout(sock, 0);  // paired: idle is fine now (keepalive covers dead peers)
+                    if (tls) tls->set_timeout(0);
                     if (tcp_media) {
                         // A client that stops reading must not wedge the
                         // sender (and clients_mutex_) forever: a timed-out
@@ -926,6 +991,7 @@ private:
                         }
                     }
 
+                    if (tls && !tcp_media) send_media_key(client_id);
                     const protocol::HelloAck ack = make_ack();
                     send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
                     // Monitor list and audio announcement follow the ACK.
@@ -1037,8 +1103,8 @@ private:
                                 flow.last_log = now;
                             }
                         }
-                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, ack.frame_number)
-                                                      : ack.frame_number;
+                        const uint32_t acked = ack.frame_number;  // a copy: the field is unaligned
+                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, acked) : acked;
                         flow.ack_seen = true;
                         flow.last_ack_time = rate.last_ack = now;
                     }
@@ -1193,6 +1259,7 @@ private:
     /// address, with the same cost and lock-out for wrong ones.
     uint8_t check_code(struct in_addr peer, uint32_t pin, uint32_t want) {
         const auto now = std::chrono::steady_clock::now();
+        auto delay = std::chrono::milliseconds(500);
         {
             std::lock_guard<std::mutex> lock(auth_mutex_);
             auto& st = auth_failures_[peer.s_addr];
@@ -1203,8 +1270,24 @@ private:
                 st.failures = 0;
                 st.locked_until = now + std::chrono::seconds(60);
             }
+            // Many addresses guessing at once (one per address stays under
+            // the lockout): past kGlobalFailures in a minute, every wrong
+            // code is slow. Slow, not locked: a lockout for everyone would
+            // let anyone keep the real headset out.
+            while (!recent_failures_.empty() && now - recent_failures_.front() > std::chrono::seconds(60))
+                recent_failures_.pop_front();
+            if (recent_failures_.size() < 4 * kGlobalFailures) recent_failures_.push_back(now);
+            if (recent_failures_.size() >= kGlobalFailures) {
+                delay = std::chrono::seconds(5);
+                if (now >= next_guess_warning_) {
+                    next_guess_warning_ = now + std::chrono::minutes(10);
+                    std::cerr << "[Server] Over " << kGlobalFailures
+                              << " wrong PINs in a minute from this network: someone may be guessing it."
+                                 " Each wrong one now takes 5 s. Make a new PIN in the settings if in doubt\n";
+                }
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(delay);
         return protocol::REJECT_WRONG_PIN;
     }
 
@@ -1223,7 +1306,7 @@ private:
     /// code, then announce the owner's watch streams to it (their next frame
     /// comes with the owner's next one, within a second even on a still
     /// screen). False when refused (it was told).
-    bool accept_watcher(uint32_t client_id, SocketType sock, struct in_addr peer,
+    bool accept_watcher(uint32_t client_id, SocketType sock, tls::Session* tls, struct in_addr peer,
                         const protocol::Hello& hello) {
         uint32_t want;
         {
@@ -1254,10 +1337,14 @@ private:
                       << (!want ? "it asked to watch, but nobody shares this PC's screens"
                           : reject == protocol::REJECT_LOCKED_OUT ? "too many wrong watch codes"
                           : "wrong watch code") << "\n";
-            send_reject(sock, reject);
+            send_reject(sock, tls, reject);
             return false;
         }
         set_recv_timeout(sock, 0);
+        if (tls) {
+            tls->set_timeout(0);
+            send_media_key(client_id);
+        }
         protocol::HelloAck ack = make_ack();
         ack.flags |= protocol::HOST_FLAG_VIEW_ONLY;
         send_control_message(client_id, protocol::MessageType::HELLO_ACK, &ack, sizeof(ack));
@@ -1287,13 +1374,28 @@ private:
             if (c.watcher) shutdown(c.tcp_socket, SHUTDOWN_BOTH);
     }
 
-    /// Write one HELLO_REJECT straight to a socket (no client entry needed).
-    static void send_reject(SocketType sock, uint8_t reason) {
+    /// Write one HELLO_REJECT straight to a socket, or its TLS session (no
+    /// client entry needed).
+    static void send_reject(SocketType sock, tls::Session* tls, uint8_t reason) {
         protocol::ControlHeader header{static_cast<uint8_t>(protocol::MessageType::HELLO_REJECT), 1};
         uint8_t msg[sizeof(header) + 1];
         std::memcpy(msg, &header, sizeof(header));
         msg[sizeof(header)] = reason;
-        send_tcp(sock, msg, sizeof(msg));
+        if (tls) tls->write(msg, sizeof(msg));
+        else send_tcp(sock, msg, sizeof(msg));
+    }
+
+    /// MEDIA_KEY: the key this client's UDP video and audio are sealed with.
+    void send_media_key(uint32_t client_id) {
+        std::shared_ptr<tls::MediaCipher> cipher;
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            auto it = clients_.find(client_id);
+            if (it != clients_.end()) cipher = it->second.cipher;
+        }
+        if (cipher)
+            send_control_message(client_id, protocol::MessageType::MEDIA_KEY, cipher->key(),
+                                 tls::MediaCipher::kKeySize);
     }
 
     /// Answer LAN discovery broadcasts until stop(). Polls like the accept
@@ -1327,6 +1429,25 @@ private:
             sendto(discovery_socket_, reinterpret_cast<const char*>(&reply), sizeof(reply), 0,
                    reinterpret_cast<struct sockaddr*>(&from), from_len);
         }
+    }
+
+    /// Receive exactly `size` bytes from a client: through its TLS session,
+    /// or straight from the socket. False on error or disconnect.
+    static bool read_exact(SocketType sock, tls::Session* tls, void* buf, size_t size) {
+        if (!tls) return recv_exact(sock, buf, size);
+        char* ptr = reinterpret_cast<char*>(buf);
+        while (size > 0) {
+            const int n = tls->read(ptr, size);
+            if (n <= 0) return false;
+            ptr += n;
+            size -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+
+    /// Write to a client: through its TLS session, or straight to the socket.
+    static bool write_client(ClientState& client, const void* data, size_t size) {
+        return client.tls ? client.tls->write(data, size) : send_tcp(client.tcp_socket, data, size);
     }
 
     /// Receive exactly `size` bytes from a TCP socket.
@@ -1367,9 +1488,9 @@ private:
         protocol::ControlHeader header;
         header.type   = static_cast<uint8_t>(type);
         header.length = static_cast<uint32_t>(prefix_size + size);
-        if (!send_tcp(client.tcp_socket, &header, sizeof(header)) ||
-            (prefix_size && !send_tcp(client.tcp_socket, prefix, prefix_size)) ||
-            !send_tcp(client.tcp_socket, data, size)) {
+        if (!write_client(client, &header, sizeof(header)) ||
+            (prefix_size && !write_client(client, prefix, prefix_size)) ||
+            !write_client(client, data, size)) {
             std::cerr << "[Server] Client " << client.id
                       << " media send failed, dropping connection\n";
             client.tcp_media = false;  // stop writing to a dead stream
@@ -1465,6 +1586,10 @@ private:
     std::mutex auth_mutex_;
     std::unordered_map<uint32_t, AuthState> auth_failures_;  ///< by peer IPv4
     std::set<uint32_t> kicked_;  ///< peers disconnected from the panel (auth_mutex_)
+    /// Wrong codes from every address in the last minute (auth_mutex_).
+    static constexpr size_t kGlobalFailures = 20;
+    std::deque<std::chrono::steady_clock::time_point> recent_failures_;
+    std::chrono::steady_clock::time_point next_guess_warning_{};
     std::atomic<uint32_t> pin_{0};
     std::atomic<uint8_t>  host_flags_{0};
 

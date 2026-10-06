@@ -507,7 +507,8 @@ func set_mic(on: bool) -> void:
 	_update_mic()
 	_publish()
 
-## How to watch our PC ({ip, port, code}; {} = we do not share).
+## How to watch our PC ({ip, port, code, cert: its certificate}; {} = we do
+## not share).
 func set_share(share: Dictionary) -> void:
 	if share != _profile.share:
 		_profile.share = share

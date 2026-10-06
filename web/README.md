@@ -33,6 +33,7 @@ node web/bridge/bridge.js --connect --host 127.0.0.1 --tcp-port 19800 --udp-port
 | `--monitor N` | Monitor to stream first |
 | `--connect` | Connect on startup |
 | `--pin N` | The host's 6-digit pairing PIN. Only needed when the host is another PC: the host lets connections from 127.0.0.1 in without one |
+| `--fingerprint "XXXX XXXX XXXX XXXX"` | The code the host prints as `Identity`. With a host on another PC, the bridge only talks to (and sends the PIN to) the PC whose certificate has it |
 | `--open` | Serve the LAN without the access key (see below) |
 
 ## Access from other devices
@@ -56,6 +57,12 @@ A host on another PC asks for its PIN (printed in the host's console). Pass it
 with `--pin`, or type it in the page when it asks. A wrong PIN is not retried
 on its own; the bridge only reconnects by itself when the host goes away or is
 full, every 3 seconds.
+
+To a host on another PC the bridge connects over TLS and receives the video
+sealed (`docs/SECURITY.md`). Pass that PC's code (`Identity` in the host's
+console, also in its settings window) with `--fingerprint`, so the PIN never
+goes to anyone else; without it the bridge takes the first certificate it
+sees in that run and prints its code for you to compare.
 
 ## Input (WebXR scene)
 

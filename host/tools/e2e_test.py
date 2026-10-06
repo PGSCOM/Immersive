@@ -20,13 +20,16 @@ Checks, in order:
      LAN when the cable is pulled, and to the cable again when replugged.
   7. LAN discovery finds the host (client/tests/discovery_test.gd), and PIN
      pairing: over the PC's LAN address the client is refused without the
-     PIN (and stops retrying), and streams with it.
+     PIN (and stops retrying), and streams with it, over TLS pinned to the
+     certificate its first contact saw. Then the PC's identity changes (a
+     host with another settings folder): the client asks for the PIN again,
+     warned, and never sends it to the new certificate.
   8. A virtual screen asked for from the headset streams.
   9. Multiplayer: a second PC (host) and two clients in one room. A wrong
      room PIN is refused; each sees the other's avatar (poses) and hears the
      other's voice (a test tone), each watches the screens the other shares,
-     straight from the other's PC (protocol.h WatchCode, an MJPEG copy): the
-     right greys; Ben sees Ana's whiteboard with her line on it, and draws on
+     straight from the other's PC (protocol.h WatchCode, an MJPEG copy, over
+     TLS pinned to the certificate in the share): the right greys; Ben sees Ana's whiteboard with her line on it, and draws on
      it (she lets whoever joins): his line lands on hers. Leaving shows on the
      other side.
   10. Ctrl+C on the host exits promptly.
@@ -36,8 +39,12 @@ Checks, in order:
   12. Headless unit checks: hand tracking (a pinch clicks where the hand
      points), controllers (clicks, grip right-click vs grab, idle hiding),
      curved-screen ray hits, grabbing and the VR keyboard, the video FEC
-     (lost UDP chunks rebuilt from parity, client/tests/fec_test.gd) and the
-     room's pose/voice packets and seats (client/tests/room_test.gd).
+     (lost UDP chunks rebuilt from parity, client/tests/fec_test.gd), sealed
+     datagrams and fingerprints (client/tests/seal_test.gd) and the room's
+     pose/voice packets and seats (client/tests/room_test.gd).
+
+The hosts keep their settings (and so their TLS identity) in a temporary
+folder, never in this user's.
 """
 import os
 import re
@@ -46,6 +53,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -59,16 +67,18 @@ UDP_PORT = int(os.environ.get("IM2_UDP_PORT", 19801))
 # The client, headless, pointed at this run's ports.
 CLIENT = ["godot", "--headless", "--xr-mode", "off", "--path", CLIENT_DIR, "--",
           f"--im2-port={TCP_PORT}", f"--im2-udp-port={UDP_PORT}"]
+# The hosts' settings folder (identity-key.pem and the rest).
+HOST_HOME = tempfile.mkdtemp(prefix="im2-e2e-")
 
 
 class Proc:
     """A child process whose output is collected line by line for wait_for()."""
 
-    def __init__(self, name, cmd):
+    def __init__(self, name, cmd, env=None):
         self.name = name
         self.lines = []
         self.p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  text=True, errors="replace", bufsize=1)
+                                  text=True, errors="replace", bufsize=1, env=env)
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -170,12 +180,14 @@ def step(msg):
     print(f"[e2e] {msg}")
 
 
-def start_host(name="host", tcp=TCP_PORT, udp=UDP_PORT):
+def start_host(name="host", tcp=TCP_PORT, udp=UDP_PORT, home=HOST_HOME):
     # stdbuf: the host's stdout is block-buffered into a pipe otherwise.
     # --no-usb: USB is simulated here (Tunnel); leave real headsets alone.
+    # Its settings folder (and TLS identity) under `home`.
+    env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"))
     host = Proc(name, ["stdbuf", "-oL", HOST_BIN, "--stub", "--no-ui", "--pin", PIN, "--no-usb",
                        "--tcp-port", str(tcp), "--udp-port", str(udp),
-                       "--audio-port", str(udp + 1)])
+                       "--audio-port", str(udp + 1)], env)
     procs.append(host)
     host.wait_for(r"\[Host\] Ready", 10)
     return host
@@ -337,12 +349,35 @@ def main():
             fail("client kept retrying after the host asked for a PIN")
         nopin.stop()
         procs.remove(nopin)
+        mark = host.mark()
         paired = Proc("client-pin", [
             *CLIENT,
             "--im2-host=" + lan, "--im2-pin=" + PIN, "--im2-capture",
             "--im2-monitors=" + ",".join(map(str, MONITORS))])
         procs.append(paired)
         expect_streaming(paired, 0)
+        paired.wait_for(r"\(TLS, first contact\)", 1)
+        paired.wait_for(r"\(TLS, pinned [0-9A-F ]{19}\)", 1)
+        host.wait_for(r"says hello: .*\(encrypted\)", 1, mark)
+        if any("refused: wrong PIN" in l for l in host.lines[mark:]):
+            fail("the client sent its PIN before it knew the PC's certificate")
+        print("      paired over TLS: a first contact for the certificate, then the PIN to it only")
+
+        # The PC's identity changes (reinstalled, or someone else answering).
+        mark = paired.mark()
+        host.stop()
+        procs.remove(host)
+        host = start_host(home=tempfile.mkdtemp(prefix="im2-e2e-other-"))
+        paired.wait_for(r"shows another certificate", 30, mark)
+        paired.wait_for(r"asking for .*'s PIN \(its code: [0-9A-F ]{19}, changed since pairing\)", 10, mark)
+        if any("wrong PIN" in l or "sending monitor list" in l for l in host.lines):
+            fail("the client sent its PIN to a PC with another certificate")
+        print("      the PC's certificate changed: the client asks for the PIN again, warned")
+        paired.stop()
+        procs.remove(paired)
+        host.stop()
+        procs.remove(host)
+        host = start_host()
         client_lines += nopin.lines + paired.lines
     else:
         print("      (PIN over the network skipped: this machine has no LAN address)")
@@ -398,7 +433,7 @@ def main():
     step("12/12 hand tracking, controllers, screens, keyboard and whiteboard, video FEC, room packets")
     for test in ("hand_input_test.gd", "controller_idle_test.gd", "workspace_test.gd",
                  "groups_test.gd", "virtual_match_test.gd", "whiteboard_test.gd", "fec_test.gd",
-                 "room_test.gd"):
+                 "seal_test.gd", "room_test.gd"):
         run_godot_test(test)
     print("\nOK: end-to-end host <-> client checks passed")
 
@@ -432,7 +467,11 @@ def multiplayer(host):
     expect_shade(ana, 2, 160, 0, "Ben")
     host.wait_for(r"watches client \d+'s screens", 5)
     host2.wait_for(r"watches client \d+'s screens", 5)
-    print("      each watches the other's screens, straight from the other's PC")
+    host.wait_for(r"says hello: .*watching \(encrypted\)", 1)
+    host2.wait_for(r"says hello: .*watching \(encrypted\)", 1)
+    for p in (ana, ben):  # pinned to the certificate that came with the share
+        p.wait_for(r"Connecting to .* \(TLS, pinned [0-9A-F ]{19}\)", 1)
+    print("      each watches the other's screens, straight from the other's PC, encrypted")
     ben.wait_for(r"remote board peer=Ana shown=true strokes=[1-9]", 20)
     print("      Ben sees Ana's whiteboard and what she drew on it")
     ana.wait_for(r"my board strokes=2", 20)
