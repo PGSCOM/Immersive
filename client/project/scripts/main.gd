@@ -173,12 +173,13 @@ var _pins: Dictionary = {}
 var _certs: Dictionary = {}
 ## A first contact's IDENTITY ({ip, cert, changed}): its fingerprint is on
 ## the PIN prompt, and the connection that sends the PIN is pinned to it.
-## changed: the PC showed another certificate than the one we had paired with.
+## changed: the PC showed another certificate than the one we had paired
+## with (which stays ours until a PIN typed for the new one is accepted).
 var _candidate := {}
 ## The certificate this connection is pinned to ("" = a first contact).
 var _conn_cert := ""
 ## A pinned handshake failed: the next connection is a first contact, to see
-## which certificate the PC shows now; a different one forgets the pairing.
+## which certificate the PC shows now.
 var _check_identity := false
 ## Name of the PC we are talking to (from HELLO_ACK or discovery).
 var _host_name: String = ""
@@ -464,10 +465,14 @@ func connect_to_host() -> void:
 	print("[Immersive-2] Connecting to %s:%d..." % [host_ip, port])
 	# Over the network the PIN only goes to the certificate we paired with,
 	# or to the one a first contact showed (its fingerprint was on the prompt).
+	# A PIN just typed goes to the certificate whose code the prompt showed.
 	var pin := _pin_for_host()
-	var cert := "" if _check_identity else _cert_for_host()
-	if cert.is_empty() and not _check_identity and _candidate.get("ip", "") == host_ip:
-		cert = _candidate.cert
+	var candidate: String = _candidate.cert if _candidate.get("ip", "") == host_ip else ""
+	var cert := ""
+	if not _check_identity:
+		cert = candidate if _pins.has("pending") and not candidate.is_empty() else _cert_for_host()
+		if cert.is_empty():
+			cert = candidate
 	if cert.is_empty() and not host_ip.begins_with("127."):
 		pin = 0
 	_conn_cert = cert
@@ -541,34 +546,31 @@ func _cert_for_host() -> String:
 		return str(_certs["name:" + _host_name])
 	return str(_certs.get("ip:" + host_ip, ""))
 
-## Forget the PIN and certificate of this PC (its identity changed).
-func _forget_pairing() -> void:
-	for k in ["ip:" + host_ip, "ip:" + _lan_ip, "name:" + _host_name]:
-		_pins.erase(k)
-		_certs.erase(k)
-	_save_config()
-
 ## IDENTITY: the certificate of the PC we are talking to. On a first contact
 ## it is the candidate the PIN will go to; when a pinned handshake failed,
 ## it says whether the PC really has another certificate now.
 func _on_identity(cert: String) -> void:
 	if host_ip.begins_with("127.") or not _conn_cert.is_empty():
 		return  # the cable, or pinned: the one we know (kept on HELLO_ACK)
-	var changed: bool = _candidate.get("changed", false) and _candidate.get("ip") == host_ip 		and _candidate.get("cert") == cert
+	var known := _cert_for_host()
+	var changed := not known.is_empty() and cert != known
 	if _check_identity:
 		_check_identity = false
-		if cert != _cert_for_host():
+		if changed:
 			print("[Immersive-2] %s shows another certificate (%s): pair again" %
 				[host_ip, NetworkClient.fingerprint(cert)])
-			_forget_pairing()
-			changed = true
 	_candidate = {"ip": host_ip, "cert": cert, "changed": changed}
 
-## A pinned TLS handshake failed: next time, see what the PC shows now.
+## A pinned TLS handshake failed: next time, see what the PC shows now. One
+## that was not pinned failed too: most likely a PC without TLS (an older
+## Immersive-2), which must not get our PIN in the clear.
 func _on_tls_failed(pinned: bool) -> void:
 	if pinned:
 		_check_identity = true
 		_reconnect_timer = RECONNECT_DELAY  # straight away
+	elif ui_overlay:
+		ui_overlay.set_notice("Could not connect securely to %s. If it runs an older Immersive-2, update it." %
+			(_host_name if not _host_name.is_empty() else host_ip))
 
 ## Toggle a monitor: selecting a new one adds a screen (up to MAX_SCREENS),
 ## selecting an active one removes its screen. The full selection is sent to

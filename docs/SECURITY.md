@@ -80,9 +80,11 @@ first pairing, which the fingerprint on the prompt is there to catch.
 From then on every connection is pinned. If a pinned handshake fails, the
 next connection is a first contact again (no PIN) to see which certificate
 the PC shows now: the same one (the failure was the network) and the headset
-carries on pinned; another one (a reinstall, or an attacker) and it forgets
-that PC's certificate and PIN and asks for the PIN again, warning not to
-type it unless Immersive-2 was reinstalled on the PC.
+carries on pinned; another one (a reinstall, or an attacker) and it asks for
+the PIN again, showing the new code and warning not to type it unless
+Immersive-2 was reinstalled on the PC. The certificate it had stays the
+PC's until a PIN typed for the new one is accepted, so a machine that only
+claims the PC's name cannot make the headset drop the real one.
 
 A PC paired by an older version of the app has a PIN but no certificate:
 its first contact's certificate is pinned without asking (trust on first

@@ -298,6 +298,13 @@ func _process(_delta: float) -> void:
 				_fail_connection("connection to %s:%d timed out" % [_host_ip, _tcp_port])
 
 		StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
+			# Closed during the TLS handshake: a PC without TLS (an older
+			# host takes the ClientHello for an oversized message and hangs
+			# up), or not the PC we paired with.
+			if _tls and _tls.get_status() == StreamPeerTLS.STATUS_HANDSHAKING:
+				tls_failed.emit(not _pinned_cert.is_empty())
+				_fail_connection("%s closed the connection during the TLS handshake" % _host_ip)
+				return
 			# Also covers a connect that was refused before it ever succeeded,
 			# which previously left the client silently wedged.
 			_fail_connection("disconnected" if _connected else
@@ -521,12 +528,14 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 				# The host sends video to our address at ITS UDP port: listen
 				# there, whatever port this client was configured with.
 				if not _tcp_media and not _watch_code and udp_port > 0 and udp_port != _udp_port:
+					_stop_rx()
 					_udp_port = udp_port
 					udp_client.close()
 					if udp_client.bind(_udp_port, "*", 8 * 1024 * 1024) != OK:
 						push_error("[Network] Failed to bind UDP port %d — no video will be received" % _udp_port)
-				# MEDIA_KEY (if any) came before this: the video can start.
-				if not _tcp_media:
+				# MEDIA_KEY (if any) came before this: the video can start. (A
+				# HELLO_ACK sent again, when view-only changes, keeps it going.)
+				if not _tcp_media and _rx_thread == null:
 					_start_rx()
 				handshake_accepted.emit(host_name, host_flags)
 
@@ -705,8 +714,9 @@ func _rx_loop(opener: SealOpener) -> void:
 		_rx_mutex.unlock()
 		if not run:
 			return
+		# Idle: 1 ms between looks (the render thread takes them once a frame).
+		OS.delay_usec(200 if not batch.is_empty() else 1000)
 		batch.clear()
-		OS.delay_usec(500)
 
 ## One UDP video packet: a data chunk of a frame, or a parity chunk
 ## (chunk_idx >= chunk_cnt, protocol.h VideoParityHeader).
