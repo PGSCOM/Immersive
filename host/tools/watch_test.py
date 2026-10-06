@@ -21,7 +21,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from smoke_client import (HOST, PIN, TCP_PORT, UDP_PORT, hello, receive_frames,  # noqa: E402
+from smoke_client import (private_config, HOST, PIN, TCP_PORT, UDP_PORT, hello, receive_frames,  # noqa: E402
                           recv_msg, send_multi_select, send_stream_config)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -106,7 +106,7 @@ def main():
     host = subprocess.Popen([exe, "--stub", "--no-usb", "--no-ui", "--pin", str(PIN),
                              "--tcp-port", str(TCP_PORT), "--udp-port", str(UDP_PORT),
                              "--audio-port", str(UDP_PORT + 1)],
-                            stdout=log, stderr=subprocess.STDOUT)
+                            stdout=log, stderr=subprocess.STDOUT, env=private_config())
     try:
         time.sleep(1.0)
         run()
