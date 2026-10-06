@@ -11,7 +11,9 @@ hands, the VR keyboard or a Bluetooth keyboard drive the PC.
 
 The headset finds the PC on the network by itself; the first connection asks
 for the six-digit PIN the PC shows, so nobody else on the network can take
-over your mouse and keyboard.
+over your mouse and keyboard. Over the network everything is encrypted (TLS,
+and sealed video and sound), and the headset only talks to the PC it paired
+with: see [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Architecture
 
@@ -193,6 +195,7 @@ Useful host options:
 | `--max-clients N` | Maximum simultaneous VR clients (default 4). |
 | `--pin NNNNNN` | Pairing PIN headsets must enter. By default one is generated once and kept in the settings folder (`%APPDATA%\Immersive2`, `~/.config/immersive2`). |
 | `--no-pin` | No pairing: any device on the network may connect. |
+| `--allow-plaintext` | Also let headsets on the network connect unencrypted (older versions of the app): their PIN, input and screens then cross the network in the clear. Off by default; this PC and the USB cable are never encrypted. |
 | `--view-only` | Share the screens but ignore mouse and keyboard input from every headset (remote control off). |
 | `--no-ui` | No tray icon and no settings window (servers, scripts, tests). |
 | `--panel-port N` | Port of the settings window on 127.0.0.1 (default 19803; any free one if busy). |
@@ -240,8 +243,11 @@ CI builds publish an `immersive2_client_android` artifact containing a debug-sig
 - The menu opens on **Connect** and lists the PCs running the host on your
   network. Press **Connect** next to yours (or type its address on the keypad).
 - The first time, type the **PIN** the PC shows in its settings window (and in
-  a notification when the headset asks). The headset
-  remembers it, and on the next launch goes straight back to that PC.
+  a notification when the headset asks), if the code under it matches the
+  one the PC shows next to its PIN. The headset remembers both, and on the
+  next launch goes straight back to that PC. If the PC's code ever changes,
+  the headset asks again: type the PIN only if you reinstalled Immersive-2
+  on the PC.
 - Your monitors appear as screens on an arc in front of you. Choose which ones
   on the **Screens** tab; **Arrange around me** and **Bring in front** tidy
   them up, and the system recenter (long press of the Meta/Pico button) brings
@@ -400,6 +406,7 @@ leaves, the room closes), and each shared screen comes straight from its PC.
 - [x] Curved screens (real cylinder geometry, 0–100% in the menu)
 - [x] LAN discovery of hosts, one-press connect, auto-reconnect to the last PC
 - [x] PIN pairing (TOFU per headset; loopback/USB trusted; brute-force lockout)
+- [x] Encrypted link: TLS with the PC's own certificate (pinned by the headset, fingerprint on the PIN prompt), sealed UDP video and sound
 - [x] Screens arranged on an arc; recenter (menu or system recenter); grab with push/pull and resize
 - [x] Workspace kept automatically (monitors and positions, also across quality changes)
 - [x] Surroundings: night / dusk / void landscapes, passthrough

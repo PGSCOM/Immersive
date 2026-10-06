@@ -39,10 +39,12 @@ the network.
 - **UDP video and audio: sealed per client.** After the PIN, the host sends a
   random 48-byte `MEDIA_KEY` inside TLS; every datagram is then
   AES-128-CBC + HMAC-SHA-256 (encrypt-then-MAC, 128-bit tag, random IVs).
-  Godot has `AESContext` and `HMACContext` but no AEAD, and doing it in
-  GDScript is still cheap (about 8 µs per datagram on a desktop). The client
-  drops anything that does not check, so a spoofed datagram can no longer
-  paint the screen either.
+  Godot has `AESContext` and `HMACContext` but no AEAD. Opening one takes
+  about 13 µs on a laptop (AES uses AES-NI, SHA-256 runs in software in
+  Godot's mbedTLS), so the headset receives and opens video datagrams on a
+  thread of its own (`network_client.gd`, `SealOpener`), off the render
+  thread. The client drops anything that does not check, so a spoofed
+  datagram can no longer paint the screen either.
 - **Plain TCP only from 127.0.0.0/8**: the USB cable (`adb reverse`), and local
   tools and tests. From the network it is refused with
   `REJECT_ENCRYPTION_REQUIRED`; `--allow-plaintext` lets older apps in, and
@@ -75,14 +77,28 @@ step 1, step 3 fails its own handshake and the PIN is never sent. What is
 left is a man in the middle that presents its own certificate on the very
 first pairing, which the fingerprint on the prompt is there to catch.
 
-From then on every connection is pinned. If the PC's certificate changes (a
-reinstall, or an attacker), the handshake fails: the headset forgets that
-PC's certificate and PIN and starts again from step 1, with a warning on the
-prompt not to type the PIN unless Immersive was reinstalled on the PC.
+From then on every connection is pinned. If a pinned handshake fails, the
+next connection is a first contact again (no PIN) to see which certificate
+the PC shows now: the same one (the failure was the network) and the headset
+carries on pinned; another one (a reinstall, or an attacker) and it forgets
+that PC's certificate and PIN and asks for the PIN again, warning not to
+type it unless Immersive-2 was reinstalled on the PC.
+
+A PC paired by an older version of the app has a PIN but no certificate:
+its first contact's certificate is pinned without asking (trust on first
+use). That PIN already crossed the network in the clear every time before.
 
 Over the USB cable nothing crosses a network: the connection stays plain, the
 cable is trusted (as before), and the headset asks for `IDENTITY` anyway
-(`HELLO_FLAG_IDENTITY`) so it knows the PC's certificate for its room shares.
+(`HELLO_FLAG_IDENTITY`). That certificate is the PC's for sure, so the
+headset keeps it: plugged in once, its Wi-Fi connections to that PC are
+pinned without a first contact, and its room shares carry it.
+
+**The web bridge** (`web/bridge/bridge.js`, Node) reaches a PC that is not
+its own over TLS too. Node can read the certificate it got, so it pins by
+fingerprint: `--fingerprint "C175 98B2 31A4 9F12"` (the PIN is not sent to
+any other), or, without it, the first one it sees in that run, printed for
+the user to compare.
 
 ### Multiplayer rooms
 
@@ -114,7 +130,27 @@ to find, in plain view of the log.
   fingerprint. Needs crypto the Godot client does not have.
 - **Checked room channel**: show the room's fingerprint next to its PIN, as
   for the PC, so joining a room is safe against a man in the middle too.
-- **Fuzzing and sanitizers in CI** for the host's message parsers.
+- **Fuzzing** of the host's message parsers (CI runs the host's network
+  tests under AddressSanitizer and UndefinedBehaviorSanitizer; a fuzzer
+  needs the parsers out of `server.cpp`'s handler loop first).
 - **Signed releases** and a published fingerprint for the downloads.
 - **Per-headset revocation** from the panel (today: a new PIN, or delete
   the identity files to make every headset pair again).
+
+## How it is tested
+
+- `host/tools/tls_test.py` (host, Python's TLS): the handshake (TLS 1.2,
+  ECDHE + AEAD), IDENTITY before the answer, a wrong and a right PIN inside TLS,
+  sealed datagrams opening and a changed one not, plain TCP only from this
+  PC, `--allow-plaintext`, the guessing brake, the key's file mode and the
+  identity surviving a restart.
+- `client/tests/seal_test.gd`: the headset opens datagrams sealed by the
+  host's rule (vectors made outside Godot), drops changed, cut, plain and
+  foreign ones, and computes fingerprints as the PC prints them.
+- `host/tools/e2e_test.py` step 7: the real client pairs over the network
+  (a first contact, then the PIN only to that certificate), streams sealed
+  video, and when the PC's identity changes asks for the PIN again, warned,
+  without sending it; step 9: watchers in a room connect pinned to the
+  certificate in the share, encrypted.
+- `client/tests/overlay_test.gd`: the PIN prompt with the PC's code and the
+  changed-identity warning.

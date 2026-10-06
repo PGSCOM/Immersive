@@ -18,6 +18,9 @@ The host application runs on your Windows PC and:
    sustains. Bitrate / quality / fps changes apply to the running encoder
    without restarting the stream (see STREAM_CONFIG in PROTOCOL.md)
 5. **Receives input** — processes mouse/keyboard events from VR
+6. **Encrypts** — TLS 1.2 (mbedTLS) on each headset's control connection,
+   with this PC's own certificate as its identity, and every UDP datagram
+   sealed with a per-client key (`network/tls.cpp`, `docs/SECURITY.md`)
 
 #### Component Architecture
 
@@ -69,8 +72,13 @@ The client runs on VR headsets (and on a PC for testing) and:
 1. **Finds the PC** — `host_discovery.gd` broadcasts on UDP 19800 and lists
    the hosts that answer; `main.gd` reconnects to the last PC on launch and
    follows it if its address changes.
-2. **Pairs and connects** — TCP handshake with the host's PIN (asked once,
-   remembered per PC), UDP video/audio (or everything over TCP on USB).
+2. **Pairs and connects** — TLS to the PC (plain only over the USB cable or
+   on the same machine), its PIN asked once and sent only to the certificate
+   the PC is pinned to (`docs/SECURITY.md`), UDP video/audio sealed with the
+   key the PC sends inside TLS (or everything over TCP on USB). The
+   datagrams are received and opened on a thread of `network_client.gd`'s
+   own: SHA-256 runs in software in Godot's mbedTLS, too slow for the
+   render thread at tens of Mbit/s.
 3. **Decodes video** — MediaCodec H.264/HEVC/AV1 straight into an
    ExternalTexture on Android; MJPEG on a worker thread elsewhere.
 4. **Places the screens** — `screen_panel.gd` builds each screen as a flat
@@ -123,8 +131,9 @@ No server and no account: a room is a handful of headsets talking directly.
   is encrypted (ENet's DTLS, a self-signed RSA certificate made the first time
   a room opens in that run; joiners do not verify it, so it stops anyone
   listening on the network, not someone in the middle). PINs and watch codes
-  come from `Crypto.generate_random_bytes()`, not `randi()`. The HELLO a
-  watcher sends the sharer's PC is not encrypted, like any HELLO with a PIN. Over the
+  come from `Crypto.generate_random_bytes()`, not `randi()`. A share carries
+  the sharer's PC's certificate: watchers reach that PC over TLS pinned to
+  it, and get the screens sealed like any client. Over the
   internet that means a VPN (Tailscale, ZeroTier...) or a forwarded port: the
   room and each sharer's PC must be reachable. If the headset that opened the
   room leaves, the room closes.
