@@ -19,6 +19,9 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(__file__))
+from smoke_client import private_config  # noqa: E402
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 HOST_BIN = os.path.join(ROOT, "host", "build", "immersive2_host")
 CLIENT_DIR = os.path.join(ROOT, "client", "project")
@@ -87,7 +90,8 @@ def main():
     ben_pc = subprocess.Popen(["stdbuf", "-oL", HOST_BIN, "--stub", "--no-ui", "--no-usb", "--pin", "246810",
                                "--tcp-port", str(BEN_TCP), "--udp-port", str(BEN_TCP + 1),
                                "--audio-port", str(BEN_TCP + 2)],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              env=private_config())  # an identity of its own, not this PC's
     time.sleep(1.0)
     bot = subprocess.Popen(["godot", "--xr-mode", "off", "--path", CLIENT_DIR, "-s", BOT, "--",
                             "--im2-host=127.0.0.1", f"--im2-port={BEN_TCP}", f"--im2-udp-port={BEN_TCP + 1}",
