@@ -15,6 +15,7 @@ const MAX_SCREENS := 3
 const RECONNECT_DELAY := 5.0    ## Seconds between reconnect attempts
 const LATENCY_INTERVAL := 2.0   ## Seconds between latency probes
 const CONFIG_PATH := "user://immersive2_config.cfg"
+const NetworkClient := preload("res://scripts/network_client.gd")
 const WORKSPACE_PATH := "user://immersive2_workspace.json"
 ## Screens sit on an arc this far from the eyes, a little below eye level.
 const ARC_RADIUS := 1.25
@@ -166,6 +167,19 @@ var _connect_after_probe: bool = false
 
 ## Pairing PINs by host ("ip:<addr>" and "name:<pc name>").
 var _pins: Dictionary = {}
+## The certificates of the PCs we paired with, keyed like _pins: every TLS
+## connection to them must show it, and only such a connection gets the PIN
+## (docs/SECURITY.md).
+var _certs: Dictionary = {}
+## A first contact's IDENTITY ({ip, cert, changed}): its fingerprint is on
+## the PIN prompt, and the connection that sends the PIN is pinned to it.
+## changed: the PC showed another certificate than the one we had paired with.
+var _candidate := {}
+## The certificate this connection is pinned to ("" = a first contact).
+var _conn_cert := ""
+## A pinned handshake failed: the next connection is a first contact, to see
+## which certificate the PC shows now; a different one forgets the pairing.
+var _check_identity := false
 ## Name of the PC we are talking to (from HELLO_ACK or discovery).
 var _host_name: String = ""
 ## Reconnect to the last PC on launch (on after a successful connection,
@@ -364,7 +378,7 @@ func _connect_xr_signals() -> void:
 # ---------------------------------------------------------------------------
 
 func _init_network() -> void:
-	network_client = preload("res://scripts/network_client.gd").new()
+	network_client = NetworkClient.new()
 	network_client.name = "NetworkClient"
 	add_child(network_client)
 
@@ -374,6 +388,8 @@ func _init_network() -> void:
 	network_client.virtual_display_result.connect(_on_virtual_display_result)
 	network_client.screen_off_changed.connect(_show_screen_off)
 	network_client.connection_rejected.connect(_on_connection_rejected)
+	network_client.identity_received.connect(_on_identity)
+	network_client.tls_failed.connect(_on_tls_failed)
 	network_client.monitor_list_received.connect(_on_monitor_list)
 	network_client.stream_started.connect(_on_stream_started)
 	network_client.stream_stopped.connect(_on_stream_stopped)
@@ -446,8 +462,16 @@ func connect_to_host() -> void:
 	_update_overlay_state()
 	var port := _usb_port if _on_usb() and _usb_port > 0 else host_tcp_port
 	print("[Immersive-2] Connecting to %s:%d..." % [host_ip, port])
-	network_client.connect_to_server(host_ip, port, host_udp_port, _use_tcp_media(),
-		_pin_for_host())
+	# Over the network the PIN only goes to the certificate we paired with,
+	# or to the one a first contact showed (its fingerprint was on the prompt).
+	var pin := _pin_for_host()
+	var cert := "" if _check_identity else _cert_for_host()
+	if cert.is_empty() and not _check_identity and _candidate.get("ip", "") == host_ip:
+		cert = _candidate.cert
+	if cert.is_empty() and not host_ip.begins_with("127."):
+		pin = 0
+	_conn_cert = cert
+	network_client.connect_to_server(host_ip, port, host_udp_port, _use_tcp_media(), pin, 0, cert)
 	_should_reconnect = true
 
 ## Probe the cable unless we are on it already or the user disconnected.
@@ -510,6 +534,41 @@ func _pin_for_host() -> int:
 	if not _host_name.is_empty() and _pins.has("name:" + _host_name):
 		return int(_pins["name:" + _host_name])
 	return int(_pins.get("ip:" + host_ip, 0))
+
+## The certificate we paired with for this PC ("" if none yet).
+func _cert_for_host() -> String:
+	if not _host_name.is_empty() and _certs.has("name:" + _host_name):
+		return str(_certs["name:" + _host_name])
+	return str(_certs.get("ip:" + host_ip, ""))
+
+## Forget the PIN and certificate of this PC (its identity changed).
+func _forget_pairing() -> void:
+	for k in ["ip:" + host_ip, "ip:" + _lan_ip, "name:" + _host_name]:
+		_pins.erase(k)
+		_certs.erase(k)
+	_save_config()
+
+## IDENTITY: the certificate of the PC we are talking to. On a first contact
+## it is the candidate the PIN will go to; when a pinned handshake failed,
+## it says whether the PC really has another certificate now.
+func _on_identity(cert: String) -> void:
+	if host_ip.begins_with("127.") or not _conn_cert.is_empty():
+		return  # the cable, or pinned: the one we know (kept on HELLO_ACK)
+	var changed: bool = _candidate.get("changed", false) and _candidate.get("ip") == host_ip 		and _candidate.get("cert") == cert
+	if _check_identity:
+		_check_identity = false
+		if cert != _cert_for_host():
+			print("[Immersive-2] %s shows another certificate (%s): pair again" %
+				[host_ip, NetworkClient.fingerprint(cert)])
+			_forget_pairing()
+			changed = true
+	_candidate = {"ip": host_ip, "cert": cert, "changed": changed}
+
+## A pinned TLS handshake failed: next time, see what the PC shows now.
+func _on_tls_failed(pinned: bool) -> void:
+	if pinned:
+		_check_identity = true
+		_reconnect_timer = RECONNECT_DELAY  # straight away
 
 ## Toggle a monitor: selecting a new one adds a screen (up to MAX_SCREENS),
 ## selecting an active one removes its screen. The full selection is sent to
@@ -1229,7 +1288,11 @@ func _announce_share() -> void:
 	if not Participant.watchable_ip(ip):  # the others would not connect there
 		ui_overlay.set_notice("Your screens cannot be shared: the PC's address %s is not on a local network or a VPN." % ip)
 		return
-	room.set_share({"ip": ip, "port": host_tcp_port, "code": _watch_code})
+	# With the PC's certificate: whoever watches connects pinned to it.
+	var share := {"ip": ip, "port": host_tcp_port, "code": _watch_code}
+	if not network_client.host_cert.is_empty():
+		share.cert = network_client.host_cert
+	room.set_share(share)
 	_room_screens_s = 1.0
 
 func _update_room(delta: float) -> void:
@@ -1521,6 +1584,17 @@ func _on_handshake_accepted(host_name: String, host_flags: int = 0) -> void:
 		_pins["ip:" + host_ip] = pin
 		if not _host_name.is_empty():
 			_pins["name:" + _host_name] = pin
+	# Its certificate, from now on the only one we accept from it: checked
+	# by this handshake (pinned), or straight off the USB cable, or (a PC
+	# with no PIN) the one it showed.
+	var cert: String = network_client.host_cert
+	if not cert.is_empty():
+		if not _lan_ip.is_empty():
+			_certs["ip:" + _lan_ip] = cert
+		if not _host_name.is_empty():
+			_certs["name:" + _host_name] = cert
+	_candidate = {}
+	_check_identity = false
 	_auto_connect = true
 	_save_config()
 	if ui_overlay:
@@ -1533,13 +1607,32 @@ func _on_connection_rejected(reason: int) -> void:
 	var who := _host_name if not _host_name.is_empty() else host_ip
 	match reason:
 		1, 2:
+			var first_contact := _conn_cert.is_empty() and not host_ip.begins_with("127.")
+			var changed: bool = _candidate.get("changed", false)
+			if first_contact and not changed and not _candidate.is_empty() \
+					and (_pin_for_host() > 0 or not _cert_for_host().is_empty()):
+				# We sent no PIN on purpose: now we know the certificate it
+				# goes to. Paired before (a PIN from an older version, which
+				# had no certificates, or the same certificate after a failed
+				# handshake): go on, pinned.
+				_reconnect_timer = RECONNECT_DELAY
+				return
 			# Wrong or missing PIN: ask for it instead of retrying blind.
 			_should_reconnect = false
 			_pins.erase("ip:" + host_ip)
 			_pins.erase("name:" + _host_name)
 			_save_config()
+			var cert := _conn_cert if not _conn_cert.is_empty() else str(_candidate.get("cert", ""))
+			print("[Immersive-2] asking for %s's PIN (its code: %s%s)" % [who,
+				NetworkClient.fingerprint(cert), ", changed since pairing" if changed else ""])
 			if ui_overlay:
-				ui_overlay.show_pin_prompt(2 if reason == 2 else 1, who)
+				ui_overlay.show_pin_prompt(2 if reason == 2 else 1, who,
+					NetworkClient.fingerprint(cert), changed)
+		5:
+			_should_reconnect = false
+			if ui_overlay:
+				ui_overlay.set_notice("%s only takes encrypted connections. Update Immersive-2 on this headset." % who)
+				_show_overlay()
 		3:
 			if ui_overlay:
 				ui_overlay.set_notice("%s already has as many headsets as it allows. Trying again…" % who)
@@ -2314,6 +2407,7 @@ func _save_config() -> void:
 	var pins := _pins.duplicate()
 	pins.erase("pending")
 	cfg.set_value("pairing", "pins", pins)
+	cfg.set_value("pairing", "certs", _certs)
 	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
 	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
@@ -2372,6 +2466,7 @@ func _load_config() -> void:
 		_last_host_name = cfg.get_value("network", "last_host_name", "")
 		_auto_connect = cfg.get_value("network", "auto_connect", false)
 		_pins = cfg.get_value("pairing", "pins", {})
+		_certs = cfg.get_value("pairing", "certs", {})
 		curved_screen_enabled = cfg.get_value("display", "curved_enabled", true)
 		# Curvature used to be a 0-0.5 texture warp; it is now 0-1 of a real arc.
 		curved_screen_amount = clamp(float(cfg.get_value("display", "curved_amount", 0.5)), 0.0, 1.0)

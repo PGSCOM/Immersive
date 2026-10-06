@@ -170,7 +170,10 @@ var _btn_disconnect: Button
 var _manual_box: Control
 var _pin_box: Control
 var _lbl_pin_title: Label
+var _lbl_pin_hint: Label
 var _lbl_pin_error: Label
+var _pin_code_box: Control
+var _lbl_pin_code: Label
 var _pin_cells: Array = []
 
 # Screens tab
@@ -407,11 +410,22 @@ func set_discovered_hosts(hosts: Array) -> void:
 	_rebuild_hosts_list()
 
 ## Ask for the host's PIN. reason: 1 = first time, 2 = the last one was wrong.
-func show_pin_prompt(reason: int, host_label: String) -> void:
+## code: the fingerprint of the PC's certificate, which the PC shows next to
+## the PIN ("" if unknown); changed: it is not the one we paired with.
+func show_pin_prompt(reason: int, host_label: String, code := "", changed := false) -> void:
 	_pin_visible = true
 	_pin_digits = ""
 	_lbl_pin_title.text = "Pair with %s" % host_label
 	_lbl_pin_error.visible = reason == 2
+	_lbl_pin_code.text = code
+	_pin_code_box.visible = not code.is_empty()
+	if changed:
+		_lbl_pin_hint.text = "%s shows a different code from when you paired. Type its PIN only if Immersive-2 was reinstalled on it." % host_label
+	elif not code.is_empty():
+		_lbl_pin_hint.text = "Your PC just showed a six-digit PIN. Type it here if the PC also shows this code. You only do this once."
+	else:
+		_lbl_pin_hint.text = "Your PC just showed a notification with a six-digit PIN. Type it here. You only do this once."
+	_lbl_pin_hint.add_theme_color_override("font_color", UiTheme.CLAY if changed else UiTheme.INK_2)
 	_select_tab(0)
 	_refresh_pin_cells()
 	_refresh_connect_tab()
@@ -1056,13 +1070,23 @@ func _build_connect_tab(body: VBoxContainer) -> void:
 	body.add_child(_pin_box)
 	_lbl_pin_title = _label("Pair with this PC", 30, UiTheme.INK, true)
 	_pin_box.add_child(_lbl_pin_title)
-	var hint := _label("Your PC just showed a notification with a six-digit PIN. Type it here. You only do this once.", 19, UiTheme.INK_2)
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_pin_box.add_child(hint)
+	_lbl_pin_hint = _label("", 19, UiTheme.INK_2)
+	_lbl_pin_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_pin_box.add_child(_lbl_pin_hint)
 	var pin_row := _hbox(26)
 	_pin_box.add_child(pin_row)
+	# The digits, and under them the code the PC shows next to its PIN.
+	var cells_col := _vbox(22)
+	cells_col.alignment = BoxContainer.ALIGNMENT_CENTER
+	pin_row.add_child(cells_col)
 	var cells := _hbox(10)
-	pin_row.add_child(cells)
+	cells_col.add_child(cells)
+	_pin_code_box = _vbox(2)
+	_pin_code_box.hide()
+	cells_col.add_child(_pin_code_box)
+	_pin_code_box.add_child(_label("This PC's code", 17, UiTheme.INK_3))
+	_lbl_pin_code = _label("", 30, UiTheme.INK)
+	_pin_code_box.add_child(_lbl_pin_code)
 	for i in 6:
 		var cell := Label.new()
 		cell.custom_minimum_size = Vector2(56, 70)
