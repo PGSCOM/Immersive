@@ -80,6 +80,17 @@ func _run() -> void:
 		"a PC to watch must be on a local network or a VPN -> %s" % [bad_ips.filter(Participant.watchable_ip)])
 	p.set_profile({"name": "Ana", "share": {"ip": "127.0.0.1", "port": 19800, "code": 7}})
 	check(p.watch_state() == "", "a share at 127.0.0.1 (our own PC over USB) is ignored")
+	var crypto := Crypto.new()
+	var pem := crypto.generate_self_signed_certificate(crypto.generate_rsa(1024), "CN=immersive-host").save_to_string()
+	p.set_profile({"name": "Ana", "share": {"ip": "10.0.0.2", "port": 19800, "code": 7, "cert": pem}})
+	var kept: String = p._share.get("cert", "")
+	p.set_profile({"name": "Ana", "share": {"ip": "10.0.0.2", "port": 19800, "code": 8, "cert": 5}})
+	var dropped: String = p._share.get("cert", "?")
+	p.set_profile({"name": "Ana", "share": {"ip": "10.0.0.2", "port": 19800, "code": 9,
+		"cert": "-----BEGIN CERTIFICATE-----\nbm9wZQ==\n-----END CERTIFICATE-----\n"}})
+	check(kept == pem and dropped == "" and p._share.cert == "" and p._share.code == 9,
+		"a share's certificate is kept (the watch connection is pinned to it); a broken one is dropped")
+	p.set_profile({"name": "Ana"})
 	var at := Transform3D(Basis(Vector3.UP, 0.3), Vector3(-0.4, 1.5, -1.2))
 	var b := at.basis
 	p.set_profile({"name": "Ana", "screens": [{"id": 1, "w": 1.2, "c": 0.0,
