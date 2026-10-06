@@ -1103,8 +1103,8 @@ private:
                                 flow.last_log = now;
                             }
                         }
-                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, ack.frame_number)
-                                                      : ack.frame_number;
+                        const uint32_t acked = ack.frame_number;  // a copy: the field is unaligned
+                        flow.last_ack = flow.ack_seen ? std::max(flow.last_ack, acked) : acked;
                         flow.ack_seen = true;
                         flow.last_ack_time = rate.last_ack = now;
                     }

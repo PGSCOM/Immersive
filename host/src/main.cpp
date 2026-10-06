@@ -676,7 +676,7 @@ int main(int argc, char* argv[]) {
                             static_cast<uint32_t>(ceil * server->link_rate_scale(client_id)));
         };
         enc_config.bitrate_kbps = link_kbps(cfg.bitrate_kbps > 0
-            ? std::min<uint32_t>(cfg.bitrate_kbps, 100000) : enc_config.bitrate_kbps);
+            ? std::min<uint32_t>(uint32_t{cfg.bitrate_kbps}, 100000) : enc_config.bitrate_kbps);
         // The rate control's buffer, i.e. the largest frame: an IDR. A whole
         // desktop needs a big one to be sharp at once (hevc_vaapi, a 1920x1200
         // page of text: 0.6 Mbit gave 19 dB and ~20 blurred frames after it,
@@ -775,7 +775,7 @@ int main(int argc, char* argv[]) {
         // this thread encodes in time, and applies that to the running encoder.
         uint32_t ceil_kbps = 0, ceil_quality = 0, fps_cap = 0;
         auto take_cfg = [&](const immersive::protocol::StreamConfig& c) {
-            ceil_kbps = c.bitrate_kbps > 0 ? std::min<uint32_t>(c.bitrate_kbps, 100000)
+            ceil_kbps = c.bitrate_kbps > 0 ? std::min<uint32_t>(uint32_t{c.bitrate_kbps}, 100000)
                                            : immersive::EncoderConfig{}.bitrate_kbps;
             ceil_quality = (c.jpeg_quality >= 10 && c.jpeg_quality <= 95) ? c.jpeg_quality
                                                                           : jpeg_quality.load();
