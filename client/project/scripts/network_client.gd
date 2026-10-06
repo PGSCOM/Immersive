@@ -40,6 +40,12 @@ signal handshake_accepted(host_name: String, host_flags: int)
 signal virtual_display_result(status: int, removed: bool, monitor_id: int)
 ## The PC's main screen went dark (off) or lit again (SCREEN_OFF from the host).
 signal screen_off_changed(off: bool)
+## The host's certificate (IDENTITY, PEM), before its answer to the HELLO:
+## over TLS always, on a plain connection when asked (HELLO_FLAG_IDENTITY).
+signal identity_received(cert_pem: String)
+## The TLS handshake failed; pinned = it was checked against a certificate
+## we had for this PC (it may have changed). disconnected_from_host follows.
+signal tls_failed(pinned: bool)
 
 # --- Constants (matching protocol.h) ---
 
@@ -62,6 +68,8 @@ const MSG_VIRTUAL_DISPLAY_REMOVE: int = 0x23
 const MSG_VIRTUAL_DISPLAY_RESULT: int = 0x24
 const MSG_SCREEN_OFF: int            = 0x25
 const MSG_WATCH_CODE: int            = 0x26
+const MSG_IDENTITY: int              = 0x27
+const MSG_MEDIA_KEY: int             = 0x28
 const MSG_FRAME_ACK: int             = 0x30
 const MSG_REQUEST_KEYFRAME: int      = 0x31
 const MSG_LATENCY_PROBE: int         = 0x40
@@ -77,10 +85,14 @@ const VIDEO_HEADER_SIZE: int  = 9  # 1 + 4 + 2 + 2 bytes
 const PARITY_HEADER_SIZE: int = 6
 const HELLO_FLAG_TCP_MEDIA: int = 0x01
 const HELLO_FLAG_WATCH: int = 0x02
+const HELLO_FLAG_IDENTITY: int = 0x04
 const REJECT_PIN_REQUIRED: int = 1
 const REJECT_WRONG_PIN: int = 2
 const REJECT_SERVER_FULL: int = 3
 const REJECT_LOCKED_OUT: int = 4
+const REJECT_ENCRYPTION_REQUIRED: int = 5
+## The name in the host's certificate (docs/SECURITY.md).
+const TLS_NAME := "immersive-host"
 const HOST_FLAG_VIEW_ONLY: int = 0x01
 const HOST_FLAG_VIRTUAL_DISPLAYS: int = 0x02
 const HOST_FLAG_SCREEN_OFF: int = 0x04
@@ -110,6 +122,27 @@ var _watch_code: int = 0
 ## The PC's network address from HELLO_ACK ("" if the host did not say), so a
 ## headset on the USB cable can tell its room where to watch from.
 var lan_address: String = ""
+## TLS on the control connection (any host not on this machine or the USB
+## cable: docs/SECURITY.md), and the certificate it must present ("" = any:
+## the first contact with a PC, which only learns its certificate).
+var _tls: StreamPeerTLS = null
+var _use_tls := false
+var _pinned_cert := ""
+## The host's certificate from IDENTITY on this connection ("" until then).
+var host_cert: String = ""
+## MEDIA_KEY of this connection: UDP video and audio come sealed with it
+## (empty: they come plain). See SealOpener.
+var media_key := PackedByteArray()
+## UDP video is received and opened on a thread of its own (opening costs
+## more than the rest of a datagram's handling on the render thread); the
+## frames are put together here, from _rx_queue.
+var _rx_thread: Thread = null
+var _rx_mutex := Mutex.new()
+var _rx_queue: Array[PackedByteArray] = []
+var _rx_run := false
+## Datagrams that did not open (forged, or plain while sealed ones were
+## expected), for the log.
+var _rx_dropped := 0
 
 ## Received video, for the stats line: frames and bytes since the last
 ## take_stats() call.
@@ -171,11 +204,13 @@ func _notification(what: int) -> void:
 ## control socket instead of UDP (USB via adb reverse).
 ## watch_code: only watch what the PC streams to another headset (see
 ## _watch_code); the video comes to a port of our own, not udp_port.
+## pinned_cert: the PC's certificate (PEM) the TLS handshake must find; ""
+## takes any, for a first contact that only learns it (send no PIN then).
+## Hosts on this machine (127/8, also the USB cable) are reached without TLS.
 func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool = false,
-		pin: int = 0, watch_code: int = 0) -> void:
+		pin: int = 0, watch_code: int = 0, pinned_cert: String = "") -> void:
 	# Cerrar conexiones previas limpiamente antes de reconectar
-	udp_client.close()
-	tcp_client.disconnect_from_host()
+	_close_sockets()
 	_tcp_buffer.clear()
 	_connected = false
 	_frame_buffer.clear()
@@ -189,14 +224,25 @@ func connect_to_server(ip: String, tcp_port: int, udp_port: int, tcp_media: bool
 	_tcp_media = tcp_media
 	_pin = pin
 	_watch_code = watch_code
+	_use_tls = not ip.begins_with("127.")
+	_pinned_cert = pinned_cert if _use_tls else ""
 	lan_address = ""
+	host_cert = ""
+	media_key = PackedByteArray()
 
 	_connect_deadline_ms = Time.get_ticks_msec() + CONNECT_TIMEOUT_MS
 	tcp_client.connect_to_host(ip, tcp_port)
 	set_process(true)
 
-	print("[Network] Connecting to %s:%d%s..." % [ip, tcp_port,
-		" (video over TCP)" if tcp_media else ""])
+	var how := ""
+	if _use_tls:
+		how = " (TLS, pinned %s)" % fingerprint(_pinned_cert) if _pinned_cert else " (TLS, first contact)"
+	print("[Network] Connecting to %s:%d%s%s..." % [ip, tcp_port,
+		" (video over TCP)" if tcp_media else "", how])
+
+## Whether the connection is encrypted (TLS, and sealed UDP media).
+func is_encrypted() -> bool:
+	return _tls != null and _tls.get_status() == StreamPeerTLS.STATUS_CONNECTED
 
 func _process(_delta: float) -> void:
 	tcp_client.poll()
@@ -218,7 +264,25 @@ func _process(_delta: float) -> void:
 				# Input and ACKs are tiny messages: send each at once rather
 				# than letting Nagle hold it for the previous one's ACK.
 				tcp_client.set_no_delay(true)
-				_on_tcp_connected()
+				if not _use_tls:
+					_on_tcp_connected()
+				elif not _start_tls():
+					return
+			if _tls and _tls.get_status() == StreamPeerTLS.STATUS_HANDSHAKING:
+				_tls.poll()
+				match _tls.get_status():
+					StreamPeerTLS.STATUS_CONNECTED:
+						_on_tcp_connected()
+					StreamPeerTLS.STATUS_HANDSHAKING:
+						if Time.get_ticks_msec() > _connect_deadline_ms:
+							_fail_connection("TLS handshake with %s timed out" % _host_ip)
+						return
+					_:
+						var pinned := not _pinned_cert.is_empty()
+						tls_failed.emit(pinned)
+						_fail_connection("TLS handshake with %s failed%s" % [_host_ip,
+							": it did not show the certificate we paired with" if pinned else ""])
+						return
 			_read_tcp_messages()
 			var timeout_ms := USB_TIMEOUT_MS if _tcp_media else HOST_TIMEOUT_MS
 			if _connected and Time.get_ticks_msec() - _last_rx_ms > timeout_ms:
@@ -252,14 +316,40 @@ func _fail_connection(reason: String) -> void:
 	_last_completed_frame.clear()
 	_first_frame.clear()
 	_stream_size.clear()
-	tcp_client.disconnect_from_host()
-	udp_client.close()
+	_close_sockets()
 	set_process(false)
 	print("[Network] %s" % reason)
 	disconnected_from_host.emit()
 
+## TCP, TLS and UDP closed; the receive thread stopped first (it owns the
+## UDP socket while it runs).
+func _close_sockets() -> void:
+	_stop_rx()
+	if _tls:
+		_tls.disconnect_from_stream()
+		_tls = null
+	tcp_client.disconnect_from_host()
+	udp_client.close()
+
+## Start TLS over the connected TCP socket, checked against _pinned_cert
+## (any certificate without one: the first contact, which sends no PIN).
+## False if it could not even start (the connection is torn down).
+func _start_tls() -> bool:
+	var opts := TLSOptions.client_unsafe()
+	if not _pinned_cert.is_empty():
+		var cert := X509Certificate.new()
+		if cert.load_from_string(_pinned_cert) != OK:
+			_fail_connection("the certificate kept for %s is unreadable" % _host_ip)
+			return false
+		opts = TLSOptions.client(cert)
+	_tls = StreamPeerTLS.new()
+	if _tls.connect_to_stream(tcp_client, TLS_NAME, opts) != OK:
+		_fail_connection("could not start TLS with %s" % _host_ip)
+		return false
+	return true
+
 func _on_tcp_connected() -> void:
-	print("[Network] TCP connected, sending HELLO")
+	print("[Network] %s, sending HELLO" % ("TLS connected" if _tls else "TCP connected"))
 
 	# Bind UDP for receiving video. A large receive buffer keeps a burst of
 	# chunks for one frame (a keyframe is ~150-200 packets) from being dropped by
@@ -273,11 +363,14 @@ func _on_tcp_connected() -> void:
 		push_error(("[Network] Failed to bind a free UDP port (error %d) — no video will be received." % bind_err) if _watch_code
 			else ("[Network] Failed to bind UDP port %d (error %d) — no video will be received. Is another client (or the host on this machine) using it?" % [_udp_port, bind_err]))
 
+	# Over TLS the host always says who it is; on a plain link (this machine,
+	# the USB cable) ask, so a share to a room can carry the certificate.
+	var flags := 0 if _tls else HELLO_FLAG_IDENTITY
 	if _watch_code:
-		tcp_client.put_data(hello_message(false, _watch_code, " watching", HELLO_FLAG_WATCH,
+		_put(hello_message(false, _watch_code, " watching", flags | HELLO_FLAG_WATCH,
 			udp_client.get_local_port()))
 	else:
-		tcp_client.put_data(hello_message(_tcp_media, _pin))
+		_put(hello_message(_tcp_media, _pin, "", flags))
 	connected_to_host.emit()
 
 ## A whole HELLO message: version, name[32] (shown in the host's log; `note`
@@ -340,20 +433,32 @@ func _send_control_message(msg_type: int, payload: PackedByteArray) -> void:
 		msg.append_array(payload)
 	# One write, not two: FRAME_ACK alone is one message per decoded frame per
 	# monitor, so halving the socket writes matters at 3 x 60 fps.
-	tcp_client.put_data(msg)
+	_put(msg)
+
+## Write to the host: through TLS once it is up, else straight to TCP.
+## Nothing goes out before the handshake (nor after it failed).
+func _put(data: PackedByteArray) -> void:
+	if _tls:
+		if _tls.get_status() == StreamPeerTLS.STATUS_CONNECTED:
+			_tls.put_data(data)
+	elif tcp_client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		tcp_client.put_data(data)
 
 func _read_tcp_messages() -> void:
 	# Leer todos los bytes disponibles y guardarlos en el buffer seguro.
 	# In a loop: in TCP media mode whole frames come through here, and one read
 	# per render frame capped throughput at whatever the socket had buffered.
-	var avail: int = tcp_client.get_available_bytes()
-	while avail > 0:
-		var data := tcp_client.get_data(avail)
-		if data[0] != OK:
-			break
-		_tcp_buffer.append_array(data[1])
-		_last_rx_ms = Time.get_ticks_msec()
-		avail = tcp_client.get_available_bytes()
+	if _tls:
+		_read_tls()
+	else:
+		var avail: int = tcp_client.get_available_bytes()
+		while avail > 0:
+			var data := tcp_client.get_data(avail)
+			if data[0] != OK:
+				break
+			_tcp_buffer.append_array(data[1])
+			_last_rx_ms = Time.get_ticks_msec()
+			avail = tcp_client.get_available_bytes()
 
 	# Procesar mensajes completos. Walk an offset and trim once at the end:
 	# re-slicing the remainder after every message copied the whole backlog
@@ -381,6 +486,24 @@ func _read_tcp_messages() -> void:
 	if off > 0:
 		_tcp_buffer = _tcp_buffer.slice(off)
 
+## Everything TLS has for us, one record at a time: StreamPeerTLS's
+## get_partial_data(n) reads records until it has n bytes, and if the host
+## closes meanwhile (as it does right after HELLO_REJECT) it throws away all
+## it read. One byte reads exactly one record; get_available_bytes() is the
+## rest of it.
+func _read_tls() -> void:
+	while _tls.get_status() == StreamPeerTLS.STATUS_CONNECTED:
+		var r: Array = _tls.get_partial_data(1)
+		if r[0] != OK or r[1].is_empty():
+			break
+		_tcp_buffer.append_array(r[1])
+		var rest := _tls.get_available_bytes()
+		if rest > 0:
+			r = _tls.get_partial_data(rest)
+			if r[0] == OK:
+				_tcp_buffer.append_array(r[1])
+		_last_rx_ms = Time.get_ticks_msec()
+
 func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 	match msg_type:
 		MSG_HELLO_ACK:
@@ -402,7 +525,20 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 					udp_client.close()
 					if udp_client.bind(_udp_port, "*", 8 * 1024 * 1024) != OK:
 						push_error("[Network] Failed to bind UDP port %d — no video will be received" % _udp_port)
+				# MEDIA_KEY (if any) came before this: the video can start.
+				if not _tcp_media:
+					_start_rx()
 				handshake_accepted.emit(host_name, host_flags)
+
+		MSG_IDENTITY:
+			if host_cert.is_empty() and payload.size() < 8192:
+				host_cert = payload.get_string_from_ascii()
+				print("[Network] the PC's identity: %s" % fingerprint(host_cert))
+				identity_received.emit(host_cert)
+
+		MSG_MEDIA_KEY:
+			if payload.size() == 48 and _tls:
+				media_key = payload
 
 		MSG_HELLO_REJECT:
 			var reason: int = payload[0] if payload.size() >= 1 else 0
@@ -520,9 +656,57 @@ func _handle_control_message(msg_type: int, payload: PackedByteArray) -> void:
 # --- Internal UDP handling ---
 
 func _read_udp_packets() -> void:
-	while udp_client.get_available_packet_count() > 0:
-		_on_video_packet(udp_client.get_packet())
+	if _rx_thread == null:
+		return
+	_rx_mutex.lock()
+	var packets := _rx_queue
+	_rx_queue = []
+	_rx_mutex.unlock()
+	for packet in packets:
+		_on_video_packet(packet)
 	_cleanup_old_frames()
+
+## Receive (and open, with a media key) UDP video on its own thread.
+func _start_rx() -> void:
+	_stop_rx()
+	_rx_run = true
+	_rx_thread = Thread.new()
+	_rx_thread.start(_rx_loop.bind(SealOpener.new(media_key) if not media_key.is_empty() else null))
+
+func _stop_rx() -> void:
+	if _rx_thread == null:
+		return
+	_rx_mutex.lock()
+	_rx_run = false
+	_rx_queue.clear()
+	_rx_mutex.unlock()
+	_rx_thread.wait_to_finish()
+	_rx_thread = null
+
+## The receive thread: the only user of udp_client while it runs. Datagrams
+## that do not open are dropped here (a forged one never reaches a decoder).
+func _rx_loop(opener: SealOpener) -> void:
+	var batch: Array[PackedByteArray] = []
+	while true:
+		while udp_client.get_available_packet_count() > 0:
+			var packet := udp_client.get_packet()
+			if opener:
+				packet = opener.open(packet)
+				if packet.is_empty():
+					_rx_dropped += 1
+					if _rx_dropped == 1 or _rx_dropped % 1000 == 0:
+						print("[Network] dropped %d UDP datagrams that were not sealed with this connection's key" % _rx_dropped)
+					continue
+			batch.append(packet)
+		_rx_mutex.lock()
+		var run := _rx_run
+		if run:
+			_rx_queue.append_array(batch)
+		_rx_mutex.unlock()
+		if not run:
+			return
+		batch.clear()
+		OS.delay_usec(500)
 
 ## One UDP video packet: a data chunk of a frame, or a parity chunk
 ## (chunk_idx >= chunk_cnt, protocol.h VideoParityHeader).
@@ -810,6 +994,62 @@ func disconnect_from_server() -> void:
 	_last_completed_frame.clear()
 	_first_frame.clear()
 	_stream_size.clear()
-	tcp_client.disconnect_from_host()
-	udp_client.close()
+	_close_sockets()
 	set_process(false)
+
+func _exit_tree() -> void:
+	_stop_rx()
+
+## A certificate's fingerprint as the PC shows it next to the PIN: the first
+## 8 bytes of SHA-256 over its DER, "1A2B 3C4D 5E6F 7A8B" ("" if unreadable).
+static func fingerprint(pem: String) -> String:
+	var b64 := ""
+	var inside := false
+	for line in pem.split("\n"):
+		line = line.strip_edges()
+		if line.begins_with("-----BEGIN"):
+			inside = true
+		elif line.begins_with("-----END"):
+			break
+		elif inside:
+			b64 += line
+	var der := Marshalls.base64_to_raw(b64) if not b64.is_empty() else PackedByteArray()
+	if der.is_empty():
+		return ""
+	var h := HashingContext.new()
+	h.start(HashingContext.HASH_SHA256)
+	h.update(der)
+	var hex := h.finish().slice(0, 8).hex_encode().to_upper()
+	return "%s %s %s %s" % [hex.substr(0, 4), hex.substr(4, 4), hex.substr(8, 4), hex.substr(12, 4)]
+
+## Opens sealed UDP datagrams (docs/PROTOCOL.md, Sealed datagrams):
+## IV (16) | AES-128-CBC(datagram + PKCS#7) | HMAC-SHA-256 tag (first 16),
+## the tag over IV and ciphertext, checked first and in constant time.
+## Not thread-safe: one per thread.
+class SealOpener extends RefCounted:
+	var _aes_key: PackedByteArray
+	var _mac_key: PackedByteArray
+	var _aes := AESContext.new()
+	var _hmac := HMACContext.new()
+	var _crypto := Crypto.new()
+
+	func _init(key: PackedByteArray) -> void:
+		_aes_key = key.slice(0, 16)
+		_mac_key = key.slice(16, 48)
+
+	## The datagram, or an empty array if it was not sealed with this key.
+	func open(p: PackedByteArray) -> PackedByteArray:
+		var n := p.size()
+		if n < 48 or (n - 32) % 16 != 0:
+			return PackedByteArray()
+		_hmac.start(HashingContext.HASH_SHA256, _mac_key)
+		_hmac.update(p.slice(0, n - 16))
+		if not _crypto.constant_time_compare(_hmac.finish().slice(0, 16), p.slice(n - 16)):
+			return PackedByteArray()
+		_aes.start(AESContext.MODE_CBC_DECRYPT, _aes_key, p.slice(0, 16))
+		var plain := _aes.update(p.slice(16, n - 16))
+		_aes.finish()
+		var pad: int = plain[plain.size() - 1]
+		if pad < 1 or pad > 16:
+			return PackedByteArray()
+		return plain.slice(0, plain.size() - pad)

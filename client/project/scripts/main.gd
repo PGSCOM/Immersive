@@ -1919,7 +1919,8 @@ func _on_audio_stream_started(_sample_rate: int, _channels: int, audio_port: int
 		add_child(audio_receiver)
 	# USB mode: packets come on TCP (audio_packet_received); bind an ephemeral
 	# port rather than the real one, which nothing will ever send to.
-	_audio_on = audio_receiver.start(host_ip, 0 if _use_tcp_media() else audio_port)
+	_audio_on = audio_receiver.start(host_ip, 0 if _use_tcp_media() else audio_port,
+		network_client.media_key)
 
 func _on_audio_stream_stopped() -> void:
 	if audio_receiver:
