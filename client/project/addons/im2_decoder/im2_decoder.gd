@@ -44,11 +44,38 @@ class AndroidExportPlugin extends EditorExportPlugin:
 			"the client will fall back to MJPEG. Build it from client/android-plugin.")
 		return PackedStringArray()
 
-	# PICO hand tracking: the PICO OpenXR runtime only feeds hand joints to apps
-	# that declare these. They used to sit in export_presets.cfg under
-	# "gradle_build/manifest_additions", which is not a Godot option, so they
-	# never reached the APK. This is the supported way to add manifest entries.
+	# Hand tracking. The runtime gates it on what the app declares, and
+	# without the full set it reports supportsHandTracking = false, so Godot
+	# never even registers /user/hand_tracker/* (openxr_hand_tracking_extension.cpp
+	# bails out silently on that flag). Only handtracking=1 was declared and
+	# the runtime said no; these are the entries PICO's own SDKs write:
+	#   https://sdk.picovr.com/docs/OpenXRMobileSDKv2/en/chapter_four.html
+	# They used to sit in export_presets.cfg under "gradle_build/
+	# manifest_additions", which is not a Godot option, so they never reached
+	# the APK. These are the supported hooks to add manifest entries.
+	func _get_android_manifest_element_contents(
+			_platform: EditorExportPlatform, _debug: bool) -> String:
+		# com.picovr.permission.HAND_TRACKING (PICO's own SDKs) and the Android XR
+		# XR_INPUT hand-tracking feature: a runtime permission the app must hold,
+		# and the flag Android XR looks at to advertise the capability.
+		return "<uses-permission android:name=\"com.picovr.permission.HAND_TRACKING\" />\n" + \
+			"<uses-feature android:name=\"android.hardware.xr.input.hand_tracking\" android:required=\"false\" />\n"
+
 	func _get_android_manifest_application_element_contents(
 			_platform: EditorExportPlatform, _debug: bool) -> String:
+		# handtracking=1 is what tells PICO the app runs without controllers, so
+		# it stops demanding them (godot_openxr_vendors#162: "the Pico 4 insists
+		# that the program doesn't support running with hand tracking" without it).
+		# Alone it is PICO's "hands only" mode; with controller=1 it is
+		# "controllers and hands", the one where the system hands over to the
+		# hands when the controllers are put down and back when one is picked
+		# up (PICO-Unity-OpenXR-SDK, Editor/PICOModifyAndroidManifest.cs).
+		# pvr.app.type=vr keeps PICO from treating the APK as a flat 2D app; the
+		# rest are what its store submission expects (ALVR ships the same set).
 		return "<meta-data android:name=\"handtracking\" android:value=\"1\" />\n" + \
-			"<meta-data android:name=\"Hand_Tracking_HighFrequency\" android:value=\"1\" />\n"
+			"<meta-data android:name=\"controller\" android:value=\"1\" />\n" + \
+			"<meta-data android:name=\"pvr.app.type\" android:value=\"vr\" />\n" + \
+			"<meta-data android:name=\"pvr.sdk.version\" android:value=\"OpenXR\" />\n" + \
+			"<meta-data android:name=\"pvr.display.orientation\" android:value=\"180\" />\n" + \
+			"<meta-data android:name=\"pxr.sdk.version_code\" android:value=\"5900\" />\n" + \
+			"<meta-data android:name=\"enable_vst\" android:value=\"1\" />\n"

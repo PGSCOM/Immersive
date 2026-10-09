@@ -12,7 +12,11 @@ extends SceneTree
 ##     size clamped) without stealing the desktop's own corner pixels;
 ##   - main.gd::pick() returns the NEAREST of menu, keyboard, screens and the
 ##     grab bars under them;
-##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only.
+##   - the keyboard types with the pointer; Shift / Ctrl latch for one key only;
+##     two index fingertips type on it in turn, and the ray waits meanwhile;
+##     a fingertip hovering over it (a hand pointing past it) keeps its ray
+##     until it comes within FingerTouch.REST_M, and one from behind takes
+##     nothing (also through main.gd::finger_touch).
 ##
 ##   godot --headless --xr-mode off --fixed-fps 72 --path client/project \
 ##       -s "$PWD/client/tests/workspace_test.gd"
@@ -286,6 +290,8 @@ func _run(main: Node3D) -> void:
 	main.add_child(origin)
 	panel.set_curvature(true, 0.5)
 	panel.place_facing(Vector3(0.2, 1.5, -1.3), head.position)
+	var mark := ShaderMaterial.new()  # main.gd's stencil mark for the passthrough hands
+	panel.material_overlay = mark
 	panel.set_compositor_layer(true, origin)
 	await _frames(2)
 	var layer: Node3D = panel._layer
@@ -301,6 +307,15 @@ func _run(main: Node3D) -> void:
 			"the layer's arc is centred where the screen is")
 		check(panel.layers == 0 and layer.get("enable_hole_punch") and layer.get("sort_order") < 0,
 			"the mesh hides; a hole is punched so the menu still draws in front")
+		var stand_in: MeshInstance3D = panel._layer_mask
+		check(stand_in != null and stand_in.layers != 0 and stand_in.mesh == panel.mesh
+			and stand_in.material_overlay == mark and stand_in.is_in_group(&"covers_hands")
+			and (stand_in.material_override as StandardMaterial3D).albedo_color.a == 0.0,
+			"an invisible copy of the hidden mesh still carries the hands' stencil mark")
+		panel.scale_panel(0.2)
+		await _frames(1)
+		check(stand_in.mesh == panel.mesh, "resized, the copy takes the new mesh")
+		panel.scale_panel(-0.2)
 		check(panel._layer_viewport.size == Vector2i(1920, 1080)
 			and (panel._layer_content as TextureRect).texture == panel.screen_texture,
 			"the layer is fed the screen's picture at its size")
@@ -316,8 +331,9 @@ func _run(main: Node3D) -> void:
 		"flat screen -> a quad layer of its size")
 	panel.set_compositor_layer(false, origin)
 	await _frames(1)
-	check(panel._layer == null and panel.layers == 1 and origin.get_child_count() == 0,
-		"switching layers off gives the mesh back")
+	check(panel._layer == null and panel.layers == 1 and origin.get_child_count() == 0
+		and panel.find_children("*", "MeshInstance3D", false, false).all(func(m): return not m.is_in_group(&"covers_hands")),
+		"switching layers off gives the mesh back (and drops its invisible copy)")
 	panel.set_compositor_layer(true, origin)
 	await _frames(1)
 	panel.queue_free()
@@ -339,12 +355,54 @@ func _run(main: Node3D) -> void:
 	await _type(kb, "Return")
 	check(main.keys == [[0x41, 1], [0x42, 0], [0x43, 2], [0x56, 0], [0x0D, 0]],
 		"Shift and Ctrl hold for one key only -> %s" % [main.keys])
+	main.keys.clear()
+	await _poke(kb, "x", 0)
+	await _poke(kb, "y", 1)
+	await _poke(kb, "z", 0)
+	check(main.keys == [[0x58, 0], [0x59, 0], [0x5A, 0]],
+		"two fingertips type in turn, without lifting away -> %s" % [main.keys])
+	kb.pointer_ray(head.position, (_key_point(kb, "q") - head.position).normalized(), true)
+	await _frames(1)
+	kb.pointer_ray(head.position, (_key_point(kb, "q") - head.position).normalized(), false)
+	check(main.keys.size() == 3, "a ray pressing a key while a fingertip hovers types nothing")
+	kb.touch(0, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
+	kb.touch(1, _key_point(kb, "q") + kb._quad.global_basis.z * 0.2)
+	var q := _key_point(kb, "q")
+	var z: Vector3 = kb._quad.global_basis.z
+	check(kb.touch(0, q + z * 0.06) and not kb.finger_rests(),
+		"a fingertip 6 cm over the keys hovers: its hand's ray points on")
+	check(kb.touch(0, q + z * 0.025) and kb.finger_rests(), "within 3 cm the ray rests")
+	check(kb.touch(0, q + z * 0.06) and kb.finger_rests(), "and keeps resting while the tip stays over the keys")
+	kb.touch(0, q + z * 0.2)
+	check(not kb.touch(1, q - z * 0.03) and not kb.finger_rests(),
+		"a fingertip coming from behind the keyboard takes nothing")
+	var router = load("res://scripts/main.gd").new()  # not in the tree: just its finger_touch()
+	router.virtual_keyboard = kb
+	check(not router.finger_touch(0, q + z * 0.06), "main.finger_touch: hovering, the ray points on")
+	check(router.finger_touch(0, q + z * 0.02), "main.finger_touch: close, the ray rests")
+	kb.touch(0, q + z * 0.2)
+	router.free()
 	var miss_d: float = kb.pointer_ray(head.position, Vector3.UP, false)
 	check(miss_d < 0.0, "a ray above the keyboard misses it")
 	var kb_bar: float = kb.grab_bar.hit(head.position, (kb.grab_bar.global_position - head.position).normalized())
 	check(kb_bar > 0.0 and kb.grab_bar.visible, "the keyboard shows a grab bar under it")
 	print("RESULT fails=%d" % fails)
 	quit(1 if fails else 0)
+
+## The centre of the key labelled `label`, in the world.
+func _key_point(kb: Node3D, label: String) -> Vector3:
+	for k in kb._keys:
+		if k.button.text == label or k.def[0] == label:
+			var c: Vector2 = k.button.get_global_rect().get_center() / Vector2(kb.VIEW_SIZE)
+			return kb._quad.to_global(Vector3((c.x - 0.5) * kb.WIDTH_M, (0.5 - c.y) * kb.HEIGHT_M, 0.0))
+	return Vector3.ZERO
+
+## Hand `who` hovers 3 cm over the key, taps it (4 mm) and lifts to 3 cm.
+func _poke(kb: Node3D, label: String, who: int) -> void:
+	var p := _key_point(kb, label)
+	for depth in [0.03, 0.004, 0.03]:
+		kb.touch(who, p + kb._quad.global_basis.z * depth)
+		await _frames(1)
 
 ## Press and release the key labelled `label` with a ray from the head.
 func _type(kb: Node3D, label: String) -> void:

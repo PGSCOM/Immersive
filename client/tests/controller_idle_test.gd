@@ -12,12 +12,20 @@ extends SceneTree
 ##   - the other controller's trigger takes the pointer over;
 ##   - hand joints reported (source unknown, as on the Pico) never take the
 ##     pointer from a controller in use;
+##   - no interaction profile bound (Godot freezes its pose and buttons) is
+##     no controller in use, even with its trigger frozen down, and neither is
+##     the simple controller profile while that hand is tracked (a runtime
+##     mimicking a controller with the bare hand);
 ##   - a controller without a tracked pose counts as put down at once (no
 ##     laser, no model, no clicks, not in use) and is back when tracked again;
 ##   - a trigger press wakes a put-down controller at once, without moving it,
 ##     and a controller held still with the trigger down stays in use;
-##   - put down, a slow drift of its tracking or a one-frame jump (the cameras
-##     finding it again) does not wake it, a hand lifting it does;
+##   - put down, a slow drift of its tracking, a one-frame jump (the cameras
+##     finding it again) or its position wandering with the orientation frozen
+##     (the Pico in passthrough) does not wake it, a hand lifting it does;
+##   - just put down, its position wandering with the orientation frozen does
+##     not keep it in use, and lying there its tracking lost and found again
+##     does not wake it (the hands keep the pointer);
 ##   - with a grip pose the model sits on it and the ray starts at the model's
 ##     tip, still at the ray angle.
 ##
@@ -241,6 +249,42 @@ func _run() -> void:
 	await _frames(1)
 	check(main.sent.slice(mark).any(func(e): return e[2] == 1) and _last()[2] == 0, "and its trigger clicks")
 
+	# --- No profile bound: Godot stops reading it but keeps its last pose and
+	# buttons, so it still looks tracked, and held ----------------------------
+	r._set_trigger_state(true)
+	await _frames(2)
+	pads[&"right_hand"].profile = "/interaction_profiles/none"
+	await _frames(1)
+	check(not r.in_use() and not laser.visible and _last()[2] == 0,
+		"no profile bound to it, trigger frozen down: not in use at once, the click let go")
+	r._set_trigger_state(false)
+
+	# --- The runtime mimicking a controller with the bare hand ---------------
+	# Through the simple controller profile it moves as the hand does and the
+	# pinch is its trigger: that is the hand, not a controller in use.
+	pads[&"right_hand"].profile = "/interaction_profiles/khr/simple_controller"
+	mark = main.sent.size()
+	for i in 12:
+		right.rotate_y(0.01)
+		await process_frame
+	r._set_trigger_state(true)
+	await _frames(2)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(not r.in_use() and not laser.visible and main.sent.slice(mark).all(func(e): return e[2] == 0),
+		"a tracked hand driving the simple controller profile is no controller in use: no laser, no click")
+	hand.has_tracking_data = false
+	r._set_trigger_state(true)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(r.in_use(), "with no hand tracked, a simple controller is a controller")
+	hand.has_tracking_data = true
+	pads[&"right_hand"].profile = "/interaction_profiles/bytedance/pico4_controller"
+	_aim(right, Vector3(0, 1.25, -1.5))
+	r._set_trigger_state(true)  # takes the pointer back
+	r._set_trigger_state(false)
+	await _frames(2)
+
 	# --- No tracked pose: put down at once, back when tracked -----------------
 	pads[&"right_hand"].invalidate_pose(&"default")
 	await _frames(1)
@@ -291,10 +335,29 @@ func _run() -> void:
 	right.rotate_y(0.4)
 	await _frames(3)
 	check(not model.visible, "nor does a 23° turn in one frame")
-	for i in 4:  # a hand lifting it: 5 cm in 4 frames
+	await _frames(72)
+	for i in 3:  # the Pico extrapolating it: 3.6 cm, orientation bit for bit the same
+		right.position.x -= 0.012
+		await process_frame
+	check(not model.visible, "nor does its position wandering with the orientation frozen")
+	for i in 4:  # a hand lifting it: 5 cm and 2.3° in 4 frames
 		right.position.y += 0.012
+		right.rotate_object_local(Vector3.RIGHT, 0.01)
 		await process_frame
 	check(model.visible, "picked up: back at once")
+	# Put down and lost by the Pico at once (passthrough): the orientation
+	# frozen, the position wandering 1.2 cm every half second.
+	for i in 72 * 4:
+		if i % 36 == 0:
+			right.position.x += 0.012 if (i / 36) % 2 == 0 else -0.012
+		await process_frame
+	check(not model.visible and not r.in_use(),
+		"just put down, its position wandering with the orientation frozen: put down all the same")
+	pads[&"right_hand"].invalidate_pose(&"default")
+	await _frames(10)
+	pads[&"right_hand"].set_pose(&"default", right.transform, Vector3.ZERO, Vector3.ZERO, XRPose.XR_TRACKING_CONFIDENCE_HIGH)
+	await _frames(3)
+	check(not model.visible and not r.in_use(), "lying there, its tracking lost and found again does not wake it")
 
 	# --- Model on the grip pose, ray from its tip ---------------------------
 	var pad: XRControllerTracker = pads[&"right_hand"]

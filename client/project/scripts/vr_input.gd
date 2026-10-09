@@ -4,10 +4,11 @@ extends Node
 ## right); both work the same way and the one whose trigger was pressed last
 ## drives the pointer (the other hides its laser), like the system UI.
 ##
-##   Trigger          click (desktop, menu, keyboard); on the bar under a
-##                    screen, the menu or the keyboard: hold to move it
+##   Trigger          click (desktop, menu, keyboard), draw on the whiteboard;
+##                    on the bar under a screen, the menu, the keyboard or the
+##                    whiteboard: hold to move it
 ##   Grip, tap        right click on a screen
-##   Grip, hold       move the screen / menu / keyboard under the pointer;
+##   Grip, hold       move the screen / menu / keyboard / whiteboard under the pointer;
 ##                    while moving, stick up/down (or reaching out / pulling
 ##                    the hand in) pushes it away / pulls it in and stick
 ##                    left/right resizes a screen
@@ -21,8 +22,9 @@ extends Node
 ##
 ## A controller in use always has the pointer, whatever the runtime says about
 ## hands (the Pico reports hand joints even while the controllers are held).
-## One left still for IDLE_HIDE_S (put down) or without a tracked pose gives
-## it up and hides; once every controller has, bare hands get the pointer
+## One left still for IDLE_HIDE_S (put down), without a tracked pose, or that
+## is no controller at all (_not_a_controller()) gives it up and hides; once
+## every controller has, bare hands get the pointer
 ## (hand_input.gd asks any_in_use()). Moving it or pressing a trigger, grip or
 ## button takes it back at once.
 
@@ -40,15 +42,25 @@ const PUSH_PULL_SPEED := 1.6   ## metres per second at full deflection
 const RESIZE_SPEED := 0.9      ## metres of width per second
 ## A controller left still this long (put down on the desk) disappears, laser
 ## included, and stops driving the pointer until it moves again.
+## Still in use, a move counts only with some turn too (IDLE_MIN_TURN_RAD,
+## for the frozen orientation below): otherwise a controller the Pico lost
+## just after it was put down would wander on and never let the hands point.
 const IDLE_HIDE_S := 3.0
 const IDLE_MOVE_M := 0.01
+const IDLE_MIN_TURN_RAD := 0.003  # 0.17°: any hand, never a frozen pose
 const IDLE_TURN_RAD := 0.05
 ## A put-down controller wakes when picked up: moved WAKE_MOVE_M or turned
 ## WAKE_TURN_RAD away from where it lies, measured against its pose smoothed
 ## over WAKE_SMOOTH_S, so a slow drift of the tracking never wakes it. One
 ## frame jumping more than JUMP_M / JUMP_TURN_RAD is the tracking finding it
 ## again (it lies on the desk), not a hand: it moves the rest pose instead.
+## Nor is a move without the least turn: a hand always tilts what it lifts,
+## while the Pico (in passthrough) freezes the orientation of a controller its
+## cameras lost and lets the position wander, 3-4 cm at a time. Its
+## tracking coming back is no pick-up either (the cameras found it on the
+## desk); a hand that took it meanwhile moves it, or presses something.
 const WAKE_MOVE_M := 0.03
+const WAKE_MIN_TURN_RAD := 0.017  # 1°
 const WAKE_TURN_RAD := 0.35
 const WAKE_SMOOTH_S := 0.3
 const JUMP_M := 0.04
@@ -74,7 +86,7 @@ const MODEL_IN_GRIP := Transform3D(
 ## places the model.
 const MODEL_TIP := Vector3(0, -0.01, -0.03)
 
-enum Target { NONE, OVERLAY, KEYBOARD, PANEL, BAR }
+enum Target { NONE, OVERLAY, KEYBOARD, BOARD, PANEL, BAR }
 
 ## The instance whose controller drives the pointer.
 static var active: Node = null
@@ -121,7 +133,7 @@ var _rest := Transform3D()      ## where a put-down controller lies (smoothed)
 var _last_pose := Transform3D()
 var _was_tracked := false
 var _jump_logged_ms := -10000
-## What this controller does right now, for the log ("pointer", "put down", ...).
+## What this controller does right now and its profile, for the log ("pointer", "put down", ...).
 var _role := ""
 ## Strength of the last vibration asked for (tests read it).
 var last_buzz := 0.0
@@ -160,9 +172,27 @@ func _exit_tree() -> void:
 static func any_in_use() -> bool:
 	return _all.any(func(v: Node) -> bool: return v.in_use())
 
-## Tracked and not put down (a press resets the idle time, like moving it).
+## Tracked and not put down (a press resets the idle time, like moving it),
+## and a controller at all (_not_a_controller()).
 func in_use() -> bool:
-	return controller != null and controller.get_has_tracking_data() and _idle_s < IDLE_HIDE_S
+	return controller != null and controller.get_has_tracking_data() and _idle_s < IDLE_HIDE_S \
+		and not _not_a_controller()
+
+## The runtime binds no profile to this hand: Godot then stops reading it but
+## keeps its last pose and buttons (OpenXRInterface::handle_tracker returns
+## early), so it would still look tracked, and a button down at that moment
+## down for good. Or it drives the hand's path with the bare hand through the
+## simple controller profile, as several runtimes do (the pinch is its
+## trigger): that "controller" moves whenever the hand does.
+func _not_a_controller() -> bool:
+	var profile := _profile()
+	if profile == "/interaction_profiles/none":
+		return true
+	if profile != "/interaction_profiles/khr/simple_controller":
+		return false
+	var hand := XRServer.get_tracker(&"/user/hand_tracker/right" if _is_right() \
+		else &"/user/hand_tracker/left") as XRHandTracker
+	return hand != null and hand.has_tracking_data
 
 func _is_right() -> bool:
 	return String(controller.tracker).contains("right")
@@ -295,7 +325,8 @@ func _process(delta: float) -> void:
 		raycast_origin.visible = false
 		if active == self:
 			active = null
-		_set_role("put down" if controller.get_has_tracking_data() else "untracked")
+		_set_role("untracked" if not controller.get_has_tracking_data() \
+			else ("not a controller" if _not_a_controller() else "put down"))
 		return
 	if active == null:
 		active = self
@@ -336,6 +367,8 @@ func _update_pointer() -> void:
 	var kind: String = hit.get("kind", "")
 	if kind != "keyboard" and main_scene.has_method("leave_keyboard"):
 		main_scene.leave_keyboard()
+	if kind != "whiteboard" and main_scene.has_method("leave_whiteboard"):
+		main_scene.leave_whiteboard()
 	_hit_distance = hit.get("distance", MAX_RAY_M)
 	match kind:
 		"overlay":
@@ -345,6 +378,10 @@ func _update_pointer() -> void:
 		"keyboard":
 			_set_target(Target.KEYBOARD, null)
 			main_scene.send_keyboard_pointer(origin, dir, _trigger_pressed)
+			return
+		"whiteboard":
+			_set_target(Target.BOARD, null)
+			main_scene.send_whiteboard_pointer(origin, dir, _trigger_pressed)
 			return
 		"bar":
 			_set_target(Target.BAR, null)
@@ -551,7 +588,7 @@ func _set_trigger_state(pressed: bool) -> void:
 			Target.BAR:
 				_start_drag(_bar_target, true)
 			_:
-				pass  # the keyboard reads the trigger in _update_pointer()
+				pass  # the keyboard and whiteboard read the trigger in _update_pointer()
 	else:
 		if _drag_by_trigger:
 			_stop_drag()
@@ -580,6 +617,8 @@ func _set_grip_state(pressed: bool) -> void:
 				_start_drag(main_scene.get("ui_overlay"))
 			Target.KEYBOARD:
 				_start_drag(main_scene.get("virtual_keyboard"))
+			Target.BOARD:
+				_start_drag(main_scene.get("whiteboard"))
 			Target.BAR:
 				_start_drag(_bar_target)
 			Target.PANEL:
@@ -600,14 +639,17 @@ func _set_grip_state(pressed: bool) -> void:
 
 ## Counts how long the controller has sat still (put down after IDLE_HIDE_S).
 ## A held trigger or grip means it is in a hand, however still. Put down, only
-## a real pick-up wakes it (see WAKE_MOVE_M), or its tracking coming back.
+## a real pick-up wakes it (see WAKE_MOVE_M); its tracking coming back keeps
+## it in use only if it still was.
 func _update_idle(delta: float) -> void:
 	var now := controller.global_transform
 	var tracked := controller.get_has_tracking_data()
-	var woke := tracked and not _was_tracked
+	var woke := tracked and not _was_tracked and _idle_s < IDLE_HIDE_S
 	_was_tracked = tracked
 	if _idle_s < IDLE_HIDE_S:
-		woke = woke or _moved(now, _idle_ref) > IDLE_MOVE_M or _turned(now, _idle_ref) > IDLE_TURN_RAD
+		var turned := _turned(now, _idle_ref)
+		woke = woke or turned > IDLE_TURN_RAD \
+			or (_moved(now, _idle_ref) > IDLE_MOVE_M and turned > IDLE_MIN_TURN_RAD)
 		_rest = now
 	elif _moved(now, _last_pose) > JUMP_M or _turned(now, _last_pose) > JUMP_TURN_RAD:
 		if Time.get_ticks_msec() - _jump_logged_ms > 2000:
@@ -615,7 +657,8 @@ func _update_idle(delta: float) -> void:
 			print("[VRInput] %s controller: its pose jumped %.1f cm / %.0f° while put down, ignored" % [
 				_side(), _moved(now, _last_pose) * 100.0, rad_to_deg(_turned(now, _last_pose))])
 		_rest = now
-	elif _moved(now, _rest) > WAKE_MOVE_M or _turned(now, _rest) > WAKE_TURN_RAD:
+	elif _turned(now, _rest) > WAKE_TURN_RAD \
+			or (_moved(now, _rest) > WAKE_MOVE_M and _turned(now, _rest) > WAKE_MIN_TURN_RAD):
 		print("[VRInput] %s controller: picked up (moved %.1f cm, turned %.0f°)" % [
 			_side(), _moved(now, _rest) * 100.0, rad_to_deg(_turned(now, _rest))])
 		woke = true
@@ -638,9 +681,10 @@ func _side() -> String:
 	return "right" if _is_right() else "left"
 
 func _set_role(role: String) -> void:
-	if role != _role:
-		_role = role
-		print("[VRInput] %s controller: %s (profile %s)" % [_side(), role, _profile()])
+	var line := "%s (profile %s)" % [role, _profile()]
+	if line != _role:
+		_role = line
+		print("[VRInput] %s controller: %s" % [_side(), line])
 
 func _profile() -> String:
 	var t := XRServer.get_tracker(controller.tracker) as XRPositionalTracker

@@ -40,6 +40,7 @@ const CODEC_NAMES := {0: "H.264", 1: "HEVC", 2: "MJPEG", 3: "AV1"}
 @onready var left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var right_controller: XRController3D = $XROrigin3D/RightController
 @onready var virtual_keyboard: Node3D = get_node_or_null("VirtualKeyboard")
+var whiteboard: Whiteboard = null
 
 # ---------------------------------------------------------------------------
 # State
@@ -54,6 +55,9 @@ var host_udp_port: int = 19801
 var curved_screen_enabled: bool = true
 var curved_screen_amount: float = 0.5
 var passthrough_enabled: bool = false
+## In passthrough, draw the bare hands over the screens and panels that hide
+## the real ones (hand_input.gd); elsewhere the room shows them.
+var passthrough_hands: bool = true
 var look: String = "night"
 ## Draw the screens as OpenXR compositor layers (sharper text) when the
 ## runtime supports them.
@@ -210,6 +214,7 @@ var _linked: Dictionary = {}
 ## dropped anywhere else, a screen is free again.
 var _snapped_to: Dictionary = {}
 var _save_timer: Timer
+var _hand_mask: ShaderMaterial = null
 
 # ---------------------------------------------------------------------------
 # Lifecycle
@@ -222,6 +227,9 @@ func _ready() -> void:
 	_init_hand_input()
 	_init_network()
 	_init_ui_overlay()
+	whiteboard = Whiteboard.new()
+	whiteboard.name = "Whiteboard"
+	add_child(whiteboard)
 	_save_timer = Timer.new()
 	_save_timer.one_shot = true
 	_save_timer.timeout.connect(save_workspace_layout)
@@ -499,6 +507,7 @@ func _apply_panel_visual_settings(panel: MeshInstance3D) -> void:
 		panel.set_curvature(curved_screen_enabled, curved_screen_amount)
 	if panel and panel.has_method("set_compositor_layer"):
 		panel.set_compositor_layer(compositor_layers and layers_supported(), xr_origin)
+	_apply_hand_mask()
 
 ## Whether the OpenXR runtime composites layers itself (Quest, Pico and
 ## SteamVR do); otherwise the screens stay ordinary meshes.
@@ -519,11 +528,13 @@ func _apply_visual_settings_to_all_panels() -> void:
 func _live_panels() -> Array:
 	return screen_panels.filter(func(p): return is_instance_valid(p))
 
-## What a pointer ray lands on: the NEAREST of the menu, the keyboard, every
-## screen and every grab bar (vr_input.gd and hand_input.gd both use it).
-## Returns {} on a miss, else { kind: "overlay" / "keyboard" / "panel" / "bar",
+## What a pointer ray lands on: the NEAREST of the menu, the keyboard, the
+## whiteboard, every screen and every grab bar (vr_input.gd and hand_input.gd
+## both use it). Returns {} on a miss, else { kind: "overlay" / "keyboard" /
+## "whiteboard" / "panel" / "bar",
 ## distance, and uv (overlay, panel), panel + monitor_id (panel), target (the
-## node a bar moves: a screen, the menu, the keyboard or a ResizeHandle) + bar
+## node a bar moves: a screen, the menu, the keyboard, the whiteboard or a
+## ResizeHandle) + bar
 ## (the GrabBar or ResizeHandle, both have mark_hovered()) }.
 func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	var hits: Array = []
@@ -534,6 +545,14 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 		var kb: Dictionary = virtual_keyboard.ray_hit(ray_origin, ray_direction)
 		if not kb.is_empty():
 			hits.append({"kind": "keyboard", "distance": kb.distance})
+	if is_instance_valid(whiteboard) and whiteboard.visible:
+		var wb := whiteboard.ray_hit(ray_origin, ray_direction)
+		if not wb.is_empty():
+			hits.append({"kind": "whiteboard", "distance": wb.distance})
+		for handle in whiteboard.resize_handles:
+			var d: float = handle.probe(ray_origin, ray_direction)
+			if d >= 0.0 and wb.is_empty():
+				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
 	var owners: Array = _live_panels()
 	for p in owners:
 		var h: Dictionary = p.ray_to_screen_hit(ray_origin, ray_direction)
@@ -546,7 +565,7 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 			var d: float = handle.probe(ray_origin, ray_direction)
 			if d >= 0.0 and not on_screen:
 				hits.append({"kind": "bar", "distance": d, "rank": d + 0.06, "target": handle, "bar": handle})
-	owners.append_array([ui_overlay, virtual_keyboard])
+	owners.append_array([ui_overlay, virtual_keyboard, whiteboard])
 	for o in owners:
 		var bar: GrabBar = o.get("grab_bar") if is_instance_valid(o) else null
 		var d: float = bar.hit(ray_origin, ray_direction) if bar else -1.0
@@ -563,6 +582,31 @@ func pick(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 func leave_keyboard() -> void:
 	if is_instance_valid(virtual_keyboard):
 		virtual_keyboard.pointer_leave()
+
+## The pointer is not on the whiteboard (any more): end its stroke.
+func leave_whiteboard() -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.pointer_leave()
+
+## Route a pointer ray at the whiteboard (trigger / pinch draws). Returns the
+## hit distance, or -1 on a miss.
+func send_whiteboard_pointer(ray_origin: Vector3, ray_direction: Vector3, pressing: bool) -> float:
+	return whiteboard.pointer_ray(ray_origin, ray_direction, pressing) if is_instance_valid(whiteboard) else -1.0
+
+## A fingertip of hand `who` at `tip` (world) on the keyboard, the menu or
+## the whiteboard (hover, press, draw). True while the hand's ray should
+## rest: the tip came within FingerTouch.REST_M of the panel it owns; merely
+## hovering further out (a hand pointing past the keyboard) it points on.
+func finger_touch(who: int, tip: Vector3) -> bool:
+	for surface in [virtual_keyboard, ui_overlay, whiteboard]:
+		if is_instance_valid(surface) and surface.touch(who, tip):
+			return surface.finger_rests()
+	return false
+
+## Show/hide the whiteboard (the menu, or B on desktop).
+func toggle_whiteboard() -> void:
+	if is_instance_valid(whiteboard):
+		whiteboard.toggle_visibility()
 
 func get_ui_hit_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:
 	if ui_overlay and ui_overlay.has_method("ray_to_overlay_hit"):
@@ -773,7 +817,7 @@ func _rename_snaps(old_id: int, new_id: int) -> void:
 
 ## False while the layout is locked (the menu and keyboard still move).
 func can_move_panel(_panel: Node3D) -> bool:
-	return not lock_layout
+	return not lock_layout or _panel.get_parent() is Whiteboard
 
 ## Where `panel` would land if released now: { panel: the neighbour, side:
 ## ScreenPanel.Side, xform: world transform } beside the nearest free side of
@@ -870,6 +914,7 @@ func _init_ui_overlay() -> void:
 	ui_overlay.arrange_requested.connect(arrange_panels)
 	ui_overlay.recenter_requested.connect(recenter_workspace)
 	ui_overlay.keyboard_toggle_requested.connect(toggle_virtual_keyboard)
+	ui_overlay.whiteboard_toggle_requested.connect(toggle_whiteboard)
 	ui_overlay.screen_curvature_changed.connect(_on_overlay_screen_curvature_changed)
 	ui_overlay.look_changed.connect(_on_overlay_look_changed)
 	ui_overlay.stream_settings_changed.connect(_on_overlay_stream_settings_changed)
@@ -907,10 +952,15 @@ func _init_ui_overlay() -> void:
 		compositor_layers = on
 		_apply_visual_settings_to_all_panels()
 		_save_config())
+	ui_overlay.passthrough_hands_toggled.connect(func(on: bool):
+		passthrough_hands = on
+		_apply_hand_mask()
+		_save_config())
 
 	ui_overlay.set_host_address(host_ip, host_tcp_port, host_udp_port)
 	ui_overlay.set_screen_curvature(curved_screen_enabled, curved_screen_amount)
 	ui_overlay.set_look("passthrough" if passthrough_enabled else look, _is_passthrough_supported())
+	ui_overlay.set_passthrough_hands(passthrough_hands)
 	ui_overlay.set_stream_settings(stream_codec, stream_bitrate_kbps,
 		stream_jpeg_quality, stream_res_percent, stream_fps)
 	ui_overlay.set_input_settings(control_enabled, haptics_enabled)
@@ -1866,6 +1916,8 @@ func _input(event: InputEvent) -> void:
 			toggle_ui_overlay()
 		KEY_K:
 			toggle_virtual_keyboard()
+		KEY_B:
+			toggle_whiteboard()
 		KEY_ESCAPE:
 			get_tree().quit()
 
@@ -1960,6 +2012,17 @@ func _apply_passthrough_settings() -> void:
 		world.set_passthrough(passthrough_enabled)
 	if ui_overlay:
 		ui_overlay.set_look("passthrough" if passthrough_enabled else look, supported)
+	_apply_hand_mask()
+
+## Screens and panels hide the real hands in passthrough: each marks its
+## pixels in the stencil (hand_mask.gdshader) so the hands are drawn there.
+func _apply_hand_mask() -> void:
+	if _hand_mask == null:
+		_hand_mask = ShaderMaterial.new()
+		_hand_mask.shader = preload("res://shaders/hand_mask.gdshader")
+		_hand_mask.render_priority = -2  # before the hands (hand_input.gd)
+	get_tree().call_group(&"covers_hands", &"set_material_overlay",
+		_hand_mask if passthrough_enabled and passthrough_hands else null)
 
 # ---------------------------------------------------------------------------
 # Config persistence (this script is the only writer)
@@ -1984,6 +2047,7 @@ func _save_config() -> void:
 	cfg.set_value("display", "curved_enabled", curved_screen_enabled)
 	cfg.set_value("display", "curved_amount", curved_screen_amount)
 	cfg.set_value("display", "passthrough_enabled", passthrough_enabled)
+	cfg.set_value("display", "passthrough_hands", passthrough_hands)
 	cfg.set_value("display", "look", look)
 	cfg.set_value("display", "compositor_layers", compositor_layers)
 	cfg.set_value("input", "control", control_enabled)
@@ -2041,6 +2105,7 @@ func _load_config() -> void:
 		# Curvature used to be a 0-0.5 texture warp; it is now 0-1 of a real arc.
 		curved_screen_amount = clamp(float(cfg.get_value("display", "curved_amount", 0.5)), 0.0, 1.0)
 		passthrough_enabled = cfg.get_value("display", "passthrough_enabled", false)
+		passthrough_hands = cfg.get_value("display", "passthrough_hands", true)
 		look = cfg.get_value("display", "look", "night")
 		compositor_layers = cfg.get_value("display", "compositor_layers", false)
 		control_enabled = cfg.get_value("input", "control", true)
