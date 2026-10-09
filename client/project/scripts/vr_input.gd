@@ -22,8 +22,9 @@ extends Node
 ##
 ## A controller in use always has the pointer, whatever the runtime says about
 ## hands (the Pico reports hand joints even while the controllers are held).
-## One left still for IDLE_HIDE_S (put down) or without a tracked pose gives
-## it up and hides; once every controller has, bare hands get the pointer
+## One left still for IDLE_HIDE_S (put down), without a tracked pose, or that
+## is no controller at all (_not_a_controller()) gives it up and hides; once
+## every controller has, bare hands get the pointer
 ## (hand_input.gd asks any_in_use()). Moving it or pressing a trigger, grip or
 ## button takes it back at once.
 
@@ -132,7 +133,7 @@ var _rest := Transform3D()      ## where a put-down controller lies (smoothed)
 var _last_pose := Transform3D()
 var _was_tracked := false
 var _jump_logged_ms := -10000
-## What this controller does right now, for the log ("pointer", "put down", ...).
+## What this controller does right now and its profile, for the log ("pointer", "put down", ...).
 var _role := ""
 ## Strength of the last vibration asked for (tests read it).
 var last_buzz := 0.0
@@ -171,9 +172,27 @@ func _exit_tree() -> void:
 static func any_in_use() -> bool:
 	return _all.any(func(v: Node) -> bool: return v.in_use())
 
-## Tracked and not put down (a press resets the idle time, like moving it).
+## Tracked and not put down (a press resets the idle time, like moving it),
+## and a controller at all (_not_a_controller()).
 func in_use() -> bool:
-	return controller != null and controller.get_has_tracking_data() and _idle_s < IDLE_HIDE_S
+	return controller != null and controller.get_has_tracking_data() and _idle_s < IDLE_HIDE_S \
+		and not _not_a_controller()
+
+## The runtime binds no profile to this hand: Godot then stops reading it but
+## keeps its last pose and buttons (OpenXRInterface::handle_tracker returns
+## early), so it would still look tracked, and a button down at that moment
+## down for good. Or it drives the hand's path with the bare hand through the
+## simple controller profile, as several runtimes do (the pinch is its
+## trigger): that "controller" moves whenever the hand does.
+func _not_a_controller() -> bool:
+	var profile := _profile()
+	if profile == "/interaction_profiles/none":
+		return true
+	if profile != "/interaction_profiles/khr/simple_controller":
+		return false
+	var hand := XRServer.get_tracker(&"/user/hand_tracker/right" if _is_right() \
+		else &"/user/hand_tracker/left") as XRHandTracker
+	return hand != null and hand.has_tracking_data
 
 func _is_right() -> bool:
 	return String(controller.tracker).contains("right")
@@ -306,7 +325,8 @@ func _process(delta: float) -> void:
 		raycast_origin.visible = false
 		if active == self:
 			active = null
-		_set_role("put down" if controller.get_has_tracking_data() else "untracked")
+		_set_role("untracked" if not controller.get_has_tracking_data() \
+			else ("not a controller" if _not_a_controller() else "put down"))
 		return
 	if active == null:
 		active = self
@@ -661,9 +681,10 @@ func _side() -> String:
 	return "right" if _is_right() else "left"
 
 func _set_role(role: String) -> void:
-	if role != _role:
-		_role = role
-		print("[VRInput] %s controller: %s (profile %s)" % [_side(), role, _profile()])
+	var line := "%s (profile %s)" % [role, _profile()]
+	if line != _role:
+		_role = line
+		print("[VRInput] %s controller: %s" % [_side(), line])
 
 func _profile() -> String:
 	var t := XRServer.get_tracker(controller.tracker) as XRPositionalTracker

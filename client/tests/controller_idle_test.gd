@@ -12,6 +12,10 @@ extends SceneTree
 ##   - the other controller's trigger takes the pointer over;
 ##   - hand joints reported (source unknown, as on the Pico) never take the
 ##     pointer from a controller in use;
+##   - no interaction profile bound (Godot freezes its pose and buttons) is
+##     no controller in use, even with its trigger frozen down, and neither is
+##     the simple controller profile while that hand is tracked (a runtime
+##     mimicking a controller with the bare hand);
 ##   - a controller without a tracked pose counts as put down at once (no
 ##     laser, no model, no clicks, not in use) and is back when tracked again;
 ##   - a trigger press wakes a put-down controller at once, without moving it,
@@ -244,6 +248,42 @@ func _run() -> void:
 	r._set_trigger_state(false)
 	await _frames(1)
 	check(main.sent.slice(mark).any(func(e): return e[2] == 1) and _last()[2] == 0, "and its trigger clicks")
+
+	# --- No profile bound: Godot stops reading it but keeps its last pose and
+	# buttons, so it still looks tracked, and held ----------------------------
+	r._set_trigger_state(true)
+	await _frames(2)
+	pads[&"right_hand"].profile = "/interaction_profiles/none"
+	await _frames(1)
+	check(not r.in_use() and not laser.visible and _last()[2] == 0,
+		"no profile bound to it, trigger frozen down: not in use at once, the click let go")
+	r._set_trigger_state(false)
+
+	# --- The runtime mimicking a controller with the bare hand ---------------
+	# Through the simple controller profile it moves as the hand does and the
+	# pinch is its trigger: that is the hand, not a controller in use.
+	pads[&"right_hand"].profile = "/interaction_profiles/khr/simple_controller"
+	mark = main.sent.size()
+	for i in 12:
+		right.rotate_y(0.01)
+		await process_frame
+	r._set_trigger_state(true)
+	await _frames(2)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(not r.in_use() and not laser.visible and main.sent.slice(mark).all(func(e): return e[2] == 0),
+		"a tracked hand driving the simple controller profile is no controller in use: no laser, no click")
+	hand.has_tracking_data = false
+	r._set_trigger_state(true)
+	r._set_trigger_state(false)
+	await _frames(1)
+	check(r.in_use(), "with no hand tracked, a simple controller is a controller")
+	hand.has_tracking_data = true
+	pads[&"right_hand"].profile = "/interaction_profiles/bytedance/pico4_controller"
+	_aim(right, Vector3(0, 1.25, -1.5))
+	r._set_trigger_state(true)  # takes the pointer back
+	r._set_trigger_state(false)
+	await _frames(2)
 
 	# --- No tracked pose: put down at once, back when tracked -----------------
 	pads[&"right_hand"].invalidate_pose(&"default")

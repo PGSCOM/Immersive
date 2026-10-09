@@ -39,11 +39,14 @@
 ##     It defaults to FALSE since Godot 4.4, and it is what makes Godot request
 ##     XR_EXT_hand_tracking at all.
 ##   • AndroidManifest.xml, written by addons/im2_decoder/im2_decoder.gd:
-##     <meta-data android:name="handtracking" android:value="1"/>, pvr.app.type=vr
-##     and the com.picovr.permission.HAND_TRACKING permission (PICO); Quest wants
+##     <meta-data android:name="handtracking" android:value="1"/>, controller=1
+##     (with it PICO switches between controllers and hands; without, "hands
+##     only"), pvr.app.type=vr and the com.picovr.permission.HAND_TRACKING
+##     permission (PICO); Quest wants
 ##     oculus.software.handtracking / com.oculus.permission.HAND_TRACKING instead.
 ##   • Nothing in the action map: the joint trackers come from
 ##     XR_EXT_hand_tracking alone, not from an interaction profile.
+##   • PICO's Settings → Interaction switching between hands and controllers.
 ##   • No controller in use (PICO has no XR_META_simultaneous_hands_and_
 ##     controllers, so it stops feeding joints while a controller is held).
 ## PICO 4 supports XR_EXT_hand_tracking but not XR_EXT_hand_tracking_data_source,

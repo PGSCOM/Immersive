@@ -66,9 +66,14 @@ class AndroidExportPlugin extends EditorExportPlugin:
 		# handtracking=1 is what tells PICO the app runs without controllers, so
 		# it stops demanding them (godot_openxr_vendors#162: "the Pico 4 insists
 		# that the program doesn't support running with hand tracking" without it).
+		# Alone it is PICO's "hands only" mode; with controller=1 it is
+		# "controllers and hands", the one where the system hands over to the
+		# hands when the controllers are put down and back when one is picked
+		# up (PICO-Unity-OpenXR-SDK, Editor/PICOModifyAndroidManifest.cs).
 		# pvr.app.type=vr keeps PICO from treating the APK as a flat 2D app; the
 		# rest are what its store submission expects (ALVR ships the same set).
 		return "<meta-data android:name=\"handtracking\" android:value=\"1\" />\n" + \
+			"<meta-data android:name=\"controller\" android:value=\"1\" />\n" + \
 			"<meta-data android:name=\"pvr.app.type\" android:value=\"vr\" />\n" + \
 			"<meta-data android:name=\"pvr.sdk.version\" android:value=\"OpenXR\" />\n" + \
 			"<meta-data android:name=\"pvr.display.orientation\" android:value=\"180\" />\n" + \
