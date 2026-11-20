@@ -1,0 +1,18 @@
+{
+ "workbench.startupEditor": "none",
+ "security.workspace.trust.enabled": false,
+ "window.zoomLevel": 1.5,
+ "workbench.tips.enabled": false,
+ "update.mode": "none",
+ "telemetry.telemetryLevel": "off",
+ "chat.disableAIFeatures": true,
+ "workbench.secondarySideBar.defaultVisibility": "hidden",
+ "window.restoreWindows": "none",
+ "window.newWindowDimensions": "maximized",
+ "extensions.ignoreRecommendations": true,
+ "git.enabled": false,
+ "workbench.layoutControl.enabled": false,
+ "window.commandCenter": false,
+ "editor.cursorBlinking": "solid",
+ "files.autoSave": "off"
+}

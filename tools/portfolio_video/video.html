@@ -1,0 +1,5 @@
+<!doctype html><html><body style="margin:0;background:#000;overflow:hidden">
+<!-- 0.4x: Movie Maker graba al ~40 % de tiempo real, así el vídeo final va a su velocidad. -->
+<video id="v" src="clip.mp4#t=24" autoplay muted loop playsinline style="width:100vw;height:100vh;object-fit:cover"></video>
+<script>const v = document.getElementById('v'); v.playbackRate = 0.4; v.addEventListener('play', () => v.playbackRate = 0.4);</script>
+</body></html>
