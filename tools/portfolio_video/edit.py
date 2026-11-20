@@ -6,7 +6,7 @@
 Lee las marcas "MARK <frame> <escena>" de $IM2_VIDEO_WORK/godot.log, recorta
 la espera inicial (de "intro" a "end") y codifica H.264 1080p30 con
 faststart, sin audio ni textos. CRF (por defecto 28) elige la calidad: 28
-deja los 70 s en ~22 MB, por debajo de los 25 MB por fichero de Cloudflare.
+deja los 70 s en ~24 MB, por debajo de los 25 MB por fichero de Cloudflare.
 """
 import os
 import re

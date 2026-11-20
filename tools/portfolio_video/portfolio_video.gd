@@ -212,59 +212,12 @@ func _run() -> void:
 	look_goal = centre.global_position
 	await _wait(50)
 
-	# --- 2. Ratón y teclado: escribir en VS Code desde la VR ----------------
-	mark("control")
 	_hand_from_head()
 	pointer.global_basis = Basis.looking_at(centre.global_position + Vector3(0, -0.6, 0) - hand_pos)
 	pointer.visible = true
-	var at: Vector3 = centre.to_global(centre.local_point(CLICK_PX.x / 1920.0, CLICK_PX.y / 1080.0))
-	await _aim(at, 30)
-	await _wait(8)
-	await _click()
 	await _wait(10)
-	main.toggle_virtual_keyboard()
-	var kb: Node3D = main.virtual_keyboard
-	check(kb.visible, "the VR keyboard opens")
-	_place_facing_head(kb, 0.62, 0.24)
-	look_goal = centre.global_position.lerp(kb.global_position, 0.45)
-	await _wait(25)
-	for ch in TYPED:
-		var key: Button = null
-		for k in kb._keys:
-			if (ch == " " and k.def[2] == 0x20) or (ch != " " and k.def[0] == ch):
-				key = k.button
-				break
-		if key == null:
-			check(false, "key for '%s'" % ch)
-			continue
-		var uv: Vector2 = key.get_global_rect().get_center() / Vector2(kb.VIEW_SIZE)
-		var p: Vector3 = kb._quad.to_global(Vector3((uv.x - 0.5) * kb.WIDTH_M, (0.5 - uv.y) * kb.HEIGHT_M, 0))
-		await _aim(p, 6)
-		await _click(3)
-	await _wait(10)
-	main.toggle_virtual_keyboard()
-	pointer.visible = false
-	# Acercarse a leer lo escrito y volver.
-	var origin: Node3D = main.get_node("XROrigin3D")
-	var o0: Vector3 = origin.position
-	var line: Vector3 = centre.to_global(centre.local_point(0.42, CLICK_PX.y / 1080.0))
-	var closer: Vector3 = (line - cam.global_position).normalized() * 1.35
-	closer.y *= 0.5
-	look_goal = line
-	for i in 45:
-		origin.position = o0 + closer * smoothstep(0.0, 1.0, float(i + 1) / 45)
-		await _step()
-	await _wait(65)
-	look_goal = centre.global_position
-	for i in 40:
-		origin.position = o0 + closer * (1.0 - smoothstep(0.0, 1.0, float(i + 1) / 40))
-		await _step()
-	_hand_from_head()
-	pointer.global_basis = Basis.looking_at(centre.global_position - hand_pos)
-	pointer.visible = true
-	await _wait(15)
 
-	# --- 3. Colocar las pantallas: mover, encajar, redimensionar ------------
+	# --- 2. Colocar las pantallas: mover, encajar, redimensionar ------------
 	mark("layout")
 	pitch_goal = 12.0
 	var land: Transform3D = centre.landing_beside(load("res://scripts/screen_panel.gd").Side.TOP,
@@ -303,7 +256,7 @@ func _run() -> void:
 	check(centre.panel_width > w0 + 0.1, "dragging the corner makes it bigger")
 	await _wait(40)
 
-	# --- 4. El menú: pestañas y ambiente -------------------------------------
+	# --- 3. El menú: pestañas y ambiente -------------------------------------
 	mark("menu")
 	main.toggle_ui_overlay()
 	var ui: Node3D = main.ui_overlay
@@ -325,7 +278,7 @@ func _run() -> void:
 	main.toggle_ui_overlay()
 	await _wait(10)
 
-	# --- 5. La pizarra ------------------------------------------------------
+	# --- 4. La pizarra ------------------------------------------------------
 	mark("whiteboard")
 	main.toggle_whiteboard()
 	var wb: Node3D = main.whiteboard
@@ -373,7 +326,7 @@ func _run() -> void:
 	main.toggle_whiteboard()
 	await _wait(8)
 
-	# --- 6. Una pantalla virtual -------------------------------------------
+	# --- 5. Una pantalla virtual -------------------------------------------
 	mark("virtual")
 	main.select_monitor(0)  # tres a la vez: deja sitio quitando el portfolio
 	await _wait(15)
@@ -397,6 +350,56 @@ func _run() -> void:
 			look_goal = virt.global_position
 			await _swing(vbar, vbar + cam.global_basis * Vector3(0.0, 0.12, 0.0), 35)
 			_drop(virt)
+	# --- 6. Ratón y teclado: escribir en VS Code desde la VR ----------------
+	mark("control")
+	pitch_goal = 6.0  # el teclado va abajo
+	look_goal = centre.global_position
+	_hand_from_head()
+	pointer.visible = true
+	var at: Vector3 = centre.to_global(centre.local_point(CLICK_PX.x / 1920.0, CLICK_PX.y / 1080.0))
+	await _aim(at, 30)
+	await _wait(8)
+	await _click()
+	await _wait(10)
+	main.toggle_virtual_keyboard()
+	var kb: Node3D = main.virtual_keyboard
+	check(kb.visible, "the VR keyboard opens")
+	_place_facing_head(kb, 0.62, 0.24)
+	look_goal = centre.global_position.lerp(kb.global_position, 0.45)
+	await _wait(25)
+	for ch in TYPED:
+		var key: Button = null
+		for k in kb._keys:
+			if (ch == " " and k.def[2] == 0x20) or (ch != " " and k.def[0] == ch):
+				key = k.button
+				break
+		if key == null:
+			check(false, "key for '%s'" % ch)
+			continue
+		var uv: Vector2 = key.get_global_rect().get_center() / Vector2(kb.VIEW_SIZE)
+		var p: Vector3 = kb._quad.to_global(Vector3((uv.x - 0.5) * kb.WIDTH_M, (0.5 - uv.y) * kb.HEIGHT_M, 0))
+		await _aim(p, 6)
+		await _click(3)
+	await _wait(10)
+	main.toggle_virtual_keyboard()
+	pointer.visible = false
+	# Acercarse a leer lo escrito y volver.
+	var origin: Node3D = main.get_node("XROrigin3D")
+	var o0: Vector3 = origin.position
+	var line: Vector3 = centre.to_global(centre.local_point(0.42, CLICK_PX.y / 1080.0))
+	var closer: Vector3 = (line - cam.global_position).normalized() * 1.35
+	closer.y *= 0.5
+	look_goal = line
+	for i in 45:
+		origin.position = o0 + closer * smoothstep(0.0, 1.0, float(i + 1) / 45)
+		await _step()
+	await _wait(65)
+	look_goal = centre.global_position
+	for i in 40:
+		origin.position = o0 + closer * (1.0 - smoothstep(0.0, 1.0, float(i + 1) / 40))
+		await _step()
+	await _wait(10)
+
 	# Plano final
 	mark("outro")
 	pointer.visible = false

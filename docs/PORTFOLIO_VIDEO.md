@@ -14,11 +14,11 @@ verdad capturado y codificado en directo.
 | Escena | Qué pasa |
 |---|---|
 | intro | Tres monitores del PC flotando en arco: el portfolio en Chrome, VS Code con el código del host y un vídeo reproduciéndose |
-| control | Clic con el láser en VS Code y, con el teclado VR, se escribe `// hola desde las gafas`; la cámara se acerca a leerlo |
 | layout | El monitor del vídeo se coge por su barra y se encaja encima del de VS Code (marco de encaje), los dos se mueven juntos, y el de en medio crece desde su esquina |
 | menu | El menú: pestañas Screens, Quality y Space, y el ambiente pasa de *Night* a *Dusk* |
 | whiteboard | La pizarra: un monitor, una flecha y unas gafas dibujados con el láser |
 | virtual | Se quita un monitor y se pide una pantalla virtual de 1920x1080: el host la crea como monitor RandR y aparece la página del repo en GitHub |
+| control | Al final, porque no es lo principal del programa: clic con el láser en VS Code y, con el teclado VR, se escribe `// hola desde las gafas`; la cámara se acerca a leerlo |
 | outro | Plano general |
 
 ## Cómo está montado
@@ -62,7 +62,7 @@ verdad capturado y codificado en directo.
 
 4. **`edit.py`** recorta la espera inicial (de la marca `intro` a `end`) y
    codifica H.264 (`-preset slow`, `yuv420p`, `+faststart`). `CRF` elige la
-   calidad; el 28 por defecto deja los 70 s en ~22 MB.
+   calidad; el 28 por defecto deja los 70 s en ~24 MB.
 
 ## Detalles que no son obvios
 
@@ -78,7 +78,7 @@ verdad capturado y codificado en directo.
 - **El nombre del PC.** El menú lo enseña; la coreografía lo cambia por
   `workstation` con `ui_overlay.set_host_label()` justo antes de abrirlo.
 - **Encuadre.** La cámara mira 6° por encima de lo que sigue (12° desde que
-  hay una pantalla encajada arriba). Venía de una versión con rótulos arriba a
+  hay una pantalla encajada arriba; vuelve a 6° para el teclado, que va abajo). Venía de una versión con rótulos arriba a
   la izquierda; sin ellos se queda porque deja aire sobre las pantallas.
 
 ## Volver a grabarlo
@@ -101,12 +101,15 @@ tecleado en VS Code se queda y el clic de la siguiente cae en otra línea.
 
 ## Dónde está el vídeo
 
-En el repo del portfolio, `public/proyvid/immersive-vr.mp4` (22 MB, por
+En el repo del portfolio, `public/proyvid/immersive-vr.mp4` (24 MB, por
 debajo de los 25 MB por fichero de Cloudflare Pages, así que va directo y el
 build lo pasa a HLS). Un solo fichero para todo en
 `src/content/proyectos/immersive.md`: `trailer` (fondo del hero), `video` (la
 tarjeta) y la sección *Demo* de la ficha, con controles. La imagen de la
-tarjeta (`src/assets/proyectos/immersive.webp`) es el plano final de la toma.
+tarjeta (`src/assets/proyectos/immersive.webp`) es el fotograma de los 49 s
+(atardecer: el vídeo encajado sobre VS Code, GitHub al lado y el láser),
+recortado a 1440x810 para que las pantallas llenen la imagen y escalado a
+1280x720.
 
 El nombre lleva `-vr` porque hubo una versión anterior `immersive.mp4` con
 rótulos: con otra URL, un navegador con sus segmentos HLS en caché no la
